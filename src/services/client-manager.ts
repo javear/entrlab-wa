@@ -136,7 +136,7 @@ export class WPPConnectClientManager {
       });
 
       // Set up ready handler
-      client.onStateChange((state) => {
+      client.onStateChange(async (state) => {
         console.log(`🔄 WPPConnect client ${clientId} state changed: ${state}`);
         if (state === 'CONNECTED') {
           // Update client to ready state when connected
@@ -146,6 +146,17 @@ export class WPPConnectClientManager {
             clientInfo.isReady = true;
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
+            
+            // Manually save session to MongoDB after successful connection
+            try {
+              const sessionToken = await client.getSessionTokenBrowser();
+              if (sessionToken && this.tokenStore) {
+                await this.tokenStore.setToken(clientId, sessionToken);
+                console.log(`💾 Manually saved WPPConnect session to MongoDB: ${clientId}`);
+              }
+            } catch (error) {
+              console.error(`❌ Error manually saving session for ${clientId}:`, error);
+            }
           }
           this.updateClientPhoneNumber(clientId);
         }
@@ -268,7 +279,9 @@ export class WPPConnectClientManager {
     }
 
     try {
-      await clientInfo.client.close();
+      if (clientInfo.client) {
+        await clientInfo.client.close();
+      }
       this.clients.delete(clientId);
       console.log(`✅ WPPConnect client ${clientId} disconnected successfully`);
       return true;
@@ -384,7 +397,9 @@ export class WPPConnectClientManager {
     // Disconnect all clients
     for (const [clientId, clientInfo] of this.clients) {
       try {
-        await clientInfo.client.close();
+        if (clientInfo.client) {
+          await clientInfo.client.close();
+        }
         console.log(`✅ WPPConnect client ${clientId} disconnected successfully`);
       } catch (error) {
         console.error(`❌ Error disconnecting WPPConnect client ${clientId}:`, error);

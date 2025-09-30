@@ -104,14 +104,16 @@ export class WPPConnectMongoTokenStore {
    */
   async getToken(sessionName: string): Promise<any | null> {
     try {
+      console.log(`🔍 TokenStore.getToken() called for: ${sessionName}`);
       const session = await WPPConnectSession.findOne({ sessionName });
       
       if (session) {
-        console.log(`📥 Retrieved WPPConnect session: ${sessionName}`);
+        console.log(`📥 Retrieved WPPConnect session from MongoDB: ${sessionName}`);
+        console.log(`📥 Token data keys: ${Object.keys(session.tokenData || {}).join(', ')}`);
         return session.tokenData;
       }
       
-      console.log(`⚠️  No WPPConnect session found: ${sessionName}`);
+      console.log(`⚠️  No WPPConnect session found in MongoDB: ${sessionName}`);
       return null;
     } catch (error) {
       console.error(`❌ Error getting WPPConnect token for ${sessionName}:`, error);
