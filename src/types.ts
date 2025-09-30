@@ -1,4 +1,4 @@
-import { Message, Chat } from 'whatsapp-web.js';
+// Removed whatsapp-web.js imports - now using WPPConnect
 import { Collection } from 'lokijs';
 
 // Environment variables interface
@@ -7,6 +7,7 @@ export interface Environment {
   M_WAITING_TIME?: string | undefined;
   CHROMIUM_PATH?: string | undefined;
   WHITELISTED_NUMBERS?: string | undefined;
+  ALLOWED_NUMBERS?: string | undefined;
   FW_ENDPOINT?: string | undefined;
   FW_AUTH_TOKEN?: string | undefined;
   JWT_SECRET?: string | undefined;
@@ -60,7 +61,7 @@ export interface Database {
 
 // Message queue interfaces
 export interface QueuedMessage {
-  message: Message;
+  message: any; // WPPConnect message object
   timestamp: number;
 }
 
@@ -103,7 +104,7 @@ export interface WhatsAppClient {
     };
   };
   initialize: () => void;
-  sendMessage: (chatId: string, content: string) => Promise<Message>;
+  sendMessage: (chatId: string, content: string) => Promise<any>;
   on: (event: string, callback: (...args: any[]) => void) => void;
 }
 

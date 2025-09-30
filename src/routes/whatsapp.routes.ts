@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { WhatsAppController } from '../controllers/whatsapp.controller';
+import { WPPConnectWhatsAppController } from '../controllers/whatsapp.controller';
 
-export function createWhatsAppRoutes(whatsappController: WhatsAppController): Router {
+export function createWhatsAppRoutes(whatsappController: WPPConnectWhatsAppController): Router {
     const router = Router();
 
     // Client Management Routes
@@ -13,8 +13,7 @@ export function createWhatsAppRoutes(whatsappController: WhatsAppController): Ro
     router.post('/clients/:clientId/send', (req, res) => whatsappController.sendMessage(req, res));
     router.post('/clients/:clientId/disconnect', (req, res) => whatsappController.disconnectClient(req, res));
     router.delete('/clients/:clientId', (req, res) => whatsappController.removeClient(req, res));
-    router.post('/clients/:clientId/recover', (req, res) => whatsappController.recoverClient(req, res));
-    router.post('/clients/:clientId/reset-to-qr', (req, res) => whatsappController.resetToQRScanning(req, res));
+    // Note: WPPConnect doesn't have recover/reset methods - clients are managed differently
     
     // Client-Agent Assignment routes
     router.put('/clients/:clientId/agent', (req, res) => whatsappController.updateClientAgent(req, res));
@@ -23,9 +22,9 @@ export function createWhatsAppRoutes(whatsappController: WhatsAppController): Ro
     
     router.get('/clients/:clientId', (req, res) => whatsappController.getClientStatus(req, res));
 
-    // QR Code Management Routes
-    router.get('/qr', (req, res) => whatsappController.getQRCode(req, res));
-    router.post('/qr/:clientId/refresh', (req, res) => whatsappController.refreshQRCode(req, res));
+    // QR Code Management Routes (WPPConnect handles QR differently)
+    // router.get('/qr', (req, res) => whatsappController.getQRCode(req, res));
+    // router.post('/qr/:clientId/refresh', (req, res) => whatsappController.refreshQRCode(req, res));
 
     // Health and Status Routes
     router.get('/health', (req, res) => whatsappController.getHealthStatus(req, res));

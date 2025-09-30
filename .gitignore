@@ -62,3 +62,6 @@ temp/
 RemoteAuth-*.zip
 *.wwebjs_auth
 *.wwebjs_cache
+
+# WPPConnect browser session files
+tokens/

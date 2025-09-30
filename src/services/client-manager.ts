@@ -1,0 +1,401 @@
+import { create, Whatsapp } from '@wppconnect-team/wppconnect';
+import mongoose from 'mongoose';
+import { WPPConnectMongoTokenStore } from './tokenstore';
+
+// ============================================
+// WPPConnect Client Manager
+// ============================================
+
+export interface WPPConnectClientInfo {
+  clientId: string;
+  client: Whatsapp;
+  isReady: boolean;
+  phoneNumber?: string | undefined;
+  qrCode?: string | undefined;
+  lastActivity: Date;
+  status: 'initializing' | 'qr_required' | 'authenticated' | 'ready' | 'disconnected' | 'error' | 'session_saved';
+  ai_agent_code?: string | undefined;
+}
+
+export interface WPPConnectClientManagerConfig {
+  chromiumPath: string;
+  puppeteerArgs: string[];
+  mongoUri: string;
+  backupSyncIntervalMs?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  healthCheckIntervalMs?: number;
+}
+
+export class WPPConnectClientManager {
+  private clients: Map<string, WPPConnectClientInfo> = new Map();
+  private config: WPPConnectClientManagerConfig;
+  private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
+  private tokenStore: WPPConnectMongoTokenStore | null = null;
+  private isMongoConnected: boolean = false;
+  private healthCheckInterval: NodeJS.Timeout | null = null;
+  private retryAttempts: Map<string, number> = new Map();
+
+  constructor(config: WPPConnectClientManagerConfig) {
+    this.config = config;
+  }
+
+  public async initialize(): Promise<void> {
+    await this.initializeMongoDB();
+    this.startHealthCheck();
+  }
+
+  private async initializeMongoDB(): Promise<void> {
+    try {
+      if (mongoose.connection.readyState === 1) {
+        this.isMongoConnected = true;
+        this.tokenStore = new WPPConnectMongoTokenStore();
+        await this.tokenStore.connect();
+        console.log('✅ WPPConnect MongoDB TokenStore initialized');
+      } else {
+        throw new Error('MongoDB connection not available');
+      }
+    } catch (error) {
+      console.error('❌ Failed to initialize WPPConnect MongoDB:', error);
+      throw error;
+    }
+  }
+
+  public async createClient(clientId: string): Promise<WPPConnectClientInfo> {
+    if (this.clients.has(clientId)) {
+      throw new Error(`Client with ID '${clientId}' already exists`);
+    }
+
+    console.log(`🚀 Creating new WPPConnect client: ${clientId}`);
+
+    if (!this.isMongoConnected || !this.tokenStore) {
+      throw new Error('MongoDB connection is required. Please ensure MONGODB_URI is set and MongoDB is connected.');
+    }
+
+    console.log(`🔗 Using WPPConnect MongoDB TokenStore for client ${clientId}`);
+
+    // Add placeholder client info immediately so it's queryable
+    const placeholderClientInfo: WPPConnectClientInfo = {
+      clientId,
+      client: null as any, // Will be set after creation
+      isReady: false,
+      lastActivity: new Date(),
+      status: 'initializing'
+    };
+    this.clients.set(clientId, placeholderClientInfo);
+    console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
+
+    try {
+      // Create WPPConnect client with MongoDB TokenStore
+      const client = await create({
+        session: clientId,
+        tokenStore: this.tokenStore,
+        
+        // Browser configuration
+        headless: true,
+        devtools: false,
+        useChrome: true,
+        debug: false,
+        logQR: false, // Disable console QR - use API endpoint instead
+        
+        // Browser arguments (optimized for memory)
+        browserArgs: this.config.puppeteerArgs,
+        
+        // Callbacks
+        statusFind: (statusSession, session) => {
+          console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
+          this.updateClientStatus(clientId, statusSession);
+        },
+        
+        catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
+          console.log(`📱 QR Code generated for ${clientId} (attempt ${attempts}) - Access via /api/whatsapp/clients/${clientId}/qr-image`);
+          this.updateClientQR(clientId, base64Qr);
+        },
+        
+        // Auto-close settings
+        autoClose: 60000,
+        
+        // Additional options
+        disableWelcome: true,
+        updatesLog: true
+      });
+
+      console.log(`✅ WPPConnect client created: ${clientId}`);
+
+      // Set up message handler
+      client.onMessage(async (message) => {
+        console.log(`📨 Message received on WPPConnect client ${clientId}:`, message.body);
+        for (const handler of this.messageHandlers) {
+          try {
+            await handler(clientId, message);
+          } catch (error) {
+            console.error(`❌ Error in message handler for ${clientId}:`, error);
+          }
+        }
+      });
+
+      // Set up ready handler
+      client.onStateChange((state) => {
+        console.log(`🔄 WPPConnect client ${clientId} state changed: ${state}`);
+        if (state === 'CONNECTED') {
+          // Update client to ready state when connected
+          const clientInfo = this.clients.get(clientId);
+          if (clientInfo) {
+            clientInfo.status = 'ready';
+            clientInfo.isReady = true;
+            clientInfo.lastActivity = new Date();
+            console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
+          }
+          this.updateClientPhoneNumber(clientId);
+        }
+      });
+
+      // Update the placeholder with the actual client instance
+      const existingClientInfo = this.clients.get(clientId);
+      if (existingClientInfo) {
+        existingClientInfo.client = client;
+        existingClientInfo.lastActivity = new Date();
+        console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
+        return existingClientInfo;
+      } else {
+        // Fallback if somehow the placeholder was removed
+        const clientInfo: WPPConnectClientInfo = {
+          clientId,
+          client,
+          isReady: false,
+          lastActivity: new Date(),
+          status: 'initializing'
+        };
+        this.clients.set(clientId, clientInfo);
+        console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
+        return clientInfo;
+      }
+
+    } catch (error) {
+      console.error(`❌ Failed to create WPPConnect client ${clientId}:`, error);
+      // Remove the placeholder client if creation failed
+      this.clients.delete(clientId);
+      console.log(`🗑️  Removed failed client ${clientId} from map`);
+      throw error;
+    }
+  }
+
+  private updateClientStatus(clientId: string, status: string): void {
+    const clientInfo = this.clients.get(clientId);
+    if (clientInfo) {
+      switch (status) {
+        case 'isLogged':
+        case 'qrReadSuccess':
+        case 'inChat':
+          // Client is authenticated and ready
+          clientInfo.status = 'ready';
+          clientInfo.isReady = true;
+          console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
+          break;
+        case 'notLogged':
+          clientInfo.status = 'qr_required';
+          clientInfo.isReady = false;
+          break;
+        case 'browserClose':
+        case 'autocloseCalled':
+        case 'qrReadError':
+        case 'qrReadFail':
+          // Auto-close or QR error means authentication failed
+          // Remove the client from the map as it's no longer valid
+          console.log(`🗑️  Removing client ${clientId} - Authentication failed or auto-close (${status})`);
+          this.clients.delete(clientId);
+          return;
+        case 'desconnectedMobile':
+        case 'serverClose':
+          clientInfo.status = 'disconnected';
+          clientInfo.isReady = false;
+          console.log(`📴 WPPConnect client ${clientId} disconnected: ${status}`);
+          break;
+        default:
+          // Don't override status if we don't recognize it
+          console.log(`ℹ️  WPPConnect client ${clientId} unknown status: ${status}`);
+      }
+      clientInfo.lastActivity = new Date();
+    }
+  }
+
+  private updateClientQR(clientId: string, qrCode: string): void {
+    const clientInfo = this.clients.get(clientId);
+    if (clientInfo) {
+      clientInfo.qrCode = qrCode;
+      clientInfo.status = 'qr_required';
+      clientInfo.lastActivity = new Date();
+    }
+  }
+
+  private async updateClientPhoneNumber(clientId: string): Promise<void> {
+    const clientInfo = this.clients.get(clientId);
+    if (clientInfo && clientInfo.client) {
+      try {
+        const phoneNumber = await clientInfo.client.getHostDevice();
+        if (phoneNumber && phoneNumber.id) {
+          clientInfo.phoneNumber = phoneNumber.id;
+          console.log(`📞 WPPConnect client ${clientId} phone number: ${phoneNumber.id}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error getting phone number for ${clientId}:`, error);
+      }
+    }
+  }
+
+  public async sendMessage(clientId: string, number: string, message: string): Promise<boolean> {
+    const clientInfo = this.clients.get(clientId);
+    if (!clientInfo || !clientInfo.isReady) {
+      throw new Error(`Client ${clientId} is not ready`);
+    }
+
+    try {
+      const formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
+      const result = await clientInfo.client.sendText(formattedNumber, message);
+      console.log(`✅ Message sent via WPPConnect client ${clientId}:`, result);
+      return true;
+    } catch (error) {
+      console.error(`❌ Error sending message via WPPConnect client ${clientId}:`, error);
+      throw error;
+    }
+  }
+
+  public async disconnectClient(clientId: string): Promise<boolean> {
+    const clientInfo = this.clients.get(clientId);
+    if (!clientInfo) {
+      return false;
+    }
+
+    try {
+      await clientInfo.client.close();
+      this.clients.delete(clientId);
+      console.log(`✅ WPPConnect client ${clientId} disconnected successfully`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Error disconnecting WPPConnect client ${clientId}:`, error);
+      return false;
+    }
+  }
+
+  public getClient(clientId: string): WPPConnectClientInfo | undefined {
+    return this.clients.get(clientId);
+  }
+
+  public getAllClients(): WPPConnectClientInfo[] {
+    return Array.from(this.clients.values());
+  }
+
+  public addMessageHandler(handler: (clientId: string, message: any) => Promise<void>): void {
+    this.messageHandlers.push(handler);
+  }
+
+  public async restoreExistingSessions(): Promise<void> {
+    if (!this.tokenStore) {
+      throw new Error('TokenStore not initialized');
+    }
+
+    try {
+      const sessions = await this.tokenStore.listSessions();
+      console.log(`📋 Found ${sessions.length} existing WPPConnect sessions in MongoDB`);
+
+      for (const session of sessions) {
+        const clientId = session.sessionName;
+        console.log(`🔄 Restoring WPPConnect session for client: ${clientId}`);
+        
+        try {
+          await this.createClient(clientId);
+          console.log(`✅ Successfully restored WPPConnect session for client: ${clientId}`);
+        } catch (error) {
+          console.error(`❌ Failed to restore WPPConnect session for client ${clientId}:`, error);
+        }
+      }
+
+      console.log('✅ WPPConnect session restoration completed');
+    } catch (error) {
+      console.error('❌ Error restoring WPPConnect sessions:', error);
+      throw error;
+    }
+  }
+
+  private startHealthCheck(): void {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
+    this.healthCheckInterval = setInterval(async () => {
+      await this.performHealthCheck();
+    }, this.config.healthCheckIntervalMs || 300000); // 5 minutes default
+
+    console.log(`🏥 WPPConnect health check started with ${this.config.healthCheckIntervalMs || 300000}ms interval`);
+  }
+
+  private async performHealthCheck(): Promise<void> {
+    for (const [clientId, clientInfo] of this.clients) {
+      try {
+        if (clientInfo.isReady) {
+          // Test if client is still responsive
+          const isConnected = await clientInfo.client.isConnected();
+          if (!isConnected) {
+            console.log(`⚠️ WPPConnect client ${clientId} is not connected, marking as disconnected`);
+            clientInfo.status = 'disconnected';
+            clientInfo.isReady = false;
+          }
+        }
+      } catch (error) {
+        console.error(`⚠️ Health check failed for WPPConnect client ${clientId}:`, error);
+        clientInfo.status = 'error';
+        clientInfo.isReady = false;
+      }
+    }
+  }
+
+  public isHealthy(): boolean {
+    const readyClients = Array.from(this.clients.values()).filter(client => client.isReady);
+    return readyClients.length > 0;
+  }
+
+  public getHealthStatus(): any {
+    const clients = Array.from(this.clients.values());
+    const readyClients = clients.filter(client => client.isReady);
+    const errorClients = clients.filter(client => client.status === 'error');
+
+    return {
+      totalClients: clients.length,
+      readyClients: readyClients.length,
+      errorClients: errorClients.length,
+      isHealthy: readyClients.length > 0,
+      clients: clients.map(client => ({
+        clientId: client.clientId,
+        status: client.status,
+        isReady: client.isReady,
+        hasQrCode: !!client.qrCode,
+        phoneNumber: client.phoneNumber,
+        lastActivity: client.lastActivity
+      }))
+    };
+  }
+
+  public async cleanup(): Promise<void> {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
+    // Disconnect all clients
+    for (const [clientId, clientInfo] of this.clients) {
+      try {
+        await clientInfo.client.close();
+        console.log(`✅ WPPConnect client ${clientId} disconnected successfully`);
+      } catch (error) {
+        console.error(`❌ Error disconnecting WPPConnect client ${clientId}:`, error);
+      }
+    }
+
+    this.clients.clear();
+
+    if (this.tokenStore) {
+      await this.tokenStore.disconnect();
+    }
+  }
+}
+
+export default WPPConnectClientManager;

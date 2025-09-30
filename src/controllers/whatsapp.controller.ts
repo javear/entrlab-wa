@@ -1,1148 +1,665 @@
 import { Request, Response } from 'express';
-import { WhatsAppService } from '../services/whatsapp.service';
+import { WPPConnectWhatsAppService } from '../services/whatsapp.service';
+import { WPPConnectMessageHandler } from '../core/message-handler';
+import { Environment } from '../types';
 
-export class WhatsAppController {
-    constructor(private whatsappService: WhatsAppService) {}
+// ============================================
+// WPPConnect WhatsApp Controller
+// ============================================
 
-    /**
-     * @swagger
-     * /api/whatsapp/clients:
-     *   post:
-     *     summary: Create a new WhatsApp client
-     *     description: Creates a new WhatsApp client with the specified client ID. The client will generate a QR code for authentication.
-     *     tags: [Client Management]
-     *     requestBody:
-     *       required: true
-     *       content:
-     *         application/json:
-     *           schema:
-     *             $ref: '#/components/schemas/CreateClientRequest'
-     *     responses:
-     *       201:
-     *         description: Client created successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 message:
-     *                   type: string
-     *                   example: "Client javear-account created successfully"
-     *                 client:
-     *                   $ref: '#/components/schemas/ClientInfo'
-     *       400:
-     *         description: Bad request - Client ID is required
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async createClient(req: Request, res: Response) {
-        try {
-            const { clientId } = req.body;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
+export class WPPConnectWhatsAppController {
+  constructor(
+    private whatsappService: WPPConnectWhatsAppService,
+    private messageHandler: WPPConnectMessageHandler,
+    private env: Environment
+  ) {}
 
-            const clientInfo = await this.whatsappService.createClient(clientId);
-            
-            // Return clean client data without circular references
-            const cleanClient = {
-                clientId: clientInfo.clientId,
-                status: clientInfo.status,
-                isReady: clientInfo.isReady,
-                phoneNumber: clientInfo.phoneNumber,
-                hasQrCode: !!clientInfo.qrCode,
-                lastActivity: clientInfo.lastActivity ? clientInfo.lastActivity.toISOString() : null
-            };
-            
-            return res.status(201).json({
-                success: true,
-                message: `Client ${clientId} created successfully`,
-                client: cleanClient
-            });
-            
-        } catch (error) {
-            console.error('❌ Error creating client:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
+  /**
+   * @swagger
+   * /api/whatsapp/clients:
+   *   post:
+   *     summary: Create a new WPPConnect WhatsApp client
+   *     tags: [WPPConnect WhatsApp]
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - clientId
+   *             properties:
+   *               clientId:
+   *                 type: string
+   *                 description: Unique identifier for the client
+   *                 example: "my-whatsapp-client"
+   *     responses:
+   *       201:
+   *         description: Client created successfully
+   *       400:
+   *         description: Bad request
+   *       500:
+   *         description: Internal server error
+   */
+  async createClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.body;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      // Start client creation asynchronously (don't await)
+      this.whatsappService.createClient(clientId).catch((error) => {
+        console.error(`❌ Error creating WPPConnect client ${clientId}:`, error);
+      });
+      
+      // Return immediately with initializing status
+      res.status(202).json({
+        success: true,
+        message: 'WPPConnect client creation started',
+        client: {
+          clientId: clientId,
+          status: 'initializing',
+          isReady: false,
+          hasQrCode: false,
+          phoneNumber: null,
+          message: 'Client is being initialized. Poll GET /api/whatsapp/clients/{clientId} to check status and QR code availability.'
         }
+      });
+    } catch (error) {
+      console.error('❌ Error starting WPPConnect client creation:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to start WPPConnect client creation',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    /**
-     * @swagger
-     * /api/whatsapp/clients:
-     *   get:
-     *     summary: Get all WhatsApp clients
-     *     description: Retrieves a list of all WhatsApp clients and their current status
-     *     tags: [Client Management]
-     *     responses:
-     *       200:
-     *         description: List of clients retrieved successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 clients:
-     *                   type: array
-     *                   items:
-     *                     $ref: '#/components/schemas/ClientInfo'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async getAllClients(req: Request, res: Response) {
-        try {
-            const clients = this.whatsappService.getAllClients();
-            
-            // Return clean client data without circular references
-            const cleanClients = clients.map(client => ({
-                clientId: client.clientId,
-                status: client.status,
-                isReady: client.isReady,
-                phoneNumber: client.phoneNumber,
-                hasQrCode: !!client.qrCode,
-                lastActivity: client.lastActivity ? client.lastActivity.toISOString() : null,
-                ai_agent_code: client.ai_agent_code || null
-            }));
-            
-            return res.status(200).json({
-                success: true,
-                clients: cleanClients,
-                total: clients.length
-            });
-            
-        } catch (error) {
-            console.error('❌ Error getting clients:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
+  /**
+   * @swagger
+   * /api/whatsapp/clients:
+   *   get:
+   *     summary: Get all WPPConnect WhatsApp clients
+   *     tags: [WPPConnect WhatsApp]
+   *     responses:
+   *       200:
+   *         description: List of all clients
+   */
+  async getAllClients(req: Request, res: Response): Promise<void> {
+    try {
+      const clients = this.whatsappService.getAllClients();
+      
+      res.json({
+        success: true,
+        clients: clients.map(client => ({
+          clientId: client.clientId,
+          status: client.status,
+          isReady: client.isReady,
+          hasQrCode: !!client.qrCode,
+          phoneNumber: client.phoneNumber,
+          lastActivity: client.lastActivity
+        }))
+      });
+    } catch (error) {
+      console.error('❌ Error getting WPPConnect clients:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get WPPConnect clients',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}:
+   *   get:
+   *     summary: Get WPPConnect client status
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Client status
+   *       404:
+   *         description: Client not found
+   */
+  async getClientStatus(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const client = this.whatsappService.getClient(clientId);
+
+      if (!client) {
+        res.status(404).json({
+          success: false,
+          message: 'WPPConnect client not found'
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        client: {
+          clientId: client.clientId,
+          status: client.status,
+          isReady: client.isReady,
+          hasQrCode: !!client.qrCode,
+          phoneNumber: client.phoneNumber,
+          lastActivity: client.lastActivity
         }
+      });
+    } catch (error) {
+      console.error('❌ Error getting WPPConnect client status:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get WPPConnect client status',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}:
-     *   get:
-     *     summary: Get client status
-     *     description: Retrieves the current status and information for a specific WhatsApp client
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *         example: "javear-account"
-     *     responses:
-     *       200:
-     *         description: Client status retrieved successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 client:
-     *                   $ref: '#/components/schemas/ClientInfo'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}:
-     *   get:
-     *     summary: Get client status
-     *     description: Retrieves detailed status information for a specific WhatsApp client
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *     responses:
-     *       200:
-     *         description: Client status retrieved successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 client:
-     *                   $ref: '#/components/schemas/ClientInfo'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async getClientStatus(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/qr-image:
+   *   get:
+   *     summary: Get QR code image for WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: QR code image
+   *       404:
+   *         description: Client not found or no QR code available
+   */
+  async getQRImage(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const client = this.whatsappService.getClient(clientId);
 
-            const clientInfo = this.whatsappService.getClient(clientId);
-            if (!clientInfo) {
-                return res.status(404).json({
-                    success: false,
-                    error: `Client ${clientId} not found`
-                });
-            }
+      if (!client) {
+        res.status(404).json({
+          success: false,
+          message: 'WPPConnect client not found'
+        });
+        return;
+      }
 
-            // Return clean client data without circular references
-            const cleanClient = {
-                clientId: clientInfo.clientId,
-                status: clientInfo.status,
-                isReady: clientInfo.isReady,
-                phoneNumber: clientInfo.phoneNumber,
-                hasQrCode: !!clientInfo.qrCode,
-                qrCode: clientInfo.qrCode || null,
-                lastActivity: clientInfo.lastActivity ? clientInfo.lastActivity.toISOString() : null,
-                ai_agent_code: clientInfo.ai_agent_code || null
-            };
-            
-            return res.status(200).json({
-                success: true,
-                client: cleanClient
-            });
-            
-        } catch (error) {
-            console.error('❌ Error getting client status:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
+      if (!client.qrCode) {
+        res.status(404).json({
+          success: false,
+          message: 'No QR code available for this client'
+        });
+        return;
+      }
+
+      // Convert base64 QR code to image
+      const base64Data = client.qrCode.replace(/^data:image\/png;base64,/, '');
+      const imageBuffer = Buffer.from(base64Data, 'base64');
+
+      res.set({
+        'Content-Type': 'image/png',
+        'Content-Length': imageBuffer.length
+      });
+      res.send(imageBuffer);
+    } catch (error) {
+      console.error('❌ Error getting WPPConnect QR code:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get WPPConnect QR code',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}/disconnect:
-     *   post:
-     *     summary: Disconnect WhatsApp client
-     *     description: Disconnects a WhatsApp client from the system
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *     responses:
-     *       200:
-     *         description: Client disconnected successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/SuccessResponse'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async disconnectClient(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/send:
+   *   post:
+   *     summary: Send message via WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - number
+   *               - message
+   *             properties:
+   *               number:
+   *                 type: string
+   *                 description: Phone number (with country code, no +)
+   *                 example: "6281234567890"
+   *               message:
+   *                 type: string
+   *                 description: Message to send
+   *                 example: "Hello from WPPConnect!"
+   *     responses:
+   *       200:
+   *         description: Message sent successfully
+   *       400:
+   *         description: Bad request
+   *       404:
+   *         description: Client not found
+   *       500:
+   *         description: Internal server error
+   */
+  async sendMessage(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const { number, message } = req.body;
 
-            await this.whatsappService.disconnectClient(clientId);
-            
-            return res.status(200).json({
-                success: true,
-                message: `Client ${clientId} disconnected successfully`
-            });
-            
-        } catch (error) {
-            console.error('❌ Error disconnecting client:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
+      if (!number || !message) {
+        res.status(400).json({
+          success: false,
+          message: 'number and message are required'
+        });
+        return;
+      }
+
+      const client = this.whatsappService.getClient(clientId);
+      if (!client) {
+        res.status(404).json({
+          success: false,
+          message: 'WPPConnect client not found'
+        });
+        return;
+      }
+
+      if (!client.isReady) {
+        res.status(400).json({
+          success: false,
+          message: 'WPPConnect client is not ready'
+        });
+        return;
+      }
+
+      await this.whatsappService.sendMessage(clientId, number, message);
+      
+      res.json({
+        success: true,
+        message: 'Message sent successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error sending message via WPPConnect:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to send message',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}:
-     *   delete:
-     *     summary: Remove WhatsApp client completely
-     *     description: Permanently removes a WhatsApp client from the system. This will disconnect the client, remove it from memory, and delete all associated session data from MongoDB. This action cannot be undone.
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client to remove
-     *         example: "my-whatsapp-client"
-     *     security:
-     *       - bearerAuth: []
-     *     responses:
-     *       200:
-     *         description: Client removed successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 message:
-     *                   type: string
-     *                   example: "Client my-whatsapp-client removed successfully"
-     *       400:
-     *         description: Bad request - Client ID is required
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async removeClient(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/disconnect:
+   *   post:
+   *     summary: Disconnect WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Client disconnected successfully
+   *       404:
+   *         description: Client not found
+   */
+  async disconnectClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const success = await this.whatsappService.disconnectClient(clientId);
 
-            await this.whatsappService.removeClient(clientId);
-            
-            return res.status(200).json({
-                success: true,
-                message: `Client ${clientId} removed successfully`
-            });
-            
-        } catch (error) {
-            console.error('❌ Error removing client:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
+      if (!success) {
+        res.status(404).json({
+          success: false,
+          message: 'WPPConnect client not found'
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: 'WPPConnect client disconnected successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error disconnecting WPPConnect client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to disconnect WPPConnect client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    async recoverClient(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}:
+   *   delete:
+   *     summary: Remove WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Client removed successfully
+   *       404:
+   *         description: Client not found
+   */
+  async removeClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const success = await this.whatsappService.disconnectClient(clientId);
 
-            const clientInfo = this.whatsappService.getClient(clientId);
-            if (!clientInfo) {
-                return res.status(404).json({
-                    success: false,
-                    error: `Client ${clientId} not found`
-                });
-            }
+      if (!success) {
+        res.status(404).json({
+          success: false,
+          message: 'WPPConnect client not found'
+        });
+        return;
+      }
 
-            if (clientInfo.status !== 'error') {
-                return res.status(400).json({
-                    success: false,
-                    error: `Client ${clientId} is not in error status (current status: ${clientInfo.status})`
-                });
-            }
-
-            const { forceReset } = req.body; // New parameter to force reset to QR scanning
-            
-            if (forceReset) {
-                console.log(`🔄 Force reset to QR scanning requested for client ${clientId}`);
-                await this.whatsappService.resetClientToQRScanning(clientId);
-                return res.status(200).json({
-                    success: true,
-                    message: `Client ${clientId} reset to QR scanning mode successfully`,
-                    clientId: clientId
-                });
-            } else {
-                console.log(`🔄 Manual recovery requested for client ${clientId}`);
-                await this.whatsappService.recoverErrorClient(clientId);
-                return res.status(200).json({
-                    success: true,
-                    message: `Recovery initiated for client ${clientId}`,
-                    clientId: clientId
-                });
-            }
-            
-        } catch (error) {
-            console.error(`❌ Error recovering client ${req.params.clientId}:`, error);
-            return res.status(500).json({
-                success: false,
-                error: `Failed to recover client ${req.params.clientId}`
-            });
-        }
+      res.json({
+        success: true,
+        message: 'WPPConnect client removed successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error removing WPPConnect client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to remove WPPConnect client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    // Send Message
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}/send:
-     *   post:
-     *     summary: Send a message via WhatsApp client
-     *     description: Sends a text message to a specific phone number using the specified WhatsApp client
-     *     tags: [Message Operations]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *         example: "javear-account"
-     *     requestBody:
-     *       required: true
-     *       content:
-     *         application/json:
-     *           schema:
-     *             $ref: '#/components/schemas/SendMessageRequest'
-     *     responses:
-     *       200:
-     *         description: Message sent successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 message:
-     *                   type: string
-     *                   example: "Message sent successfully"
-     *                 clientId:
-     *                   type: string
-     *                   example: "javear-account"
-     *                 to:
-     *                   type: string
-     *                   example: "6281234567890"
-     *       400:
-     *         description: Bad request - Missing required fields or client not ready
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async sendMessage(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            const { number, message } = req.body;
-            
-            if (!clientId) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: 'clientId parameter is required' 
-                });
-            }
-            
-            if (!number || !message) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: 'Number and message are required' 
-                });
-            }
-            
-            const clientInfo = this.whatsappService.getClient(clientId);
-            if (!clientInfo) {
-                return res.status(404).json({ 
-                    success: false, 
-                    error: `Client with ID '${clientId}' not found` 
-                });
-            }
-            
-            if (!clientInfo.isReady) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: `Client '${clientId}' is not ready` 
-                });
-            }
-            
-            await this.whatsappService.sendMessage(clientId, number, message);
-            
-            return res.status(200).json({
-                success: true,
-                message: 'Message sent successfully',
-                clientId: clientId,
-                to: number
-            });
-            
-        } catch (error) {
-            console.error('❌ Error sending message:', error);
-            return res.status(500).json({ 
-                success: false, 
-                error: error instanceof Error ? error.message : 'Unknown error' 
-            });
-        }
+  /**
+   * @swagger
+   * /api/whatsapp/health:
+   *   get:
+   *     summary: Get WPPConnect health status
+   *     tags: [WPPConnect WhatsApp]
+   *     responses:
+   *       200:
+   *         description: Health status
+   */
+  async getHealthStatus(req: Request, res: Response): Promise<void> {
+    try {
+      const healthStatus = this.whatsappService.getHealthStatus();
+      
+      res.json({
+        success: true,
+        message: 'WPPConnect WhatsApp Bot API is healthy',
+        status: healthStatus,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('❌ Error getting WPPConnect health status:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get WPPConnect health status',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    // QR Code Management
-    async getQRCode(req: Request, res: Response) {
-        try {
-            const clients = this.whatsappService.getAllClients();
-            
-            if (clients.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    error: 'No clients available'
-                });
-            }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/agent:
+   *   put:
+   *     summary: Assign agent to WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - agentCode
+   *             properties:
+   *               agentCode:
+   *                 type: string
+   *                 description: AI agent code
+   *                 example: "goa-konsul"
+   *     responses:
+   *       200:
+   *         description: Agent assigned successfully
+   */
+  async updateClientAgent(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const { agentCode } = req.body;
 
-            const firstClient = clients[0];
-            if (!firstClient) {
-                return res.status(404).json({
-                    success: false,
-                    error: 'No valid client found'
-                });
-            }
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          message: 'agentCode is required'
+        });
+        return;
+      }
 
-            if (firstClient.status === 'qr_required' && firstClient.qrCode) {
-                return res.status(200).json({
-                    success: true,
-                    qrCode: firstClient.qrCode,
-                    clientId: firstClient.clientId
-                });
-            } else {
-                return res.status(404).json({
-                    success: false,
-                    error: 'No QR code available'
-                });
-            }
-            
-        } catch (error) {
-            console.error('❌ Error getting QR code:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
+      const success = await this.whatsappService.assignAgentToClient(clientId, agentCode);
+      
+      if (!success) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to assign agent to WPPConnect client'
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: 'Agent assigned to WPPConnect client successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error assigning agent to WPPConnect client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to assign agent to WPPConnect client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    async refreshQRCode(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/agent:
+   *   delete:
+   *     summary: Remove agent from WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Agent removed successfully
+   */
+  async removeClientAgent(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const success = await this.whatsappService.removeAgentFromClient(clientId);
+      
+      if (!success) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to remove agent from WPPConnect client'
+        });
+        return;
+      }
 
-            const clientInfo = this.whatsappService.getClient(clientId);
-            if (!clientInfo) {
-                return res.status(404).json({
-                    success: false,
-                    error: `Client ${clientId} not found`
-                });
-            }
-
-            if (clientInfo.status !== 'qr_required') {
-                return res.status(400).json({
-                    success: false,
-                    error: `Client ${clientId} is not in QR required status (current status: ${clientInfo.status})`
-                });
-            }
-
-            // Force QR code refresh by disconnecting and reconnecting
-            await this.whatsappService.disconnectClient(clientId);
-            await this.whatsappService.createClient(clientId);
-            
-            return res.status(200).json({
-                success: true,
-                message: `QR code refresh initiated for client ${clientId}`
-            });
-            
-        } catch (error) {
-            console.error(`❌ Error refreshing QR code for client ${req.params.clientId}:`, error);
-            return res.status(500).json({
-                success: false,
-                error: `Failed to refresh QR code for client ${req.params.clientId}`
-            });
-        }
+      res.json({
+        success: true,
+        message: 'Agent removed from WPPConnect client successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error removing agent from WPPConnect client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to remove agent from WPPConnect client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    // Get QR code as image (direct browser rendering)
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}/qr-image:
-     *   get:
-     *     summary: Get QR code image
-     *     description: Retrieves the QR code as a PNG image for the specified WhatsApp client. Returns the image directly in the response.
-     *     tags: [QR Code Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *         example: "javear-account"
-     *     responses:
-     *       200:
-     *         description: QR code image returned successfully
-     *         content:
-     *           image/png:
-     *             schema:
-     *               type: string
-     *               format: binary
-     *       404:
-     *         description: Client not found or no QR code available
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async getQRImage(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
-
-            const clientInfo = this.whatsappService.getClient(clientId);
-            if (!clientInfo) {
-                return res.status(404).json({
-                    success: false,
-                    error: `Client ${clientId} not found`
-                });
-            }
-
-            if (!clientInfo.qrCode) {
-                return res.status(404).json({
-                    success: false,
-                    error: `No QR code available for client ${clientId}. Status: ${clientInfo.status}`
-                });
-            }
-
-            // Set headers for image response
-            res.setHeader('Content-Type', 'image/png');
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-            res.setHeader('Pragma', 'no-cache');
-            res.setHeader('Expires', '0');
-            
-            // Convert base64 to buffer and send
-            const imageBuffer = Buffer.from(clientInfo.qrCode, 'base64');
-            return res.send(imageBuffer);
-            
-        } catch (error) {
-            console.error(`❌ Error getting QR image for client ${req.params.clientId}:`, error);
-            return res.status(500).json({
-                success: false,
-                error: `Failed to get QR image for client ${req.params.clientId}`
-            });
-        }
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/agent:
+   *   get:
+   *     summary: Get agent assigned to WPPConnect client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Agent information
+   */
+  async getClientAgent(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      const agentCode = await this.whatsappService.getClientAgent(clientId);
+      
+      res.json({
+        success: true,
+        clientId,
+        agentCode
+      });
+    } catch (error) {
+      console.error('❌ Error getting WPPConnect client agent:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get WPPConnect client agent',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
+  }
 
-    // Fallback to QR scanning (for corrupted sessions)
-    async resetToQRScanning(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
-
-            console.log(`🔄 Manual fallback to QR scanning requested for client: ${clientId}`);
-            
-            // Trigger the fallback mechanism
-            await this.whatsappService.resetClientToQRScanning(clientId);
-            
-            return res.status(200).json({
-                success: true,
-                message: `Client ${clientId} reset to QR scanning mode successfully`,
-                clientId: clientId
-            });
-            
-        } catch (error) {
-            console.error('❌ Error resetting client to QR scanning:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
+  /**
+   * @swagger
+   * /api/whatsapp/agents:
+   *   get:
+   *     summary: Get all agent assignments
+   *     tags: [WPPConnect WhatsApp]
+   *     responses:
+   *       200:
+   *         description: List of all agent assignments
+   */
+  async getAllAgentAssignments(req: Request, res: Response): Promise<void> {
+    try {
+      const assignments = await this.whatsappService.getAllAgentAssignments();
+      
+      res.json({
+        success: true,
+        assignments
+      });
+    } catch (error) {
+      console.error('❌ Error getting WPPConnect agent assignments:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get WPPConnect agent assignments',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
     }
-
-    // Health and Status
-    async getHealthStatus(req: Request, res: Response) {
-        try {
-            const healthStatus = this.whatsappService.getHealthStatus();
-            
-            return res.status(200).json({
-                success: true,
-                health: healthStatus
-            });
-            
-        } catch (error) {
-            console.error('❌ Error getting health status:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
-    }
-
-    // Client-Agent Assignment Management
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}/agent:
-     *   put:
-     *     summary: Assign or update agent for client
-     *     description: Assigns an AI agent code to a WhatsApp client. The client must be in 'ready' status to assign an agent.
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *         example: "javear-account"
-     *     requestBody:
-     *       required: true
-     *       content:
-     *         application/json:
-     *           schema:
-     *             type: object
-     *             required:
-     *               - ai_agent_code
-     *             properties:
-     *               ai_agent_code:
-     *                 type: string
-     *                 description: The AI agent code to assign to the client
-     *                 example: "FW001"
-     *     responses:
-     *       200:
-     *         description: Agent assigned successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 message:
-     *                   type: string
-     *                   example: "Agent code assigned to client javear-account"
-     *                 assignment:
-     *                   type: object
-     *                   properties:
-     *                     clientId:
-     *                       type: string
-     *                       example: "javear-account"
-     *                     ai_agent_code:
-     *                       type: string
-     *                       example: "FW001"
-     *                     assignedAt:
-     *                       type: string
-     *                       format: date-time
-     *                     updatedAt:
-     *                       type: string
-     *                       format: date-time
-     *       400:
-     *         description: Bad request - Client not ready or missing agent code
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async updateClientAgent(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            const { ai_agent_code } = req.body;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
-
-            if (!ai_agent_code) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'ai_agent_code is required'
-                });
-            }
-
-            const result = await this.whatsappService.assignAgentToClient(clientId, ai_agent_code);
-            
-            if (!result.success) {
-                return res.status(400).json({
-                    success: false,
-                    error: result.message
-                });
-            }
-            
-            return res.status(200).json({
-                success: true,
-                message: result.message,
-                assignment: result.assignment
-            });
-            
-        } catch (error) {
-            console.error('❌ Error updating client agent:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
-    }
-
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}/agent:
-     *   delete:
-     *     summary: Remove agent from client
-     *     description: Removes the AI agent assignment from a WhatsApp client
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *         example: "javear-account"
-     *     responses:
-     *       200:
-     *         description: Agent removed successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 message:
-     *                   type: string
-     *                   example: "Agent assignment removed from client javear-account"
-     *       400:
-     *         description: Bad request - No agent assignment found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async removeClientAgent(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
-
-            const result = await this.whatsappService.removeAgentFromClient(clientId);
-            
-            if (!result.success) {
-                return res.status(400).json({
-                    success: false,
-                    error: result.message
-                });
-            }
-            
-            return res.status(200).json({
-                success: true,
-                message: result.message
-            });
-            
-        } catch (error) {
-            console.error('❌ Error removing client agent:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
-    }
-
-    /**
-     * @swagger
-     * /api/whatsapp/clients/{clientId}/agent:
-     *   get:
-     *     summary: Get client agent assignment
-     *     description: Retrieves the AI agent assignment for a specific WhatsApp client
-     *     tags: [Client Management]
-     *     parameters:
-     *       - in: path
-     *         name: clientId
-     *         required: true
-     *         schema:
-     *           type: string
-     *         description: The unique identifier of the WhatsApp client
-     *         example: "javear-account"
-     *     responses:
-     *       200:
-     *         description: Agent assignment retrieved successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 assignment:
-     *                   type: object
-     *                   properties:
-     *                     clientId:
-     *                       type: string
-     *                       example: "javear-account"
-     *                     ai_agent_code:
-     *                       type: string
-     *                       example: "FW001"
-     *                     assignedAt:
-     *                       type: string
-     *                       format: date-time
-     *                     updatedAt:
-     *                       type: string
-     *                       format: date-time
-     *                 message:
-     *                   type: string
-     *                   example: "No active agent assignment found for client javear-account"
-     *       404:
-     *         description: Client not found
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async getClientAgent(req: Request, res: Response) {
-        try {
-            const { clientId } = req.params;
-            
-            if (!clientId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Client ID is required'
-                });
-            }
-
-            const result = await this.whatsappService.getClientAgentAssignment(clientId);
-            
-            return res.status(200).json({
-                success: true,
-                assignment: result.assignment,
-                message: result.message
-            });
-            
-        } catch (error) {
-            console.error('❌ Error getting client agent:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
-    }
-
-    /**
-     * @swagger
-     * /api/whatsapp/agents:
-     *   get:
-     *     summary: Get all agent assignments
-     *     description: Retrieves all active AI agent assignments across all WhatsApp clients
-     *     tags: [Client Management]
-     *     responses:
-     *       200:
-     *         description: Agent assignments retrieved successfully
-     *         content:
-     *           application/json:
-     *             schema:
-     *               type: object
-     *               properties:
-     *                 success:
-     *                   type: boolean
-     *                   example: true
-     *                 assignments:
-     *                   type: array
-     *                   items:
-     *                     type: object
-     *                     properties:
-     *                       clientId:
-     *                         type: string
-     *                         example: "javear-account"
-     *                       ai_agent_code:
-     *                         type: string
-     *                         example: "FW001"
-     *                       assignedAt:
-     *                         type: string
-     *                         format: date-time
-     *                       updatedAt:
-     *                         type: string
-     *                         format: date-time
-     *                 total:
-     *                   type: number
-     *                   example: 1
-     *       500:
-     *         description: Internal server error
-     *         content:
-     *           application/json:
-     *             schema:
-     *               $ref: '#/components/schemas/ErrorResponse'
-     */
-    async getAllAgentAssignments(req: Request, res: Response) {
-        try {
-            const result = await this.whatsappService.getAllAgentAssignments();
-            
-            return res.status(200).json({
-                success: true,
-                assignments: result.assignments,
-                total: result.assignments.length,
-                message: result.message
-            });
-            
-        } catch (error) {
-            console.error('❌ Error getting all agent assignments:', error);
-            return res.status(500).json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error'
-            });
-        }
-    }
+  }
 }
+
+export default WPPConnectWhatsAppController;

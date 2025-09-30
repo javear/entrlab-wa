@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { WhatsAppService } from '../services/whatsapp.service';
+import { WPPConnectWhatsAppService } from '../services/whatsapp.service';
 import { Environment } from '../types';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -7,7 +7,7 @@ import jwt from 'jsonwebtoken';
 
 export class ApiController {
     constructor(
-        private whatsappService: WhatsAppService,
+        private whatsappService: WPPConnectWhatsAppService,
         private env: Environment
     ) {}
 
@@ -40,6 +40,8 @@ export class ApiController {
         res.json({
             success: true,
             env: {
+                JWT_SECRET: this.env.JWT_SECRET ? 'SET' : 'NOT SET',
+                WA_JWT_SECRET: this.env.WA_JWT_SECRET ? 'SET' : 'NOT SET',
                 UPLOAD_USER_ID: this.env.UPLOAD_USER_ID ? 'SET' : 'NOT SET',
                 UPLOAD_AUTH_TOKEN: this.env.UPLOAD_AUTH_TOKEN ? 'SET' : 'NOT SET'
             }
