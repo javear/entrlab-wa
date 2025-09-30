@@ -90,6 +90,7 @@ export class WPPConnectClientManager {
       const client = await create({
         session: clientId,
         tokenStore: this.tokenStore,
+        folderNameToken: './tokens', // Browser profiles folder (temporary, can be cleaned)
         
         // Browser configuration
         headless: true,
