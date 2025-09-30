@@ -127,6 +127,9 @@ export class WPPConnectMongoTokenStore {
    */
   async setToken(sessionName: string, tokenData: any): Promise<boolean> {
     try {
+      console.log(`💾 Saving WPPConnect session to MongoDB: ${sessionName}`);
+      console.log(`💾 Token data keys: ${Object.keys(tokenData || {}).join(', ')}`);
+      
       await WPPConnectSession.findOneAndUpdate(
         { sessionName },
         { 
@@ -140,7 +143,7 @@ export class WPPConnectMongoTokenStore {
         }
       );
       
-      console.log(`💾 Saved WPPConnect session: ${sessionName}`);
+      console.log(`✅ Successfully saved WPPConnect session: ${sessionName}`);
       return true;
     } catch (error) {
       console.error(`❌ Error setting WPPConnect token for ${sessionName}:`, error);
