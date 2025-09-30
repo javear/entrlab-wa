@@ -244,10 +244,33 @@ export class WPPConnectClientManager {
     const clientInfo = this.clients.get(clientId);
     if (clientInfo && clientInfo.client) {
       try {
-        const phoneNumber = await clientInfo.client.getHostDevice();
-        if (phoneNumber && phoneNumber.id) {
-          clientInfo.phoneNumber = phoneNumber.id;
-          console.log(`📞 WPPConnect client ${clientId} phone number: ${phoneNumber.id}`);
+        const hostDevice = await clientInfo.client.getHostDevice();
+        console.log(`📞 Raw host device for ${clientId}:`, hostDevice);
+        
+        // Extract phone number from different possible formats
+        let phoneNumber = null;
+        if (hostDevice) {
+          if (typeof hostDevice === 'string') {
+            phoneNumber = hostDevice;
+          } else if (typeof hostDevice === 'object') {
+            const deviceObj: any = hostDevice;
+            if (deviceObj.id) {
+              phoneNumber = deviceObj.id._serialized || deviceObj.id.user || deviceObj.id;
+            } else if (deviceObj._serialized) {
+              phoneNumber = deviceObj._serialized;
+            } else if (deviceObj.user) {
+              phoneNumber = deviceObj.user;
+            }
+          }
+        }
+        
+        if (phoneNumber) {
+          // Clean up the phone number (remove @c.us if present)
+          const cleanNumber = phoneNumber.toString().replace('@c.us', '');
+          clientInfo.phoneNumber = cleanNumber;
+          console.log(`📞 WPPConnect client ${clientId} phone number: ${cleanNumber}`);
+        } else {
+          console.log(`⚠️ Could not extract phone number for ${clientId}`);
         }
       } catch (error) {
         console.error(`❌ Error getting phone number for ${clientId}:`, error);
