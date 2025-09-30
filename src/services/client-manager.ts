@@ -191,6 +191,41 @@ export class WPPConnectClientManager {
 
     } catch (error) {
       console.error(`❌ Failed to create WPPConnect client ${clientId}:`, error);
+      
+      // Check if error is due to browser already running
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('browser is already running') || errorMessage.includes('userDataDir')) {
+        console.log(`🔄 Browser lock detected for ${clientId}, attempting cleanup...`);
+        
+        try {
+          // Try to clean up the browser folder locks
+          const fs = require('fs');
+          const path = require('path');
+          const browserPath = path.join(process.cwd(), 'tokens', clientId);
+          
+          // Remove lock files
+          const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+          for (const lockFile of lockFiles) {
+            const lockPath = path.join(browserPath, lockFile);
+            if (fs.existsSync(lockPath)) {
+              fs.unlinkSync(lockPath);
+              console.log(`🗑️  Removed lock file: ${lockFile}`);
+            }
+          }
+          
+          console.log(`✅ Browser locks cleaned up for ${clientId}, retrying...`);
+          
+          // Remove the failed placeholder
+          this.clients.delete(clientId);
+          
+          // Retry creating the client
+          return await this.createClient(clientId);
+          
+        } catch (cleanupError) {
+          console.error(`❌ Failed to cleanup browser locks for ${clientId}:`, cleanupError);
+        }
+      }
+      
       // Remove the placeholder client if creation failed
       this.clients.delete(clientId);
       console.log(`🗑️  Removed failed client ${clientId} from map`);
