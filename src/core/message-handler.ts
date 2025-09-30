@@ -248,6 +248,26 @@ export class WPPConnectMessageHandler {
     console.log(`🚀 Starting initial processing for ${senderNumber}`);
     this.processingUsers[senderNumber] = 1;
 
+    // Send read receipt and start typing indicator
+    const preDelayMs = 1000; // 1 second before typing
+    const readTypingTimer = setTimeout(async () => {
+      try {
+        const clients = this.whatsappService.getAllClients();
+        const client = clients.find(c => c.isReady);
+        
+        if (client && client.client) {
+          const chatId = `${senderNumber}@c.us`;
+          await client.client.sendSeen(chatId);
+          await client.client.startTyping(chatId);
+          console.log(`✅ Sent read receipt and typing indicator for ${senderNumber}`);
+        }
+      } catch (error) {
+        console.log('⚠️ Could not send read/typing indicators:', error);
+      }
+    }, preDelayMs);
+
+    (this.processingUsers as any)[`${senderNumber}_readTypingTimer`] = readTypingTimer;
+
     // Set initial timer
     console.log(`⏰ Initial timer set for ${senderNumber} (${delay}ms)`);
     setTimeout(() => {
@@ -282,6 +302,17 @@ export class WPPConnectMessageHandler {
 
       // Send to AI and respond
       await this.sendMessage(client.clientId, senderNumber, combinedMessages, null, false, null);
+
+      // Stop typing indicator
+      try {
+        if (client && client.client) {
+          const chatId = `${senderNumber}@c.us`;
+          await client.client.stopTyping(chatId);
+          console.log(`✅ Stopped typing indicator for ${senderNumber}`);
+        }
+      } catch (error) {
+        console.log('⚠️ Could not stop typing indicator:', error);
+      }
 
       // Clean up
       this.cleanupProcessingState(senderNumber);
@@ -499,7 +530,8 @@ export class WPPConnectMessageHandler {
         throw new Error('FW_ENDPOINT environment variable is not set');
       }
 
-      const aiUrl = `https://${aiEndpoint}`;
+      // Handle endpoint with or without protocol
+      const aiUrl = aiEndpoint.startsWith('http') ? aiEndpoint : `https://${aiEndpoint}`;
       console.log(`🤖 Using AI endpoint URL: ${aiUrl}`);
 
       // Create JWT token
