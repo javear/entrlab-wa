@@ -168,20 +168,49 @@ export class WPPConnectMessageHandler {
     
     try {
       console.log('📎 Processing media attachment...');
-      // Download media from WPPConnect
-      const media = await message.downloadMedia();
-      if (!media) {
+      console.log('📎 Message type:', message.type);
+      console.log('📎 Message ID:', message.id);
+      
+      // Get client to use downloadMedia method
+      const clients = this.whatsappService.getAllClients();
+      const client = clients.find(c => c.isReady);
+      
+      if (!client || !client.client) {
+        console.log('⚠️ No ready client available for media download');
+        return mediaUrls;
+      }
+
+      // WPPConnect: Use client.downloadMedia(messageId) or client.downloadFile(messageId)
+      let mediaData: any = null;
+      try {
+        // Try downloadMedia first
+        mediaData = await client.client.downloadMedia(message.id);
+      } catch (error) {
+        console.log('⚠️ downloadMedia failed, trying downloadFile...');
+        try {
+          mediaData = await client.client.downloadFile(message.id);
+        } catch (error2) {
+          console.error('❌ Both downloadMedia and downloadFile failed');
+          return mediaUrls;
+        }
+      }
+      
+      if (!mediaData) {
         console.log('⚠️ No media data received');
         return mediaUrls;
       }
 
+      // Extract media info
+      const mimetype = mediaData.mimetype || 'application/octet-stream';
+      const base64Data = mediaData.data || mediaData;
+      
       // Generate unique filename with proper extension
-      const fileExtension = this.getFileExtensionFromMimeType(media.mimetype);
+      const fileExtension = this.getFileExtensionFromMimeType(mimetype);
       const filename = `${crypto.randomUUID()}${fileExtension}`;
       const filePath = path.join(this.tempDir, filename);
 
       // Save media to temporary file with memory optimization
-      const buffer = Buffer.from(media.data, 'base64');
+      const buffer = Buffer.from(base64Data, 'base64');
       fs.writeFileSync(filePath, buffer);
       
       // Clear the buffer from memory immediately
@@ -190,7 +219,7 @@ export class WPPConnectMessageHandler {
       console.log(`📎 Media saved to: ${filePath} (${Math.round(fs.statSync(filePath).size / 1024)}KB)`);
 
       // Upload to tmpfile.link (this method handles cleanup)
-      const uploadUrl = await this.uploadToTmpFile(filePath, filename, media.mimetype);
+      const uploadUrl = await this.uploadToTmpFile(filePath, filename, mimetype);
       if (uploadUrl) {
         mediaUrls.push(uploadUrl);
         console.log(`📎 Media uploaded: ${uploadUrl}`);
