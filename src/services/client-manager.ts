@@ -168,6 +168,12 @@ export class WPPConnectClientManager {
         existingClientInfo.client = client;
         existingClientInfo.lastActivity = new Date();
         console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
+        
+        // Update phone number if client is already authenticated (restored session)
+        if (existingClientInfo.isReady) {
+          await this.updateClientPhoneNumber(clientId);
+        }
+        
         return existingClientInfo;
       } else {
         // Fallback if somehow the placeholder was removed
@@ -244,29 +250,44 @@ export class WPPConnectClientManager {
     const clientInfo = this.clients.get(clientId);
     if (clientInfo && clientInfo.client) {
       try {
-        const hostDevice = await clientInfo.client.getHostDevice();
-        console.log(`📞 Raw host device for ${clientId}:`, hostDevice);
+        // Try getWid() method (more reliable for phone number)
+        const wid = await clientInfo.client.getWid();
+        console.log(`📞 Raw WID for ${clientId}:`, wid);
         
-        // Extract phone number from different possible formats
         let phoneNumber = null;
-        if (hostDevice) {
-          if (typeof hostDevice === 'string') {
-            phoneNumber = hostDevice;
-          } else if (typeof hostDevice === 'object') {
-            const deviceObj: any = hostDevice;
-            if (deviceObj.id) {
-              phoneNumber = deviceObj.id._serialized || deviceObj.id.user || deviceObj.id;
-            } else if (deviceObj._serialized) {
-              phoneNumber = deviceObj._serialized;
-            } else if (deviceObj.user) {
-              phoneNumber = deviceObj.user;
+        if (wid) {
+          if (typeof wid === 'string') {
+            phoneNumber = wid;
+          } else if (typeof wid === 'object') {
+            const widObj: any = wid;
+            phoneNumber = widObj._serialized || widObj.user || widObj.toString();
+          }
+        }
+        
+        // Fallback to getHostDevice()
+        if (!phoneNumber) {
+          const hostDevice = await clientInfo.client.getHostDevice();
+          console.log(`📞 Raw host device for ${clientId}:`, hostDevice);
+          
+          if (hostDevice) {
+            if (typeof hostDevice === 'string') {
+              phoneNumber = hostDevice;
+            } else if (typeof hostDevice === 'object') {
+              const deviceObj: any = hostDevice;
+              if (deviceObj.id) {
+                phoneNumber = deviceObj.id._serialized || deviceObj.id.user || deviceObj.id;
+              } else if (deviceObj._serialized) {
+                phoneNumber = deviceObj._serialized;
+              } else if (deviceObj.user) {
+                phoneNumber = deviceObj.user;
+              }
             }
           }
         }
         
         if (phoneNumber) {
           // Clean up the phone number (remove @c.us if present)
-          const cleanNumber = phoneNumber.toString().replace('@c.us', '');
+          const cleanNumber = phoneNumber.toString().replace('@c.us', '').replace(':0', '');
           clientInfo.phoneNumber = cleanNumber;
           console.log(`📞 WPPConnect client ${clientId} phone number: ${cleanNumber}`);
         } else {
