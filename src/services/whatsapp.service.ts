@@ -129,7 +129,15 @@ export class WPPConnectWhatsAppService {
         { upsert: true, new: true }
       );
       
-      console.log(`✅ Assigned agent ${agentCode} to WPPConnect client ${clientId}`);
+      // Also set it directly on the client object for immediate use (matching main branch)
+      const clientInfo = this.clientManager.getClient(clientId);
+      if (clientInfo) {
+        clientInfo.ai_agent_code = agentCode;
+        console.log(`✅ Assigned agent ${agentCode} to WPPConnect client ${clientId} (set on client object)`);
+      } else {
+        console.log(`✅ Assigned agent ${agentCode} to WPPConnect client ${clientId} (saved to DB, client not active)`);
+      }
+      
       return true;
     } catch (error) {
       console.error(`❌ Error assigning agent to WPPConnect client ${clientId}:`, error);
@@ -144,7 +152,15 @@ export class WPPConnectWhatsAppService {
         { isActive: false, updatedAt: new Date() }
       );
       
-      console.log(`✅ Removed agent assignment from WPPConnect client ${clientId}`);
+      // Also remove it from the client object (matching main branch)
+      const clientInfo = this.clientManager.getClient(clientId);
+      if (clientInfo) {
+        delete clientInfo.ai_agent_code;
+        console.log(`✅ Removed agent assignment from WPPConnect client ${clientId} (removed from client object)`);
+      } else {
+        console.log(`✅ Removed agent assignment from WPPConnect client ${clientId} (removed from DB, client not active)`);
+      }
+      
       return true;
     } catch (error) {
       console.error(`❌ Error removing agent from WPPConnect client ${clientId}:`, error);
@@ -192,7 +208,8 @@ export class WPPConnectWhatsAppService {
       for (const assignment of assignments) {
         const clientInfo = this.clientManager.getClient(assignment.clientId);
         if (clientInfo) {
-          console.log(`🔍 Looking for WPPConnect client ${assignment.clientId} in clients map: ${!!clientInfo}`);
+          // Set the ai_agent_code on the client object (matching main branch behavior)
+          clientInfo.ai_agent_code = assignment.ai_agent_code;
           console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId}: ${assignment.ai_agent_code}`);
         } else {
           console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);

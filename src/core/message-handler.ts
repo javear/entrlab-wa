@@ -393,70 +393,107 @@ export class WPPConnectMessageHandler {
   }
 
   private convertLLMToWhatsApp(content: string, preserveStructure: boolean = true): string {
-    if (!content) return '';
+    try {
+      const originalLength = content.length;
+      let formattedContent = content.replace(/\r\n/g, '\n');
 
-    let formatted = content;
+      // Tokenize code regions to avoid accidental formatting inside code
+      const codeBlocks: string[] = [];
+      const inlineCodes: string[] = [];
+      formattedContent = formattedContent.replace(/```([\s\S]*?)```/g, (_m, p1) => {
+        const token = `__CODEBLOCK_${codeBlocks.length}__`;
+        codeBlocks.push(String(p1));
+        return token;
+      });
+      formattedContent = formattedContent.replace(/`([^`\n]+)`/g, (_m, p1) => {
+        const token = `__INLINECODE_${inlineCodes.length}__`;
+        inlineCodes.push(String(p1));
+        return token;
+      });
 
-    if (preserveStructure) {
-      // Convert markdown-style formatting to WhatsApp formatting
-      formatted = formatted
-        .replace(/\*\*(.*?)\*\*/g, '*$1*') // Bold: **text** -> *text*
-        .replace(/\*(.*?)\*/g, '_$1_')     // Italic: *text* -> _text_
-        .replace(/~~(.*?)~~/g, '~$1~')    // Strikethrough: ~~text~~ -> ~text~
-        .replace(/`(.*?)`/g, '```$1```')  // Code: `text` -> ```text```
-        .replace(/```(.*?)```/gs, '```\n$1\n```'); // Code blocks
-    }
+      // Markdown links → plain text with URL to ensure clickability in WhatsApp
+      formattedContent = formattedContent.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)');
 
-    // Split long messages into parts (WhatsApp limit is 4096 characters)
-    const maxLength = 4000; // Leave some buffer
-    if (formatted.length <= maxLength) {
-      return formatted;
-    }
+      // Unescape already-escaped formatting sequences
+      formattedContent = formattedContent
+        .replace(/\\\\_([^_]+)\\\\_/g, '_$1_')
+        .replace(/\\\\\*([^*]+)\\\\\*/g, '*$1*')
+        .replace(/\\\\~([^~]+)\\\\~/g, '~$1~')
+        .replace(/\\\\`([^`]+)\\\\`/g, '```$1```');
 
-    // Split by paragraphs first
-    const paragraphs = formatted.split('\n\n');
-    const parts: string[] = [];
-    let currentPart = '';
+      // Bullets: •, -, * at line-start → '* '
+      // Protect bullet markers using a neutral sentinel that won't collide with formatting rules
+      formattedContent = formattedContent
+        .replace(/^[\t ]*[•]\s+/gm, '§BULLET§ ')
+        .replace(/^[\t ]*[-*]\s+/gm, '§BULLET§ ');
 
-    for (const paragraph of paragraphs) {
-      if (currentPart.length + paragraph.length + 2 <= maxLength) {
-        currentPart += (currentPart ? '\n\n' : '') + paragraph;
-      } else {
-        if (currentPart) {
-          parts.push(currentPart);
-          currentPart = paragraph;
-        } else {
-          // Single paragraph is too long, split by sentences
-          const sentences = paragraph.split('. ');
-          let currentSentence = '';
-          
-          for (const sentence of sentences) {
-            if (currentSentence.length + sentence.length + 2 <= maxLength) {
-              currentSentence += (currentSentence ? '. ' : '') + sentence;
-            } else {
-              if (currentSentence) {
-                parts.push(currentSentence);
-                currentSentence = sentence;
-              } else {
-                // Single sentence is too long, force split
-                parts.push(sentence.substring(0, maxLength));
-                currentSentence = sentence.substring(maxLength);
-              }
-            }
-          }
-          
-          if (currentSentence) {
-            currentPart = currentSentence;
-          }
-        }
+      // Numbered lists: 1) → 1.
+      formattedContent = formattedContent
+        .replace(/^[\t ]*(\d+)\)\s+/gm, '$1. ')
+        .replace(/^[\t ]*(\d+)\.\s+/gm, '$1. ');
+
+      // Bold: **text** or __text__ → *text*
+      formattedContent = formattedContent
+        .replace(/\*\*(.+?)\*\*/g, '*$1*')
+        .replace(/__(.+?)__/g, '*$1*')
+        .replace(/<b>([\s\S]*?)<\/b>/gi, '*$1*')
+        .replace(/<strong>([\s\S]*?)<\/strong>/gi, '*$1*');
+
+      // Italic: single-asterisk or underscores → _text_
+      // - Do not convert list bullets '* ' (handled via sentinel)
+      // - Do not convert bold '**...**' (handled above)
+      // - Avoid snake_case by requiring non-word boundaries
+      formattedContent = formattedContent
+        .replace(/(^|[^\w*])\*(?!\*)([^\s*][^*]*?[^\s*])\*(?!\*)/g, '$1_$2_')
+        .replace(/(^|[^\w])_(?!_)([^_\n]+?)_(?=[^\w]|$)/g, '$1_$2_')
+        .replace(/<i>([\s\S]*?)<\/i>/gi, '_$1_')
+        .replace(/<em>([\s\S]*?)<\/em>/gi, '_$1_');
+
+      // Strikethrough: ~~text~~ or <s>/<strike> → ~text~
+      formattedContent = formattedContent
+        .replace(/~~([\s\S]*?)~~/g, '~$1~')
+        .replace(/<s>([\s\S]*?)<\/s>/gi, '~$1~')
+        .replace(/<strike>([\s\S]*?)<\/strike>/gi, '~$1~');
+
+      // Headers (# ...) → *...*
+      formattedContent = formattedContent.replace(/^[\t ]*#{1,6}[\t ]+(.+)$/gm, '*$1*');
+
+      // Blockquotes (> ...) and <blockquote>
+      formattedContent = formattedContent
+        .replace(/^[\t ]*>[\t ]+/gm, '> ')
+        .replace(/<blockquote>([\s\S]*?)<\/blockquote>/gi, (_m, p1) => String(p1).replace(/^/gm, '> '));
+
+      // Basic HTML → text
+      formattedContent = formattedContent
+        .replace(/<br\s*\/?>(\n)?/gi, '\n')
+        .replace(/<\/(p|div)>\s*<\1>/gi, '\n\n')
+        .replace(/<\/(h\d)>\s*/gi, '\n\n')
+        .replace(/<\/?(p|div|span)>/gi, '')
+        .replace(/<[^>]+>/g, '');
+
+      // Restore bullet sentinel to WhatsApp bullet style
+      formattedContent = formattedContent.replace(/^§BULLET§ /gm, '* ');
+
+      if (!preserveStructure) {
+        formattedContent = formattedContent
+          .replace(/\n{3,}/g, '\n\n')
+          .replace(/[ ]{2,}/g, ' ');
       }
-    }
 
-    if (currentPart) {
-      parts.push(currentPart);
-    }
+      // Restore code placeholders
+      formattedContent = formattedContent.replace(/__INLINECODE_(\d+)__/g, (_m, i) => '`' + (inlineCodes[Number(i)] ?? '') + '`');
+      formattedContent = formattedContent.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => '```' + (codeBlocks[Number(i)] ?? '') + '```');
 
-    return parts.length > 1 ? (parts[0] || '') : (formatted || '');
+      console.log('✅ WhatsApp formatting completed', {
+        originalLength,
+        formattedLength: formattedContent.length,
+        reduction: originalLength - formattedContent.length
+      });
+      return formattedContent;
+    } catch (error) {
+      console.log('⚠️ Error in WhatsApp formatting, sending original content', error);
+      return content;
+    }
   }
 
   private async sendMessage(
@@ -590,40 +627,54 @@ export class WPPConnectMessageHandler {
   private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media', value: string, caption?: string }> {
     const outgoingParts: Array<{ kind: 'text' | 'media', value: string, caption?: string }> = [];
     
+    // Split by double newlines to create separate chat bubbles (matching main branch)
+    const rawBlocks = text.split('\n\n').map(b => b.trim()).filter(Boolean);
+    
     // Build regex to match media URLs by extension
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
-    const mediaUrlPattern = new RegExp(
-      `(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)`,
-      'gi'
-    );
     
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    
-    while ((match = mediaUrlPattern.exec(text)) !== null) {
-      // Add text before the media URL
-      const textBefore = text.slice(lastIndex, match.index).trim();
-      if (textBefore) {
-        outgoingParts.push({ kind: 'text', value: textBefore });
+    // Process each block separately
+    for (const block of rawBlocks) {
+      const mediaUrlPattern = new RegExp(
+        `@\\s*(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)|(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)`,
+        'gi'
+      );
+      
+      let lastIndex = 0;
+      let match: RegExpExecArray | null;
+      let foundMedia = false;
+      
+      while ((match = mediaUrlPattern.exec(block)) !== null) {
+        foundMedia = true;
+        // Add text before the media URL
+        const textBefore = block.slice(lastIndex, match.index).trim();
+        if (textBefore) {
+          outgoingParts.push({ kind: 'text', value: textBefore });
+        }
+        
+        // Add the media URL (from @URL or bare URL)
+        const mediaUrl = (match[1] || match[2]) || '';
+        if (mediaUrl) {
+          outgoingParts.push({ kind: 'media', value: mediaUrl });
+        }
+        
+        lastIndex = match.index + match[0].length;
       }
       
-      // Add the media URL
-      const mediaUrl = match[1] || '';
-      if (mediaUrl) {
-        outgoingParts.push({ kind: 'media', value: mediaUrl });
+      // Add remaining text after last media URL in this block
+      const textAfter = block.slice(lastIndex).trim();
+      if (textAfter) {
+        outgoingParts.push({ kind: 'text', value: textAfter });
       }
       
-      lastIndex = match.index + match[0].length;
+      // If no media found in this block, add the whole block as text
+      if (!foundMedia && block.trim()) {
+        outgoingParts.push({ kind: 'text', value: block });
+      }
     }
     
-    // Add remaining text after last media URL
-    const textAfter = text.slice(lastIndex).trim();
-    if (textAfter) {
-      outgoingParts.push({ kind: 'text', value: textAfter });
-    }
-    
-    // If no media URLs found, return the whole text as one part
-    if (outgoingParts.length === 0) {
+    // If no blocks found at all, return the whole text as one part
+    if (outgoingParts.length === 0 && text.trim()) {
       outgoingParts.push({ kind: 'text', value: text });
     }
     
