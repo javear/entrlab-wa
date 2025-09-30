@@ -102,9 +102,17 @@ export class WPPConnectMessageHandler {
 
       // Handle quoted messages (WPPConnect format)
       let enhancedMessage = message.body;
-      if (message.quotedMsg && message.quotedMsg.body) {
-        console.log(`📨 Message quoted: true`);
-        enhancedMessage = `Replying to this message: "${message.quotedMsg.body}"\n${message.body}`;
+      if (message.hasQuotedMsg || message.quotedMsg) {
+        try {
+          const quoted = message.quotedMsg || (message.hasQuotedMsg ? await message.getQuotedMessage() : null);
+          if (quoted && quoted.body) {
+            enhancedMessage = `Replying to this message: "${quoted.body}"\n${message.body}`;
+            console.log(`📝 Enhanced message with quoted context: "${enhancedMessage}"`);
+          }
+        } catch (error) {
+          console.error('❌ Error getting quoted message:', error);
+          // Continue with original message if quoted message retrieval fails
+        }
       } else {
         console.log(`📨 Message quoted: false`);
       }
@@ -159,6 +167,7 @@ export class WPPConnectMessageHandler {
     const mediaUrls: string[] = [];
     
     try {
+      console.log('📎 Processing media attachment...');
       // Download media from WPPConnect
       const media = await message.downloadMedia();
       if (!media) {
@@ -166,29 +175,29 @@ export class WPPConnectMessageHandler {
         return mediaUrls;
       }
 
-      // Generate unique filename
+      // Generate unique filename with proper extension
       const fileExtension = this.getFileExtensionFromMimeType(media.mimetype);
-      const filename = `${crypto.randomUUID()}.${fileExtension}`;
+      const filename = `${crypto.randomUUID()}${fileExtension}`;
       const filePath = path.join(this.tempDir, filename);
 
-      // Save media to temporary file
-      fs.writeFileSync(filePath, media.data, 'base64');
+      // Save media to temporary file with memory optimization
+      const buffer = Buffer.from(media.data, 'base64');
+      fs.writeFileSync(filePath, buffer);
+      
+      // Clear the buffer from memory immediately
+      buffer.fill(0);
+      
+      console.log(`📎 Media saved to: ${filePath} (${Math.round(fs.statSync(filePath).size / 1024)}KB)`);
 
-      // Upload to tmpfile.link
-      const mediaUrl = await this.uploadToTmpFile(filePath, filename, media.mimetype);
-      if (mediaUrl) {
-        mediaUrls.push(mediaUrl);
-      }
-
-      // Clean up temporary file
-      try {
-        fs.unlinkSync(filePath);
-      } catch (cleanupError) {
-        console.error('❌ Error cleaning up temporary file:', cleanupError);
+      // Upload to tmpfile.link (this method handles cleanup)
+      const uploadUrl = await this.uploadToTmpFile(filePath, filename, media.mimetype);
+      if (uploadUrl) {
+        mediaUrls.push(uploadUrl);
+        console.log(`📎 Media uploaded: ${uploadUrl}`);
       }
 
     } catch (error) {
-      console.error('❌ Error handling media message:', error);
+      console.error('❌ Error processing media:', error);
     }
 
     return mediaUrls;
@@ -196,22 +205,28 @@ export class WPPConnectMessageHandler {
 
   private getFileExtensionFromMimeType(mimetype: string): string {
     const mimeMap: { [key: string]: string } = {
-      'image/jpeg': 'jpg',
-      'image/png': 'png',
-      'image/gif': 'gif',
-      'image/webp': 'webp',
-      'video/mp4': 'mp4',
-      'video/avi': 'avi',
-      'video/quicktime': 'mov',
-      'audio/mpeg': 'mp3',
-      'audio/wav': 'wav',
-      'audio/ogg': 'ogg',
-      'application/pdf': 'pdf',
-      'application/msword': 'doc',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx'
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/gif': '.gif',
+      'image/webp': '.webp',
+      'image/bmp': '.bmp',
+      'image/svg+xml': '.svg',
+      'video/mp4': '.mp4',
+      'video/avi': '.avi',
+      'video/quicktime': '.mov',
+      'video/webm': '.webm',
+      'video/x-matroska': '.mkv',
+      'audio/mpeg': '.mp3',
+      'audio/wav': '.wav',
+      'audio/ogg': '.ogg',
+      'audio/mp4': '.m4a',
+      'audio/aac': '.aac',
+      'application/pdf': '.pdf',
+      'application/msword': '.doc',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx'
     };
 
-    return mimeMap[mimetype] || 'bin';
+    return mimeMap[mimetype] || '.bin';
   }
 
   private async uploadToTmpFile(filePath: string, filename: string, mimetype: string): Promise<string | null> {
@@ -469,21 +484,66 @@ export class WPPConnectMessageHandler {
         const formattedResponse = this.convertLLMToWhatsApp(aiagent.text);
         console.log(`✅ WhatsApp formatting completed { originalLength: ${aiagent.text.length}, formattedLength: ${formattedResponse.length}, reduction: ${aiagent.text.length - formattedResponse.length} }`);
         
-        // Split into parts if needed
-        const parts = this.splitMessageIntoParts(formattedResponse);
-        console.log(`📝 Prepared ${parts.length} outgoing part(s) for ${formattedNumber}`);
+        // Parse response for media URLs and text parts
+        const outgoingParts = this.parseResponseForMedia(formattedResponse);
+        console.log(`📝 Prepared ${outgoingParts.length} outgoing part(s) for ${formattedNumber}`);
         
-        // Send each part with delay
-        for (let i = 0; i < parts.length; i++) {
-          const part = parts[i];
-          await this.whatsappService.sendMessage(clientId, formattedNumber || '', part || '');
-          console.log(`✅ Sent text part`);
+        // Get client for sending
+        const client = this.whatsappService.getClient(clientId);
+        if (!client || !client.client) {
+          console.error('❌ Client not found or not ready');
+          return;
+        }
+        
+        // Send each part with typing indicator
+        for (let i = 0; i < outgoingParts.length; i++) {
+          const part = outgoingParts[i];
+          if (!part) continue;
           
-          // Add delay between parts (except for the last one)
-          if (i < parts.length - 1) {
-            const delay = Math.random() * 2000 + 1000; // 1-3 seconds
-            console.log(`⏳ Waiting ${Math.round(delay)}ms before next part`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+          try {
+            // Show typing before each part
+            await client.client.startTyping(formattedNumber || '');
+          } catch {}
+
+          if (part.kind === 'media') {
+            try {
+              const mediaUrl = String(part.value);
+              console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
+              
+              // Use WPPConnect's sendFile method
+              await client.client.sendFile(
+                formattedNumber || '',
+                mediaUrl,
+                undefined,
+                part.caption || ''
+              );
+              console.log(`✅ Sent media from ${mediaUrl}`);
+              
+            } catch (mediaErr: any) {
+              console.log(`⚠️ Failed to send media ${String(part.value)}:`, mediaErr?.message || mediaErr);
+              // Fallback: send URL as text
+              await client.client.sendText(formattedNumber || '', String(part.value));
+            }
+          } else {
+            // Send text part
+            try {
+              await client.client.sendText(formattedNumber || '', String(part.value));
+              console.log(`✅ Sent text part`);
+            } catch (textErr: any) {
+              console.log('⚠️ Error sending text part:', textErr?.message || textErr);
+            }
+          }
+
+          // Natural delay between parts
+          if (i < outgoingParts.length - 1) {
+            const delayMs = 1000 + Math.floor(Math.random() * 2000);
+            console.log(`⏳ Waiting ${delayMs}ms before next part`);
+            
+            try {
+              await client.client.startTyping(formattedNumber || '');
+            } catch {}
+            
+            await new Promise(resolve => setTimeout(resolve, delayMs));
           }
         }
         
@@ -496,6 +556,49 @@ export class WPPConnectMessageHandler {
     } catch (error) {
       console.error('❌ Error in sendMessage:', error);
     }
+  }
+
+  private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media', value: string, caption?: string }> {
+    const outgoingParts: Array<{ kind: 'text' | 'media', value: string, caption?: string }> = [];
+    
+    // Build regex to match media URLs by extension
+    const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
+    const mediaUrlPattern = new RegExp(
+      `(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)`,
+      'gi'
+    );
+    
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    
+    while ((match = mediaUrlPattern.exec(text)) !== null) {
+      // Add text before the media URL
+      const textBefore = text.slice(lastIndex, match.index).trim();
+      if (textBefore) {
+        outgoingParts.push({ kind: 'text', value: textBefore });
+      }
+      
+      // Add the media URL
+      const mediaUrl = match[1] || '';
+      if (mediaUrl) {
+        outgoingParts.push({ kind: 'media', value: mediaUrl });
+      }
+      
+      lastIndex = match.index + match[0].length;
+    }
+    
+    // Add remaining text after last media URL
+    const textAfter = text.slice(lastIndex).trim();
+    if (textAfter) {
+      outgoingParts.push({ kind: 'text', value: textAfter });
+    }
+    
+    // If no media URLs found, return the whole text as one part
+    if (outgoingParts.length === 0) {
+      outgoingParts.push({ kind: 'text', value: text });
+    }
+    
+    return outgoingParts;
   }
 
   private splitMessageIntoParts(message: string): string[] {
