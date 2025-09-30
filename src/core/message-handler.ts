@@ -33,6 +33,12 @@ export class WPPConnectMessageHandler {
 
     // Start queue cleanup interval
     this.startQueueCleanup();
+    
+    // Start temp file cleanup interval
+    this.startTempFileCleanup();
+    
+    // Clean up any existing temp files on startup
+    this.cleanupTempFiles();
   }
 
   private startQueueCleanup(): void {
@@ -40,6 +46,48 @@ export class WPPConnectMessageHandler {
     setInterval(() => {
       this.cleanupMessageQueue();
     }, 180000); // 3 minutes
+  }
+
+  private startTempFileCleanup(): void {
+    // Clean up old temporary files every 5 minutes
+    setInterval(() => {
+      this.cleanupTempFiles();
+    }, 300000); // 5 minutes
+  }
+
+  private cleanupTempFiles(): void {
+    try {
+      if (!fs.existsSync(this.tempDir)) {
+        return;
+      }
+
+      const files = fs.readdirSync(this.tempDir);
+      const now = Date.now();
+      let cleanedCount = 0;
+
+      for (const file of files) {
+        const filePath = path.join(this.tempDir, file);
+        try {
+          const stats = fs.statSync(filePath);
+          const age = now - stats.mtime.getTime();
+          
+          // Delete files older than 10 minutes
+          if (age > 600000) { // 10 minutes
+            fs.unlinkSync(filePath);
+            cleanedCount++;
+            console.log(`🗑️ Cleaned up old temp file: ${file}`);
+          }
+        } catch (error) {
+          console.error(`⚠️ Error cleaning up temp file ${file}:`, error);
+        }
+      }
+
+      if (cleanedCount > 0) {
+        console.log(`🧹 Cleaned up ${cleanedCount} old temporary files`);
+      }
+    } catch (error) {
+      console.error('❌ Error during temp file cleanup:', error);
+    }
   }
 
   private cleanupMessageQueue(): void {
@@ -100,13 +148,26 @@ export class WPPConnectMessageHandler {
 
       console.log(`📨 Processing message in production mode`);
 
+      // IMPORTANT: Check if this is a media message FIRST to avoid sending base64 to AI
+      const isMediaMsg = this.isMediaMessage(message);
+      let enhancedMessage = '';
+      
+      if (isMediaMsg) {
+        // For media: ONLY use caption, NEVER use body (which contains base64)
+        enhancedMessage = message.caption || '';
+        console.log(`📨 Media message detected - using caption only: "${enhancedMessage}"`);
+      } else {
+        // For text: use body
+        enhancedMessage = message.body || '';
+        console.log(`📨 Text message body: "${enhancedMessage}"`);
+      }
+
       // Handle quoted messages (WPPConnect format)
-      let enhancedMessage = message.body;
       if (message.hasQuotedMsg || message.quotedMsg) {
         try {
           const quoted = message.quotedMsg || (message.hasQuotedMsg ? await message.getQuotedMessage() : null);
           if (quoted && quoted.body) {
-            enhancedMessage = `Replying to this message: "${quoted.body}"\n${message.body}`;
+            enhancedMessage = `Replying to this message: "${quoted.body}"\n${enhancedMessage}`;
             console.log(`📝 Enhanced message with quoted context: "${enhancedMessage}"`);
           }
         } catch (error) {
@@ -119,18 +180,16 @@ export class WPPConnectMessageHandler {
 
       // Handle media attachments (WPPConnect format)
       let mediaUrls: string[] = [];
-      if (message.type === 'image' || message.type === 'video' || message.type === 'audio' || message.type === 'document') {
+      if (isMediaMsg) {
         console.log(`📨 Message has media attachment: ${message.type}`);
         try {
           mediaUrls = await this.handleMediaMessage(message);
-          if (mediaUrls.length > 0) {
-            enhancedMessage += `\n[Media: ${mediaUrls.join(', ')}]`;
-          }
+          console.log(`📎 Media URLs generated: ${mediaUrls.length} file(s)`);
         } catch (error) {
           console.error('❌ Error handling media message:', error);
         }
       } else {
-        console.log(`📨 Message raw: false`);
+        console.log(`📨 Message is text-only (type: ${message.type})`);
       }
 
       // If user is already being processed (typing started), mark this message as read immediately
@@ -163,6 +222,81 @@ export class WPPConnectMessageHandler {
     }
   }
 
+  private isMediaMessage(message: any): boolean {
+    if (!message || !message.type) return false;
+    
+    const mediaTypes = [
+      'image',      // MessageType: image
+      'video',      // MessageType: video
+      'audio',      // MessageType: audio
+      'ptt',        // MessageType: ptt (push-to-talk voice)
+      'document',   // MessageType: document
+      'sticker'     // MessageType: sticker
+    ];
+    
+    return mediaTypes.includes(message.type.toLowerCase());
+  }
+
+  private async downloadMediaFromUrl(url: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    try {
+      console.log(`📥 Downloading media from URL: ${url}`);
+      
+      const response = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+      
+      const buffer = Buffer.from(response.data);
+      const contentType = response.headers['content-type'] || 'application/octet-stream';
+      
+      console.log(`📥 Downloaded ${buffer.length} bytes, MIME type: ${contentType}`);
+      
+      return { buffer, mimeType: contentType };
+    } catch (error) {
+      console.error(`❌ Failed to download media from ${url}:`, error);
+      return null;
+    }
+  }
+
+  private detectMimeTypeFromMessage(message: any, buffer: Buffer): string {
+    // First try to detect from message type
+    const messageType = message.type?.toLowerCase();
+    
+    // Check buffer header for actual file type
+    const header = buffer.slice(0, 12);
+    const headerHex = header.toString('hex');
+    
+    // Image detection
+    if (headerHex.startsWith('ffd8ff')) return 'image/jpeg';
+    if (headerHex.startsWith('89504e47')) return 'image/png';
+    if (headerHex.startsWith('47494638')) return 'image/gif';
+    if (headerHex.startsWith('52494646')) return 'image/webp';
+    
+    // Video detection
+    if (headerHex.startsWith('000001ba') || headerHex.startsWith('000001b3')) return 'video/mpeg';
+    if (headerHex.startsWith('1a45dfa3')) return 'video/webm';
+    if (headerHex.startsWith('66747970')) return 'video/mp4';
+    
+    // Audio detection
+    if (headerHex.startsWith('494433') || headerHex.startsWith('fffb')) return 'audio/mpeg';
+    if (headerHex.startsWith('4f676753')) return 'audio/ogg';
+    if (headerHex.startsWith('52494646')) return 'audio/wav';
+    
+    // Fallback to message type
+    switch (messageType) {
+      case 'image': return 'image/jpeg';
+      case 'video': return 'video/mp4';
+      case 'audio': return 'audio/mpeg';
+      case 'ptt': return 'audio/ogg';
+      case 'document': return 'application/octet-stream';
+      case 'sticker': return 'image/webp';
+      default: return 'application/octet-stream';
+    }
+  }
+
   private async handleMediaMessage(message: any): Promise<string[]> {
     const mediaUrls: string[] = [];
     
@@ -180,41 +314,36 @@ export class WPPConnectMessageHandler {
         return mediaUrls;
       }
 
-      // WPPConnect: Use client.downloadMedia(messageId) or client.downloadFile(messageId)
-      let mediaData: any = null;
+      // WPPConnect: Use decryptFile for more reliable media download
+      let mediaBuffer: Buffer | null = null;
       try {
-        // Try downloadMedia first
-        mediaData = await client.client.downloadMedia(message.id);
+        console.log('📎 Using decryptFile for media download...');
+        mediaBuffer = await client.client.decryptFile(message);
+        console.log(`📎 Media buffer size: ${mediaBuffer ? mediaBuffer.length : 0} bytes`);
       } catch (error) {
-        console.log('⚠️ downloadMedia failed, trying downloadFile...');
-        try {
-          mediaData = await client.client.downloadFile(message.id);
-        } catch (error2) {
-          console.error('❌ Both downloadMedia and downloadFile failed');
-          return mediaUrls;
-        }
+        console.error('❌ decryptFile failed:', error);
+        return mediaUrls;
       }
       
-      if (!mediaData) {
-        console.log('⚠️ No media data received');
+      if (!mediaBuffer) {
+        console.log('⚠️ No media buffer received');
         return mediaUrls;
       }
 
-      // Extract media info
-      const mimetype = mediaData.mimetype || 'application/octet-stream';
-      const base64Data = mediaData.data || mediaData;
+      // Determine MIME type from message type and buffer
+      const mimetype = this.detectMimeTypeFromMessage(message, mediaBuffer);
+      console.log(`📎 Detected MIME type: ${mimetype}`);
       
       // Generate unique filename with proper extension
       const fileExtension = this.getFileExtensionFromMimeType(mimetype);
       const filename = `${crypto.randomUUID()}${fileExtension}`;
       const filePath = path.join(this.tempDir, filename);
 
-      // Save media to temporary file with memory optimization
-      const buffer = Buffer.from(base64Data, 'base64');
-      fs.writeFileSync(filePath, buffer);
+      // Save media to temporary file (buffer is already binary, no base64 conversion needed)
+      fs.writeFileSync(filePath, mediaBuffer);
       
       // Clear the buffer from memory immediately
-      buffer.fill(0);
+      mediaBuffer.fill(0);
       
       console.log(`📎 Media saved to: ${filePath} (${Math.round(fs.statSync(filePath).size / 1024)}KB)`);
 
@@ -275,9 +404,9 @@ export class WPPConnectMessageHandler {
         timeout: 30000
       });
 
-      if (response.data && response.data.url) {
-        console.log(`✅ Media uploaded to tmpfile.link: ${response.data.url}`);
-        return response.data.url;
+      if (response.data && response.data.downloadLink) {
+        console.log(`✅ Media uploaded to tmpfile.link: ${response.data.downloadLink}`);
+        return response.data.downloadLink;
       } else {
         console.error('❌ Invalid response from tmpfile.link:', response.data);
         return null;
@@ -285,6 +414,16 @@ export class WPPConnectMessageHandler {
     } catch (error) {
       console.error('❌ Error uploading to tmpfile.link:', error);
       return null;
+    } finally {
+      // Always clean up the temporary file after upload (success or failure)
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          console.log(`🗑️ Cleaned up temporary file: ${filePath}`);
+        }
+      } catch (cleanupError) {
+        console.error(`⚠️ Error cleaning up temporary file ${filePath}:`, cleanupError);
+      }
     }
   }
 
@@ -347,8 +486,14 @@ export class WPPConnectMessageHandler {
 
       console.log(`🔄 FINAL PROCESSING: ${messages.length} messages from ${senderNumber} after timer expired`);
 
-      // Combine all messages
-      const combinedMessages = messages.map(item => item.enhancedText || item.message.body).join(' ');
+      // Combine all messages and media URLs
+      const combinedMessages = messages.map(item => {
+        let messageText = item.enhancedText !== undefined ? item.enhancedText : '';
+        if (item.mediaUrls && item.mediaUrls.length > 0) {
+          messageText += `\nMedia attached:\n- @[${item.mediaUrls.join(']\n- @[')}]`;
+        }
+        return messageText;
+      }).join(' ');
       console.log(`📝 Combined messages: "${combinedMessages}"`);
 
       // Get client info
@@ -576,14 +721,83 @@ export class WPPConnectMessageHandler {
               const mediaUrl = String(part.value);
               console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
               
-              // Use WPPConnect's sendFile method
-              await client.client.sendFile(
-                formattedNumber || '',
-                mediaUrl,
-                undefined,
-                part.caption || ''
-              );
-              console.log(`✅ Sent media from ${mediaUrl}`);
+              // Download media from URL first
+              const mediaData = await this.downloadMediaFromUrl(mediaUrl);
+              if (!mediaData) {
+                throw new Error('Failed to download media');
+              }
+              
+              // Save base64 data to temporary file for WPPConnect
+              const base64Data = mediaData.buffer.toString('base64');
+              const mimeType = mediaData.mimeType;
+              const fileExtension = this.getFileExtensionFromMimeType(mimeType);
+              const tempFilename = `${crypto.randomUUID()}${fileExtension}`;
+              const tempFilePath = path.join(this.tempDir, tempFilename);
+              
+              // Write base64 data to temporary file
+              const buffer = Buffer.from(base64Data, 'base64');
+              fs.writeFileSync(tempFilePath, buffer);
+              console.log(`📁 Created temporary file: ${tempFilePath} (${Math.round(buffer.length / 1024)}KB)`);
+              
+              try {
+                // Determine the appropriate WPPConnect method based on media type
+                if (mimeType.startsWith('image/')) {
+                  // Send as image using file path
+                  if (part.caption) {
+                    await client.client.sendImage(
+                      formattedNumber || '',
+                      tempFilePath,
+                      part.caption
+                    );
+                  } else {
+                    await client.client.sendImage(
+                      formattedNumber || '',
+                      tempFilePath
+                    );
+                  }
+                  console.log(`✅ Sent image from ${mediaUrl}`);
+                } else if (mimeType.startsWith('video/')) {
+                  // Send as video using file path
+                  if (part.caption) {
+                    await client.client.sendFile(
+                      formattedNumber || '',
+                      tempFilePath,
+                      undefined,
+                      part.caption
+                    );
+                  } else {
+                    await client.client.sendFile(
+                      formattedNumber || '',
+                      tempFilePath
+                    );
+                  }
+                  console.log(`✅ Sent video from ${mediaUrl}`);
+                } else if (mimeType.startsWith('audio/')) {
+                  // Send as audio using file path
+                  await client.client.sendFile(
+                    formattedNumber || '',
+                    tempFilePath
+                  );
+                  console.log(`✅ Sent audio from ${mediaUrl}`);
+                } else {
+                  // Send as generic file using file path
+                  await client.client.sendFile(
+                    formattedNumber || '',
+                    tempFilePath
+                  );
+                  console.log(`✅ Sent file from ${mediaUrl}`);
+                }
+              } finally {
+                // Clean up temporary file
+                try {
+                  if (fs.existsSync(tempFilePath)) {
+                    fs.unlinkSync(tempFilePath);
+                    console.log(`🗑️ Cleaned up temporary file: ${tempFilePath}`);
+                  }
+                } catch (cleanupError) {
+                  console.error(`⚠️ Error cleaning up temporary file ${tempFilePath}:`, cleanupError);
+                }
+              }
               
             } catch (mediaErr: any) {
               console.log(`⚠️ Failed to send media ${String(part.value)}:`, mediaErr?.message || mediaErr);
@@ -627,16 +841,34 @@ export class WPPConnectMessageHandler {
   private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media', value: string, caption?: string }> {
     const outgoingParts: Array<{ kind: 'text' | 'media', value: string, caption?: string }> = [];
     
+    // First, extract markdown-style images: ![alt](url)
+    const imageMdRegex = /!\[([^\]]*)\]\((https?:\/\/[^\s]+)\)/g;
+    const extractedMediaList: { url: string; caption?: string }[] = [];
+    const withMediaTokens = text.replace(imageMdRegex, (_m: string, alt: string, url: string) => {
+      const idx = extractedMediaList.length;
+      const cap = String(alt || '').trim();
+      const mediaItem: { url: string; caption?: string } = { url: String(url) };
+      if (cap.length > 0) {
+        mediaItem.caption = cap;
+      }
+      extractedMediaList.push(mediaItem);
+      return `[[MEDIA_${idx}]]`;
+    });
+    
     // Split by double newlines to create separate chat bubbles (matching main branch)
-    const rawBlocks = text.split('\n\n').map(b => b.trim()).filter(Boolean);
+    const rawBlocks = withMediaTokens.split('\n\n').map(b => b.trim()).filter(Boolean);
     
     // Build regex to match media URLs by extension
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
     
     // Process each block separately
     for (const block of rawBlocks) {
+      // Combined regex to match:
+      // 1) [[MEDIA_n]] tokens from markdown images
+      // 2) @media URLs
+      // 3) bare media URLs
       const mediaUrlPattern = new RegExp(
-        `@\\s*(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)|(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)`,
+        `(\\[\\[MEDIA_(\\d+)\\]\\])|@\\s*(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)|(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)`,
         'gi'
       );
       
@@ -652,24 +884,42 @@ export class WPPConnectMessageHandler {
           outgoingParts.push({ kind: 'text', value: textBefore });
         }
         
-        // Add the media URL (from @URL or bare URL)
-        const mediaUrl = (match[1] || match[2]) || '';
-        if (mediaUrl) {
-          outgoingParts.push({ kind: 'media', value: mediaUrl });
+        if (match[1]) {
+          // Media token: [[MEDIA_n]]
+          const idx = Number(match[2] ?? -1);
+          const meta = extractedMediaList[idx];
+          if (meta && meta.url) {
+            const mediaPart: { kind: 'media'; value: string; caption?: string } = { kind: 'media', value: meta.url };
+            if (meta.caption) {
+              mediaPart.caption = meta.caption;
+            }
+            outgoingParts.push(mediaPart);
+          } else {
+            // Fallback: keep the token textually if something went wrong
+            outgoingParts.push({ kind: 'text', value: match[0] });
+          }
+        } else {
+          // Either @media url (group 3) or bare media url (group 4)
+          const mediaUrl = (match[3] || match[4]) ?? '';
+          if (mediaUrl) {
+            outgoingParts.push({ kind: 'media', value: mediaUrl });
+          }
         }
         
         lastIndex = match.index + match[0].length;
       }
       
-      // Add remaining text after last media URL in this block
-      const textAfter = block.slice(lastIndex).trim();
-      if (textAfter) {
-        outgoingParts.push({ kind: 'text', value: textAfter });
-      }
-      
-      // If no media found in this block, add the whole block as text
-      if (!foundMedia && block.trim()) {
-        outgoingParts.push({ kind: 'text', value: block });
+      // If media was found, add remaining text after last media URL
+      if (foundMedia) {
+        const textAfter = block.slice(lastIndex).trim();
+        if (textAfter) {
+          outgoingParts.push({ kind: 'text', value: textAfter });
+        }
+      } else {
+        // If no media found in this block, add the whole block as text
+        if (block.trim()) {
+          outgoingParts.push({ kind: 'text', value: block });
+        }
       }
     }
     
@@ -678,6 +928,7 @@ export class WPPConnectMessageHandler {
       outgoingParts.push({ kind: 'text', value: text });
     }
     
+    console.log(`📝 Parsed ${outgoingParts.length} outgoing part(s) from text:`, outgoingParts.map(p => ({ kind: p.kind, length: p.value.length })));
     return outgoingParts;
   }
 
