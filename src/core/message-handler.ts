@@ -125,6 +125,23 @@ export class WPPConnectMessageHandler {
         console.log(`📨 Message raw: false`);
       }
 
+      // If user is already being processed (typing started), mark this message as read immediately
+      if (this.processingUsers[senderNumber]) {
+        console.log(`📖 User ${senderNumber} is already being processed, marking as read immediately`);
+        try {
+          const clients = this.whatsappService.getAllClients();
+          const client = clients.find(c => c.isReady);
+          
+          if (client && client.client) {
+            const chatId = `${senderNumber}@c.us`;
+            await client.client.sendSeen(chatId);
+            console.log(`✅ Marked additional message as read for ${senderNumber}`);
+          }
+        } catch (error) {
+          console.log('⚠️ Could not mark additional message as read:', error);
+        }
+      }
+
       // Add to message queue
       this.addToQueue(senderNumber, message, enhancedMessage, mediaUrls);
 
