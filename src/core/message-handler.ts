@@ -519,63 +519,81 @@ export class WPPConnectMessageHandler {
       // Get agent code for this client
       const agentCode = await this.whatsappService.getClientAgent(clientId);
       if (!agentCode) {
-        throw new Error(`No agent assigned to client ${clientId}`);
+        console.log(`⚠️ No agent assigned to client ${clientId}`);
+        return { text: "Please connect to an agent" };
       }
 
       console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}`);
 
       // Get AI endpoint URL
-      const aiEndpoint = this.env.FW_ENDPOINT;
-      if (!aiEndpoint) {
-        throw new Error('FW_ENDPOINT environment variable is not set');
+      let url = this.env.FW_ENDPOINT || 'http://localhost:3000/api/agents/generalAssistanceAgent/generate/vnext';
+      // Ensure URL has protocol
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
       }
 
-      // Handle endpoint with or without protocol
-      const aiUrl = aiEndpoint.startsWith('http') ? aiEndpoint : `https://${aiEndpoint}`;
-      console.log(`🤖 Using AI endpoint URL: ${aiUrl}`);
-
-      // Create JWT token
       const jwtSecret = this.env.JWT_SECRET;
       if (!jwtSecret) {
         throw new Error('JWT_SECRET environment variable is not set');
       }
 
-      const jwtPayload = {
-        phoneNumber,
-        userName,
-        clientId,
-        agentCode,
-        timestamp: Date.now()
+      // Generate JWT token with proper payload structure (matching main branch)
+      const payload = {
+        iss: 'whatsapp-bot',
+        sub: 'custom-user-id',
+        aud: 'authenticated',
+        iat: Math.floor(Date.now() / 1000),
+        phone: phoneNumber || 'unknown',
+        role: 'authenticated',
+        agent_metadata: {
+          agent_code: agentCode,
+          status: "active",
+        },
+        app_metadata: {
+          provider: 'wa',
+          providers: ['wa']
+        },
+        user_metadata: {
+          phone: phoneNumber || 'unknown',
+          phone_verified: true,
+          full_name: userName || 'WhatsApp User',
+          sub: 'custom-user-id',
+          campaign_id: '6a793f4c-609d-4507-ad4f-d6d25c1218c8',
+          participant_name: userName || 'WhatsApp User',
+          participant_phone: phoneNumber || 'unknown'
+        }
       };
 
-      const token = jwt.sign(jwtPayload, jwtSecret, { algorithm: 'HS256' });
+      const authToken = jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
 
-      // Prepare request data
-      const requestData = {
-        message,
-        phoneNumber,
-        userName,
-        clientId,
-        agentCode
+      // Format the phone number for threadId and resourceId
+      const formattedPhoneNumber = phoneNumber || 'unknown';
+
+      const requestBody = {
+        messages: [message],
+        threadId: formattedPhoneNumber,
+        resourceId: formattedPhoneNumber
       };
 
-      console.log(`🤖 Request URL: ${aiUrl}`);
-      console.log(`🤖 Response Status: 200 ✅`);
+      console.log(`🤖 Request URL: ${url}`);
 
-      // Make API call
-      const response = await axios.post(aiUrl, requestData, {
+      const response = await axios.post(url, requestBody, {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
         },
         timeout: 30000
       });
 
-      if (response.status === 200) {
-        return response.data;
-      } else {
-        throw new Error(`AI API returned status ${response.status}`);
-      }
+      console.log(`🤖 Response Status: ${response.status} ${response.status >= 200 && response.status < 300 ? '✅' : '❌'}`);
+
+      const rsp = response.data;
+      const jsonData = {
+        text: rsp.text || rsp.message || '',
+        usage: rsp.usage || {}
+      };
+
+      return jsonData;
 
     } catch (error) {
       console.error('❌ Error calling AI API:', error);
