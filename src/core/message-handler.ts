@@ -237,6 +237,38 @@ export class WPPConnectMessageHandler {
     return mediaTypes.includes(message.type.toLowerCase());
   }
 
+  // New: Helper to clean up URLs from markdown formatting and bullet points
+  private cleanupUrl(url: string): string {
+    if (!url || typeof url !== 'string') return url;
+    
+    // Remove common markdown formatting and bullet points
+    let cleanedUrl = url
+      // Remove bullet points and list markers
+      .replace(/^[\s]*[-•*+]\s*/gm, '')
+      // Remove numbered list markers
+      .replace(/^[\s]*\d+\.\s*/gm, '')
+      // Remove leading/trailing whitespace first
+      .trim()
+      // Remove parentheses around URLs (both leading and trailing)
+      .replace(/^\(/g, '')  // Remove leading (
+      .replace(/\)$/g, '')  // Remove trailing )
+      // Remove brackets around URLs (both leading and trailing)
+      .replace(/^\[/g, '')  // Remove leading [
+      .replace(/\]$/g, '')  // Remove trailing ]
+      // Remove markdown link formatting ![alt](url) -> url
+      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$2')
+      // Remove markdown link formatting [text](url) -> url
+      .replace(/\[([^\]]*)\]\(([^)]+)\)/g, '$2')
+      // Final trim
+      .trim();
+    
+    // If the cleaned URL is just the original URL, return it
+    if (cleanedUrl === url) return url;
+    
+    console.log(`🧹 Cleaned URL: "${url}" -> "${cleanedUrl}"`);
+    return cleanedUrl;
+  }
+
   private async downloadMediaFromUrl(url: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
     try {
       console.log(`📥 Downloading media from URL: ${url}`);
@@ -578,9 +610,10 @@ export class WPPConnectMessageHandler {
         .replace(/^[\t ]*(\d+)\.\s+/gm, '$1. ');
 
       // Bold: **text** or __text__ → *text*
+      // Protect __CODEBLOCK_N__ and __INLINECODE_N__ tokens from being converted
       formattedContent = formattedContent
         .replace(/\*\*(.+?)\*\*/g, '*$1*')
-        .replace(/__(.+?)__/g, '*$1*')
+        .replace(/__(?!CODEBLOCK_\d+__|INLINECODE_\d+__)(.+?)__/g, '*$1*')
         .replace(/<b>([\s\S]*?)<\/b>/gi, '*$1*')
         .replace(/<strong>([\s\S]*?)<\/strong>/gi, '*$1*');
 
@@ -602,6 +635,9 @@ export class WPPConnectMessageHandler {
 
       // Headers (# ...) → *...*
       formattedContent = formattedContent.replace(/^[\t ]*#{1,6}[\t ]+(.+)$/gm, '*$1*');
+
+      // Remove horizontal rules (---, ___, ***)
+      formattedContent = formattedContent.replace(/^[\t ]*[-_*]{3,}[\t ]*$/gm, '');
 
       // Blockquotes (> ...) and <blockquote>
       formattedContent = formattedContent
@@ -626,8 +662,22 @@ export class WPPConnectMessageHandler {
       }
 
       // Restore code placeholders
+      // Inline code: use WhatsApp monospace formatting
       formattedContent = formattedContent.replace(/__INLINECODE_(\d+)__/g, (_m, i) => '`' + (inlineCodes[Number(i)] ?? '') + '`');
-      formattedContent = formattedContent.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => '```' + (codeBlocks[Number(i)] ?? '') + '```');
+      
+      // Code blocks: format content for WhatsApp (no triple backticks, just monospace)
+      formattedContent = formattedContent.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => {
+        const codeContent = codeBlocks[Number(i)] ?? '';
+        // Remove language identifier if present (e.g., ```javascript\n...)
+        const cleanCode = codeContent.replace(/^[a-z]+\n/i, '');
+        // Format each line with monospace and preserve line breaks
+        const formattedCode = cleanCode
+          .split('\n')
+          .map(line => line.trim() ? `\`${line}\`` : '')
+          .filter(Boolean)
+          .join('\n');
+        return formattedCode;
+      });
 
       console.log('✅ WhatsApp formatting completed', {
         originalLength,
@@ -841,19 +891,25 @@ export class WPPConnectMessageHandler {
   private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media', value: string, caption?: string }> {
     const outgoingParts: Array<{ kind: 'text' | 'media', value: string, caption?: string }> = [];
     
+    // Pre-process text to remove duplicate URLs in parentheses
+    // Pattern: url (url) -> url
+    text = text.replace(/(https?:\/\/[^\s]+)\s+\(\1\)/g, '$1');
+    
     // First, extract markdown-style images: ![alt](url)
-    const imageMdRegex = /!\[([^\]]*)\]\((https?:\/\/[^\s]+)\)/g;
+    // Updated regex to exclude trailing ) or ] from the URL capture
+    const imageMdRegex = /!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g;
     const extractedMediaList: { url: string; caption?: string }[] = [];
-    const withMediaTokens = text.replace(imageMdRegex, (_m: string, alt: string, url: string) => {
-      const idx = extractedMediaList.length;
-      const cap = String(alt || '').trim();
-      const mediaItem: { url: string; caption?: string } = { url: String(url) };
-      if (cap.length > 0) {
-        mediaItem.caption = cap;
-      }
-      extractedMediaList.push(mediaItem);
-      return `[[MEDIA_${idx}]]`;
-    });
+      const withMediaTokens = text.replace(imageMdRegex, (_m: string, alt: string, url: string) => {
+        const idx = extractedMediaList.length;
+        const cap = String(alt || '').trim();
+        const cleanedUrl = this.cleanupUrl(String(url));
+        const mediaItem: { url: string; caption?: string } = { url: cleanedUrl };
+        if (cap.length > 0) {
+          mediaItem.caption = cap;
+        }
+        extractedMediaList.push(mediaItem);
+        return `[[MEDIA_${idx}]]`;
+      });
     
     // Split by double newlines to create separate chat bubbles (matching main branch)
     const rawBlocks = withMediaTokens.split('\n\n').map(b => b.trim()).filter(Boolean);
@@ -867,8 +923,9 @@ export class WPPConnectMessageHandler {
       // 1) [[MEDIA_n]] tokens from markdown images
       // 2) @media URLs
       // 3) bare media URLs
+      // Updated to exclude trailing ) and ] from URL capture
       const mediaUrlPattern = new RegExp(
-        `(\\[\\[MEDIA_(\\d+)\\]\\])|@\\s*(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)|(https?:\\/\\/[^\\s]+\\.(?:${mediaExtPattern})(?:[?#][^\\s]*)?)`,
+        `(\\[\\[MEDIA_(\\d+)\\]\\])|@\\s*(https?:\\/\\/[^\\s\\)\\]]+\\.(?:${mediaExtPattern})(?:[?#][^\\s\\)\\]]*)?)|(https?:\\/\\/[^\\s\\)\\]]+\\.(?:${mediaExtPattern})(?:[?#][^\\s\\)\\]]*)?)`,
         'gi'
       );
       
@@ -902,7 +959,8 @@ export class WPPConnectMessageHandler {
           // Either @media url (group 3) or bare media url (group 4)
           const mediaUrl = (match[3] || match[4]) ?? '';
           if (mediaUrl) {
-            outgoingParts.push({ kind: 'media', value: mediaUrl });
+            const cleanedUrl = this.cleanupUrl(mediaUrl);
+            outgoingParts.push({ kind: 'media', value: cleanedUrl });
           }
         }
         
