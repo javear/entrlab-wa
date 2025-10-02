@@ -285,6 +285,7 @@ export class WPPConnectClientManager {
           console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
           
           // Save session to MongoDB when client is authenticated
+          console.log(`🔄 Calling saveClientSession for ${clientId}...`);
           this.saveClientSession(clientId).catch((error) => {
             console.error(`❌ Error saving session for ${clientId}:`, error);
           });
