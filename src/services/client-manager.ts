@@ -272,16 +272,14 @@ export class WPPConnectClientManager {
           clientInfo.status = 'qr_required';
           clientInfo.isReady = false;
           break;
-        case 'browserClose':
         case 'autocloseCalled':
         case 'qrReadError':
         case 'qrReadFail':
-          // Auto-close or QR error means authentication failed
-          // Remove the client from the map as it's no longer valid
-          console.log(`🗑️  Removing client ${clientId} - Authentication failed or auto-close (${status})`);
+          // Clear authentication failures - delete from MongoDB
+          console.log(`🗑️  Removing client ${clientId} - Authentication failed (${status})`);
           this.clients.delete(clientId);
           
-          // Also delete the session from MongoDB to prevent resurrection on restart
+          // Delete the session from MongoDB to prevent resurrection on restart
           if (this.tokenStore) {
             this.tokenStore.removeToken(clientId)
               .then(() => {
@@ -291,6 +289,11 @@ export class WPPConnectClientManager {
                 console.error(`⚠️  Failed to delete session from MongoDB for ${clientId}:`, error);
               });
           }
+          return;
+        case 'browserClose':
+          // Browser close might be normal - only remove from map, keep session in MongoDB
+          console.log(`🗑️  Removing client ${clientId} - Browser closed (${status})`);
+          this.clients.delete(clientId);
           return;
         case 'desconnectedMobile':
         case 'serverClose':
