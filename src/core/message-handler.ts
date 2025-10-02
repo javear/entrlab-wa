@@ -836,10 +836,34 @@ export class WPPConnectMessageHandler {
               await client.client.sendText(formattedNumber || '', String(part.value));
             }
           } else {
-            // Send text part
+            // Send text part - check for sticker patterns
             try {
-              await client.client.sendText(formattedNumber || '', String(part.value));
-              console.log(`✅ Sent text part`);
+              const textContent = String(part.value);
+              
+              // Check if text contains #sticker: pattern
+              const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
+              if (stickerMatch && stickerMatch[1]) {
+                const stickerUrl = stickerMatch[1];
+                console.log(`🎭 Sending as sticker from text: ${stickerUrl}`);
+                
+                const targetNumber = formattedNumber || '';
+                await client.client.sendImageAsSticker(
+                  targetNumber,
+                  stickerUrl
+                );
+                console.log(`✅ Sent sticker from text: ${stickerUrl}`);
+                
+                // Remove the sticker part from the text and send the remaining text
+                const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
+                if (remainingText) {
+                  await client.client.sendText(formattedNumber || '', remainingText);
+                  console.log(`✅ Sent remaining text: ${remainingText}`);
+                }
+              } else {
+                // Regular text
+                await client.client.sendText(formattedNumber || '', textContent);
+                console.log(`✅ Sent text part`);
+              }
             } catch (textErr: any) {
               console.log('⚠️ Error sending text part:', textErr?.message || textErr);
             }
