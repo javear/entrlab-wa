@@ -121,7 +121,10 @@ export class WPPConnectClientManager {
           
           // CRITICAL: Save session when authenticated
           if (statusSession === 'isLogged' || statusSession === 'inChat') {
-            this.saveSessionToMongoDB(clientId);
+            console.log(`🔄 Status ${statusSession} detected - triggering session save for ${clientId}`);
+            this.saveSessionToMongoDB(clientId).catch((error) => {
+              console.error(`❌ Error in saveSessionToMongoDB for ${clientId}:`, error);
+            });
           }
         },
         
@@ -266,6 +269,7 @@ export class WPPConnectClientManager {
     try {
       console.log(`🔄 Attempting to save session for ${clientId} to MongoDB...`);
       const clientInfo = this.clients.get(clientId);
+      console.log(`🔍 Client info for ${clientId}: exists=${!!clientInfo}, hasClient=${!!clientInfo?.client}, hasTokenStore=${!!this.tokenStore}`);
       
       if (clientInfo && clientInfo.client && this.tokenStore) {
         // Get session token from WPPConnect client
