@@ -159,16 +159,10 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Manually save session to MongoDB after successful connection
-            try {
-              const sessionToken = await client.getSessionTokenBrowser();
-              if (sessionToken && this.tokenStore) {
-                await this.tokenStore.setToken(clientId, sessionToken);
-                console.log(`💾 Manually saved WPPConnect session to MongoDB: ${clientId}`);
-              }
-            } catch (error) {
-              console.error(`❌ Error manually saving session for ${clientId}:`, error);
-            }
+            // Save session to MongoDB after successful connection
+            this.saveClientSession(clientId).catch((error) => {
+              console.error(`❌ Error saving session for ${clientId}:`, error);
+            });
           }
           this.updateClientPhoneNumber(clientId);
         }
@@ -256,6 +250,28 @@ export class WPPConnectClientManager {
     }
   }
 
+  private async saveClientSession(clientId: string): Promise<void> {
+    try {
+      console.log(`🔄 Attempting to save session for ${clientId}...`);
+      const clientInfo = this.clients.get(clientId);
+      if (clientInfo && clientInfo.client && this.tokenStore) {
+        console.log(`📱 Client ${clientId} found, getting session token...`);
+        const sessionToken = await clientInfo.client.getSessionTokenBrowser();
+        if (sessionToken) {
+          console.log(`🔑 Session token obtained for ${clientId}, saving to MongoDB...`);
+          await this.tokenStore.setToken(clientId, sessionToken);
+          console.log(`💾 Successfully saved WPPConnect session to MongoDB: ${clientId}`);
+        } else {
+          console.log(`⚠️ No session token available for ${clientId}`);
+        }
+      } else {
+        console.log(`⚠️ Cannot save session for ${clientId}: clientInfo=${!!clientInfo}, client=${!!clientInfo?.client}, tokenStore=${!!this.tokenStore}`);
+      }
+    } catch (error) {
+      console.error(`❌ Error saving session for ${clientId}:`, error);
+    }
+  }
+
   private updateClientStatus(clientId: string, status: string): void {
     const clientInfo = this.clients.get(clientId);
     if (clientInfo) {
@@ -267,6 +283,11 @@ export class WPPConnectClientManager {
           clientInfo.status = 'ready';
           clientInfo.isReady = true;
           console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
+          
+          // Save session to MongoDB when client is authenticated
+          this.saveClientSession(clientId).catch((error) => {
+            console.error(`❌ Error saving session for ${clientId}:`, error);
+          });
           break;
         case 'notLogged':
           clientInfo.status = 'qr_required';
