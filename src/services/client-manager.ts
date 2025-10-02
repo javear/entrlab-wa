@@ -86,6 +86,11 @@ export class WPPConnectClientManager {
     console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
 
     try {
+      // Set up unique browser folder for this client
+      const path = require('path');
+      const userDataDir = path.join(process.cwd(), 'tokens', clientId);
+      console.log(`📁 Client ${clientId} browser folder: ${userDataDir}`);
+      
       // Create WPPConnect client with MongoDB TokenStore
       const client = await create({
         session: clientId,
@@ -98,6 +103,13 @@ export class WPPConnectClientManager {
         useChrome: true,
         debug: false,
         logQR: false, // Disable console QR - use API endpoint instead
+        
+        // CRITICAL: Explicitly set puppeteer userDataDir for multi-session support
+        puppeteerOptions: {
+          userDataDir: userDataDir,
+          executablePath: this.config.chromiumPath,
+          args: this.config.puppeteerArgs
+        },
         
         // Browser arguments (optimized for memory)
         browserArgs: this.config.puppeteerArgs,
