@@ -771,81 +771,62 @@ export class WPPConnectMessageHandler {
               const mediaUrl = String(part.value);
               console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
               
-              // Download media from URL first
-              const mediaData = await this.downloadMediaFromUrl(mediaUrl);
-              if (!mediaData) {
-                throw new Error('Failed to download media');
-              }
-              
-              // Save base64 data to temporary file for WPPConnect
-              const base64Data = mediaData.buffer.toString('base64');
-              const mimeType = mediaData.mimeType;
-              const fileExtension = this.getFileExtensionFromMimeType(mimeType);
-              const tempFilename = `${crypto.randomUUID()}${fileExtension}`;
-              const tempFilePath = path.join(this.tempDir, tempFilename);
-              
-              // Write base64 data to temporary file
-              const buffer = Buffer.from(base64Data, 'base64');
-              fs.writeFileSync(tempFilePath, buffer);
-              console.log(`📁 Created temporary file: ${tempFilePath} (${Math.round(buffer.length / 1024)}KB)`);
-              
-              try {
-                // Determine the appropriate WPPConnect method based on media type
-                if (mimeType.startsWith('image/')) {
-                  // Send as image using file path
-                  if (part.caption) {
-                    await client.client.sendImage(
-                      formattedNumber || '',
-                      tempFilePath,
-                      part.caption
-                    );
-                  } else {
-                    await client.client.sendImage(
-                      formattedNumber || '',
-                      tempFilePath
-                    );
-                  }
-                  console.log(`✅ Sent image from ${mediaUrl}`);
-                } else if (mimeType.startsWith('video/')) {
-                  // Send as video using file path
-                  if (part.caption) {
-                    await client.client.sendFile(
-                      formattedNumber || '',
-                      tempFilePath,
-                      undefined,
-                      part.caption
-                    );
-                  } else {
-                    await client.client.sendFile(
-                      formattedNumber || '',
-                      tempFilePath
-                    );
-                  }
-                  console.log(`✅ Sent video from ${mediaUrl}`);
-                } else if (mimeType.startsWith('audio/')) {
-                  // Send as audio using file path
-                  await client.client.sendFile(
-                    formattedNumber || '',
-                    tempFilePath
-                  );
-                  console.log(`✅ Sent audio from ${mediaUrl}`);
-                } else {
-                  // Send as generic file using file path
-                  await client.client.sendFile(
-                    formattedNumber || '',
-                    tempFilePath
-                  );
-                  console.log(`✅ Sent file from ${mediaUrl}`);
+              // Check if it's a sticker (starts with #sticker:)
+              if (mediaUrl.startsWith('#sticker:')) {
+                const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
+                console.log(`🎭 Sending as sticker: ${stickerUrl}`);
+                
+                await client.client.sendImageAsSticker(
+                  formattedNumber || '',
+                  stickerUrl
+                );
+                console.log(`✅ Sent sticker from ${stickerUrl}`);
+              } else {
+                // Determine media type from URL extension or content
+                const urlLower = mediaUrl.toLowerCase();
+                let mimeType = 'application/octet-stream'; // default
+                
+                if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp)$/)) {
+                  mimeType = 'image/';
+                } else if (urlLower.match(/\.(mp4|avi|mov|wmv|flv|webm)$/)) {
+                  mimeType = 'video/';
+                } else if (urlLower.match(/\.(mp3|wav|ogg|m4a|aac)$/)) {
+                  mimeType = 'audio/';
                 }
-              } finally {
-                // Clean up temporary file
-                try {
-                  if (fs.existsSync(tempFilePath)) {
-                    fs.unlinkSync(tempFilePath);
-                    console.log(`🗑️ Cleaned up temporary file: ${tempFilePath}`);
+                
+                // Send using WPPConnect's direct URL support
+                if (mimeType.startsWith('image/')) {
+                  // Send as image using URL directly
+                  if (part.caption) {
+                    await client.client.sendImage(
+                      formattedNumber || '',
+                      mediaUrl,
+                      undefined, // filename (optional)
+                      part.caption
+                    );
+                  } else {
+                    await client.client.sendImage(
+                      formattedNumber || '',
+                      mediaUrl
+                    );
                   }
-                } catch (cleanupError) {
-                  console.error(`⚠️ Error cleaning up temporary file ${tempFilePath}:`, cleanupError);
+                  console.log(`✅ Sent image from URL: ${mediaUrl}`);
+                } else {
+                  // Send as file using URL directly
+                  if (part.caption) {
+                    await client.client.sendFile(
+                      formattedNumber || '',
+                      mediaUrl,
+                      undefined, // filename (optional)
+                      part.caption
+                    );
+                  } else {
+                    await client.client.sendFile(
+                      formattedNumber || '',
+                      mediaUrl
+                    );
+                  }
+                  console.log(`✅ Sent file from URL: ${mediaUrl}`);
                 }
               }
               
