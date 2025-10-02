@@ -159,11 +159,8 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Save session to MongoDB after successful connection
-            console.log(`🔄 Calling saveClientSession for ${clientId} (CONNECTED state)...`);
-            this.saveClientSession(clientId).catch((error) => {
-              console.error(`❌ Error saving session for ${clientId}:`, error);
-            });
+            // WPPConnect automatically handles session saving via tokenStore
+            console.log(`✅ WPPConnect automatically manages session persistence via tokenStore`);
           }
           this.updateClientPhoneNumber(clientId);
         }
@@ -176,15 +173,15 @@ export class WPPConnectClientManager {
         existingClientInfo.lastActivity = new Date();
         console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
         
+        // CRITICAL: Save session immediately after client creation (WPPConnect handles this automatically)
+        console.log(`🔄 WPPConnect will automatically save session to MongoDB via tokenStore`);
+        
         // Update phone number if client is already authenticated (restored session)
         if (existingClientInfo.isReady) {
           await this.updateClientPhoneNumber(clientId);
           
-          // CRITICAL: Save session for clients that are already ready (edge case)
-          console.log(`🔄 Client ${clientId} is already ready - saving session immediately`);
-          this.saveClientSession(clientId).catch((error) => {
-            console.error(`❌ Error saving existing session for ${clientId}:`, error);
-          });
+          // WPPConnect automatically handles session saving via tokenStore
+          console.log(`✅ Client ${clientId} is already ready - session managed by WPPConnect tokenStore`);
         }
         
         return existingClientInfo;
@@ -257,27 +254,6 @@ export class WPPConnectClientManager {
     }
   }
 
-  private async saveClientSession(clientId: string): Promise<void> {
-    try {
-      console.log(`🔄 Attempting to save session for ${clientId}...`);
-      const clientInfo = this.clients.get(clientId);
-      if (clientInfo && clientInfo.client && this.tokenStore) {
-        console.log(`📱 Client ${clientId} found, getting session token...`);
-        const sessionToken = await clientInfo.client.getSessionTokenBrowser();
-        if (sessionToken) {
-          console.log(`🔑 Session token obtained for ${clientId}, saving to MongoDB...`);
-          await this.tokenStore.setToken(clientId, sessionToken);
-          console.log(`💾 Successfully saved WPPConnect session to MongoDB: ${clientId}`);
-        } else {
-          console.log(`⚠️ No session token available for ${clientId}`);
-        }
-      } else {
-        console.log(`⚠️ Cannot save session for ${clientId}: clientInfo=${!!clientInfo}, client=${!!clientInfo?.client}, tokenStore=${!!this.tokenStore}`);
-      }
-    } catch (error) {
-      console.error(`❌ Error saving session for ${clientId}:`, error);
-    }
-  }
 
   private updateClientStatus(clientId: string, status: string): void {
     const clientInfo = this.clients.get(clientId);
@@ -291,11 +267,8 @@ export class WPPConnectClientManager {
           clientInfo.isReady = true;
           console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
           
-          // Save session to MongoDB when client is authenticated
-          console.log(`🔄 Calling saveClientSession for ${clientId}...`);
-          this.saveClientSession(clientId).catch((error) => {
-            console.error(`❌ Error saving session for ${clientId}:`, error);
-          });
+          // WPPConnect automatically handles session saving via tokenStore
+          console.log(`✅ WPPConnect automatically manages session persistence via tokenStore`);
           break;
         case 'notLogged':
           clientInfo.status = 'qr_required';
