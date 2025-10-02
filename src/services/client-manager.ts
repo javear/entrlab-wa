@@ -160,6 +160,7 @@ export class WPPConnectClientManager {
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
             // Save session to MongoDB after successful connection
+            console.log(`🔄 Calling saveClientSession for ${clientId} (CONNECTED state)...`);
             this.saveClientSession(clientId).catch((error) => {
               console.error(`❌ Error saving session for ${clientId}:`, error);
             });
@@ -178,6 +179,12 @@ export class WPPConnectClientManager {
         // Update phone number if client is already authenticated (restored session)
         if (existingClientInfo.isReady) {
           await this.updateClientPhoneNumber(clientId);
+          
+          // CRITICAL: Save session for clients that are already ready (edge case)
+          console.log(`🔄 Client ${clientId} is already ready - saving session immediately`);
+          this.saveClientSession(clientId).catch((error) => {
+            console.error(`❌ Error saving existing session for ${clientId}:`, error);
+          });
         }
         
         return existingClientInfo;
