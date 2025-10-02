@@ -241,6 +241,17 @@ export class WPPConnectClientManager {
       // Remove the placeholder client if creation failed
       this.clients.delete(clientId);
       console.log(`🗑️  Removed failed client ${clientId} from map`);
+      
+      // Also delete from MongoDB on failed creation
+      if (this.tokenStore) {
+        try {
+          await this.tokenStore.removeToken(clientId);
+          console.log(`🗑️  Deleted failed session from MongoDB: ${clientId}`);
+        } catch (mongoError) {
+          console.error(`⚠️  Failed to delete session from MongoDB for ${clientId}:`, mongoError);
+        }
+      }
+      
       throw error;
     }
   }
@@ -269,6 +280,17 @@ export class WPPConnectClientManager {
           // Remove the client from the map as it's no longer valid
           console.log(`🗑️  Removing client ${clientId} - Authentication failed or auto-close (${status})`);
           this.clients.delete(clientId);
+          
+          // Also delete the session from MongoDB to prevent resurrection on restart
+          if (this.tokenStore) {
+            this.tokenStore.removeToken(clientId)
+              .then(() => {
+                console.log(`🗑️  Deleted failed session from MongoDB: ${clientId}`);
+              })
+              .catch((error) => {
+                console.error(`⚠️  Failed to delete session from MongoDB for ${clientId}:`, error);
+              });
+          }
           return;
         case 'desconnectedMobile':
         case 'serverClose':
