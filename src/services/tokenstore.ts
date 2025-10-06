@@ -188,8 +188,65 @@ const lastUploadTime = new Map<string, number>();
 const MIN_UPLOAD_INTERVAL = 10000; // 10 seconds minimum between uploads
 
 /**
+ * Extract real session tokens from browser Local Storage
+ * WPPConnect stores authentication data in browser's Local Storage
+ */
+async function extractSessionTokensFromBrowser(clientId: string): Promise<SessionToken | null> {
+  try {
+    const tokensPath = path.join(process.cwd(), 'tokens', clientId);
+    const localStoragePath = path.join(tokensPath, 'Default', 'Local Storage', 'leveldb');
+    
+    if (!fs.existsSync(localStoragePath)) {
+      console.log(`⚠️  Local Storage not found for ${clientId}`);
+      return null;
+    }
+    
+    // Try to read session data from Local Storage files
+    // WPPConnect stores tokens in browser's Local Storage
+    const files = fs.readdirSync(localStoragePath);
+    const logFiles = files.filter(f => f.endsWith('.log'));
+    
+    for (const file of logFiles) {
+      try {
+        const content = fs.readFileSync(path.join(localStoragePath, file), 'utf8');
+        
+        // Look for WPPConnect session tokens
+        if (content.includes('WABrowserId') || content.includes('WASecretBundle')) {
+          // Extract JSON-like structures containing session tokens
+          const waBrowserIdMatch = content.match(/"WABrowserId":"([^"]+)"/);
+          const waSecretBundleMatch = content.match(/"WASecretBundle":"([^"]+)"/);
+          const waToken1Match = content.match(/"WAToken1":"([^"]+)"/);
+          const waToken2Match = content.match(/"WAToken2":"([^"]+)"/);
+          
+          if (waBrowserIdMatch?.[1] && waSecretBundleMatch?.[1] && waToken1Match?.[1] && waToken2Match?.[1]) {
+            const sessionToken: SessionToken = {
+              WABrowserId: waBrowserIdMatch[1],
+              WASecretBundle: waSecretBundleMatch[1],
+              WAToken1: waToken1Match[1],
+              WAToken2: waToken2Match[1]
+            };
+            
+            console.log(`✅ Extracted real session tokens from browser storage for ${clientId}`);
+            return sessionToken;
+          }
+        }
+      } catch (err) {
+        // Continue to next file
+      }
+    }
+    
+    console.log(`⚠️  Could not extract session tokens from browser storage for ${clientId}`);
+    return null;
+  } catch (error) {
+    console.error(`❌ Error extracting session tokens for ${clientId}:`, error);
+    return null;
+  }
+}
+
+/**
  * Upload browser session folder to MongoDB GridFS
  * Compresses the entire /tokens/{clientId}/ folder into a zip and stores it
+ * Also extracts and saves session tokens for cross-server portability
  */
 export async function uploadBrowserSessionToMongo(clientId: string): Promise<boolean> {
   // Check if upload is already in progress
@@ -325,6 +382,27 @@ export async function uploadBrowserSessionToMongo(clientId: string): Promise<boo
                 
                 console.log(`✅ Browser session uploaded to MongoDB for ${clientId} (atomic replace)`);
                 lastUploadTime.set(clientId, Date.now()); // Record successful upload time
+                
+                // Also extract and save session tokens for cross-server portability
+                extractSessionTokensFromBrowser(clientId).then(async (sessionToken) => {
+                  if (sessionToken) {
+                    try {
+                      await WPPConnectSession.findOneAndUpdate(
+                        { sessionName: clientId },
+                        { 
+                          sessionName: clientId,
+                          tokenData: sessionToken,
+                          updatedAt: new Date()
+                        },
+                        { upsert: true, new: true }
+                      );
+                      console.log(`✅ Saved extracted session tokens to MongoDB for ${clientId}`);
+                    } catch (tokenError) {
+                      console.error(`❌ Failed to save session tokens for ${clientId}:`, tokenError);
+                    }
+                  }
+                }).catch(err => console.error(`Error extracting tokens: ${err}`));
+                
                 resolve(true);
               } catch (replaceError) {
                 console.error(`❌ Error during atomic replace for ${clientId}:`, replaceError);

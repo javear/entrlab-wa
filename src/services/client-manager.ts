@@ -89,18 +89,6 @@ export class WPPConnectClientManager {
     // Check for and clean up any broken sessions in MongoDB
     await this.detectAndCleanupBrokenSession(clientId);
 
-    // Try to download browser session from MongoDB GridFS
-    try {
-      const sessionRestored = await downloadBrowserSessionFromMongo(clientId);
-      if (sessionRestored) {
-        console.log(`✅ Browser session restored from MongoDB for ${clientId}`);
-        // Wait a bit for filesystem to stabilize after extraction
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } catch (error) {
-      console.error(`⚠️  Error downloading browser session for ${clientId}:`, error);
-    }
-
     console.log(`🔗 Using WPPConnect MongoDB TokenStore for client ${clientId}`);
 
     // Add placeholder client info immediately so it's queryable
@@ -115,25 +103,50 @@ export class WPPConnectClientManager {
     console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
 
     try {
-      // Create WPPConnect client with MongoDB TokenStore
-      // Note: When using custom tokenStore, WPPConnect handles session persistence entirely through tokenStore
-      // No local browser folders needed - all session data goes to MongoDB
+      // BULLETPROOF SESSION RESTORATION STRATEGY:
+      // 1. Try session tokens first (cross-server compatible, like whatsapp-web.js)
+      // 2. Fallback to browser folder if tokens don't work
+      // 3. Generate QR only if both fail
+      
       console.log(`🔍 TokenStore type: ${typeof this.standaloneTokenStore}`);
       console.log(`🔍 TokenStore keys: ${this.standaloneTokenStore ? Object.keys(this.standaloneTokenStore).join(', ') : 'null'}`);
       console.log(`🔍 TokenStore.setToken type: ${typeof this.standaloneTokenStore?.setToken}`);
       
-      // Try to restore session from MongoDB
+      // STEP 1: Try to restore session tokens from MongoDB (PREFERRED - cross-server compatible)
       let sessionToken = null;
+      let hasSessionTokens = false;
       try {
         sessionToken = await this.standaloneTokenStore.getToken(clientId);
-        if (sessionToken) {
-          console.log(`🔄 Found existing session token in MongoDB for ${clientId}`);
+        if (sessionToken && sessionToken.WABrowserId && sessionToken.WASecretBundle) {
+          console.log(`✅ Found valid session tokens in MongoDB for ${clientId}`);
           console.log(`🔄 Token keys: ${Object.keys(sessionToken).join(', ')}`);
+          hasSessionTokens = true;
+          
+          // Don't download browser folder if we have valid tokens
+          // Session tokens are sufficient for authentication and work across servers
+          console.log(`🎯 Using session tokens for cross-server authentication`);
         } else {
-          console.log(`📝 No existing session token found for ${clientId} - will create new session`);
+          console.log(`⚠️  Session tokens found but invalid/incomplete for ${clientId}`);
         }
       } catch (error) {
         console.error(`❌ Error retrieving session token for ${clientId}:`, error);
+      }
+      
+      // STEP 2: If no valid tokens, try browser folder backup (fallback for same-server)
+      if (!hasSessionTokens) {
+        try {
+          const sessionRestored = await downloadBrowserSessionFromMongo(clientId);
+          if (sessionRestored) {
+            console.log(`✅ Browser session restored from MongoDB for ${clientId} (fallback)`);
+            // Wait for filesystem to stabilize after extraction
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } else {
+            console.log(`📝 No browser session or tokens found - will generate QR code for ${clientId}`);
+          }
+        } catch (error) {
+          console.error(`⚠️  Error downloading browser session for ${clientId}:`, error);
+          console.log(`📝 Will generate QR code for authentication`);
+        }
       }
       
       const client = await create({
