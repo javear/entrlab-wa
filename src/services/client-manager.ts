@@ -318,13 +318,49 @@ export class WPPConnectClientManager {
                                  errorMessage.includes('locked the profile');
       
       if (isBrowserLockError) {
-        console.log(`🔄 Browser/profile lock detected for ${clientId}, attempting cleanup...`);
+        // Check if we've already retried to prevent infinite loops
+        const retryKey = `${clientId}_lock_retry`;
+        const retryCount = (this as any)[retryKey] || 0;
+        
+        if (retryCount >= 2) {
+          console.log(`❌ Max retry attempts (${retryCount}) reached for ${clientId}, giving up`);
+          delete (this as any)[retryKey];
+          
+          // Delete the corrupted browser folder and MongoDB session
+          const fs = require('fs');
+          const path = require('path');
+          const browserPath = path.join(process.cwd(), 'tokens', clientId);
+          
+          try {
+            if (fs.existsSync(browserPath)) {
+              fs.rmSync(browserPath, { recursive: true, force: true });
+              console.log(`🗑️  Removed corrupted browser folder: ${browserPath}`);
+            }
+            
+            await deleteBrowserSessionFromMongo(clientId);
+            console.log(`🗑️  Removed corrupted session from MongoDB for ${clientId}`);
+          } catch (e) {
+            console.error(`⚠️  Cleanup error:`, e);
+          }
+          
+          throw new Error(`Failed to recover from browser lock after ${retryCount} attempts`);
+        }
+        
+        (this as any)[retryKey] = retryCount + 1;
+        console.log(`🔄 Browser/profile lock detected for ${clientId}, cleanup attempt ${retryCount + 1}/2...`);
         
         try {
           const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
           const browserPath = path.join(process.cwd(), 'tokens', clientId);
+          
+          // CRITICAL: Delete the entire browser folder to force clean slate
+          console.log(`🗑️  Removing entire browser folder for clean extraction: ${browserPath}`);
+          if (fs.existsSync(browserPath)) {
+            fs.rmSync(browserPath, { recursive: true, force: true });
+            console.log(`✅ Browser folder removed successfully`);
+          }
           
           // Extract PID from error message if available
           const pidMatch = errorMessage.match(/process \((\d+)\)/);
@@ -333,21 +369,19 @@ export class WPPConnectClientManager {
             console.log(`🔍 Found locking process PID: ${lockingPid}`);
             
             try {
-              // Check if process exists and kill it
+              // Try to kill if it's a local process
               execSync(`kill -0 ${lockingPid} 2>/dev/null && kill -9 ${lockingPid}`, { 
                 stdio: 'ignore',
                 timeout: 5000 
               });
               console.log(`💀 Killed stale Chromium process: ${lockingPid}`);
-              
-              // Wait for process to fully terminate
               await new Promise(resolve => setTimeout(resolve, 2000));
             } catch (killError) {
-              console.log(`ℹ️  Process ${lockingPid} already terminated or not found`);
+              console.log(`ℹ️  Process ${lockingPid} not found (may be remote or already terminated)`);
             }
           }
           
-          // Also kill any Chromium processes using this profile
+          // Kill any local Chromium processes using this profile
           try {
             const grepCmd = `ps aux | grep -i "[c]hromium.*${clientId}" | awk '{print $2}'`;
             const pids = execSync(grepCmd, { encoding: 'utf8', timeout: 5000 }).trim();
@@ -364,42 +398,27 @@ export class WPPConnectClientManager {
               await new Promise(resolve => setTimeout(resolve, 2000));
             }
           } catch (grepError) {
-            console.log(`ℹ️  No Chromium processes found for ${clientId}`);
+            console.log(`ℹ️  No local Chromium processes found for ${clientId}`);
           }
           
-          // Remove Chromium lock files
-          const lockFiles = [
-            'SingletonLock', 
-            'SingletonSocket', 
-            'SingletonCookie',
-            'lockfile'
-          ];
-          
-          for (const lockFile of lockFiles) {
-            const lockPath = path.join(browserPath, lockFile);
-            if (fs.existsSync(lockPath)) {
-              try {
-                fs.unlinkSync(lockPath);
-                console.log(`🗑️  Removed lock file: ${lockFile}`);
-              } catch (unlinkError) {
-                console.log(`⚠️  Could not remove ${lockFile}: ${unlinkError}`);
-              }
-            }
-          }
-          
-          console.log(`✅ Browser locks and processes cleaned up for ${clientId}, retrying...`);
+          console.log(`✅ Cleanup completed, retrying with fresh download...`);
           
           // Remove the failed placeholder
           this.clients.delete(clientId);
           
-          // Add a delay before retry to ensure full cleanup
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          // Wait for filesystem to sync
+          await new Promise(resolve => setTimeout(resolve, 2000));
           
           // Retry creating the client
-          return await this.createClient(clientId);
+          const result = await this.createClient(clientId);
+          
+          // Success! Clear retry counter
+          delete (this as any)[retryKey];
+          return result;
           
         } catch (cleanupError) {
           console.error(`❌ Failed to cleanup browser locks for ${clientId}:`, cleanupError);
+          throw cleanupError;
         }
       }
       
