@@ -34,28 +34,20 @@ export const createRemoteTokenStore = () => {
   return {
     getToken: async (sessionName: string): Promise<SessionToken | undefined> => {
       try {
-        console.log(`🔍 RemoteTokenStore.getToken() for: ${sessionName}`);
-        
         const session = await WPPConnectSession.findOne({ sessionName });
         if (session?.tokenData) {
-          console.log(`✅ Retrieved session from MongoDB: ${sessionName}`);
-          console.log(`📦 Token keys: ${Object.keys(session.tokenData).join(', ')}`);
+          console.log(`✅ [${sessionName}] Session loaded from MongoDB`);
           return session.tokenData as SessionToken;
         }
-        
-        console.log(`⚠️  No session found in MongoDB for: ${sessionName}`);
         return undefined;
       } catch (error) {
-        console.error(`❌ Error getting token for ${sessionName}:`, error);
+        console.error(`❌ [${sessionName}] Error loading session:`, error);
         return undefined;
       }
     },
 
     setToken: async (sessionName: string, tokenData: SessionToken): Promise<boolean> => {
       try {
-        console.log(`💾 RemoteTokenStore.setToken() for: ${sessionName}`);
-        console.log(`💾 Token keys: ${Object.keys(tokenData || {}).join(', ')}`);
-        
         await WPPConnectSession.findOneAndUpdate(
           { sessionName },
           { 
@@ -68,40 +60,32 @@ export const createRemoteTokenStore = () => {
             new: true 
           }
         );
-        
-        console.log(`✅ Session saved to MongoDB: ${sessionName}`);
         return true;
       } catch (error) {
-        console.error(`❌ Error setting token for ${sessionName}:`, error);
+        console.error(`❌ [${sessionName}] Error saving session:`, error);
         return false;
       }
     },
 
     removeToken: async (sessionName: string): Promise<boolean> => {
       try {
-        console.log(`🗑️  RemoteTokenStore.removeToken() for: ${sessionName}`);
-        
         await WPPConnectSession.deleteOne({ sessionName });
-        
-        console.log(`✅ Session removed from MongoDB: ${sessionName}`);
+        console.log(`🗑️  [${sessionName}] Session removed from MongoDB`);
         return true;
       } catch (error) {
-        console.error(`❌ Error removing token for ${sessionName}:`, error);
+        console.error(`❌ [${sessionName}] Error removing session:`, error);
         return false;
       }
     },
 
     listTokens: async (): Promise<string[]> => {
       try {
-        console.log(`📋 RemoteTokenStore.listTokens()`);
-        
         const sessions = await WPPConnectSession.find({}, 'sessionName');
         const sessionNames = sessions.map(s => s.sessionName);
-        
-        console.log(`✅ Found ${sessionNames.length} sessions: ${sessionNames.join(', ')}`);
+        console.log(`📋 Found ${sessionNames.length} sessions in MongoDB`);
         return sessionNames;
       } catch (error) {
-        console.error(`❌ Error listing tokens:`, error);
+        console.error(`❌ Error listing sessions:`, error);
         return [];
       }
     }
