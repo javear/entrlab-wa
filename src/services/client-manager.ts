@@ -533,9 +533,11 @@ export class WPPConnectClientManager {
       clientInfo.qrCode = qrCode;
       clientInfo.status = 'qr_required';
       clientInfo.lastActivity = new Date();
-      console.log(`📱 Updated QR code for ${clientId}, qrCode length: ${qrCode.length}`);
+      console.log(`📱 [${clientId}] QR code updated (length: ${qrCode.length})`);
+      console.log(`📱 [${clientId}] QR available at: GET /api/whatsapp/clients/${clientId}/qr-image`);
     } else {
-      console.warn(`⚠️ Client ${clientId} not found when trying to update QR code`);
+      console.error(`❌ [${clientId}] Client not found in map when updating QR code!`);
+      console.log(`📋 Current clients in map: ${Array.from(this.clients.keys()).join(', ')}`);
     }
   }
 

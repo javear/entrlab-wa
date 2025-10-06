@@ -199,6 +199,8 @@ export class WPPConnectWhatsAppController {
   async getQRImage(req: Request, res: Response): Promise<void> {
     try {
       const { clientId } = req.params;
+      console.log(`📱 QR image request for: ${clientId}`);
+      
       if (!clientId) {
         res.status(400).json({
           success: false,
@@ -209,6 +211,7 @@ export class WPPConnectWhatsAppController {
       const client = this.whatsappService.getClient(clientId);
 
       if (!client) {
+        console.log(`❌ Client ${clientId} not found`);
         res.status(404).json({
           success: false,
           message: 'WPPConnect client not found'
@@ -216,10 +219,13 @@ export class WPPConnectWhatsAppController {
         return;
       }
 
+      console.log(`🔍 Client ${clientId} found, status: ${client.status}, hasQR: ${!!client.qrCode}`);
+
       if (!client.qrCode) {
+        console.log(`❌ No QR code available for ${clientId} (status: ${client.status})`);
         res.status(404).json({
           success: false,
-          message: 'No QR code available for this client'
+          message: `No QR code available for this client (status: ${client.status})`
         });
         return;
       }
