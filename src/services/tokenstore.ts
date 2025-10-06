@@ -97,9 +97,23 @@ export class WPPConnectMongoTokenStore {
 
   async setToken(sessionName: string, tokenData: SessionToken): Promise<boolean> {
     try {
-      console.log(`💾 TokenStore.setToken() called for: ${sessionName}`);
+      console.log(`💾 ==== TokenStore.setToken() CALLED BY WPPCONNECT ==== for: ${sessionName}`);
       console.log(`💾 Token data keys: ${Object.keys(tokenData || {}).join(', ')}`);
       console.log(`💾 Full token data:`, JSON.stringify(tokenData, null, 2));
+      console.log(`💾 Call stack:`, new Error().stack?.split('\n').slice(1, 4).join('\n'));
+      
+      // Check if these are placeholder values
+      const isPlaceholder = tokenData.WABrowserId === 'MultiDevice' &&
+                           tokenData.WASecretBundle === 'MultiDevice' &&
+                           tokenData.WAToken1 === 'MultiDevice' &&
+                           tokenData.WAToken2 === 'MultiDevice';
+      
+      if (isPlaceholder) {
+        console.warn(`⚠️  WPPConnect sent placeholder "MultiDevice" tokens - these won't work for session restore!`);
+        console.warn(`⚠️  This means WPPConnect is NOT automatically saving real tokens via TokenStore`);
+        // Don't save placeholders
+        return false;
+      }
       
       // Check if we have valid session data
       const hasValidData = tokenData && (
@@ -112,7 +126,7 @@ export class WPPConnectMongoTokenStore {
         return false;
       }
       
-      // Save whatever WPPConnect gives us - don't be strict about structure
+      // Save whatever WPPConnect gives us
       await WPPConnectSession.findOneAndUpdate(
         { sessionName },
         { 
@@ -126,7 +140,7 @@ export class WPPConnectMongoTokenStore {
         }
       );
       
-      console.log(`✅ Successfully saved WPPConnect session to MongoDB: ${sessionName}`);
+      console.log(`✅ Successfully saved REAL WPPConnect session to MongoDB: ${sessionName}`);
       console.log(`✅ Saved token keys: ${Object.keys(tokenData).join(', ')}`);
       return true;
     } catch (error) {

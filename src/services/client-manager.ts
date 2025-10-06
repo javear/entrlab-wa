@@ -110,27 +110,28 @@ export class WPPConnectClientManager {
       console.log(`🔍 TokenStore type: ${typeof this.standaloneTokenStore}`);
       console.log(`🔍 TokenStore keys: ${this.standaloneTokenStore ? Object.keys(this.standaloneTokenStore).join(', ') : 'null'}`);
       
-      // Try to restore session tokens from MongoDB
-      let sessionToken = null;
+      // Try to download browser session from MongoDB GridFS (primary method)
+      let hasSession = false;
       try {
-        sessionToken = await this.standaloneTokenStore.getToken(clientId);
-        if (sessionToken && sessionToken.WABrowserId && sessionToken.WASecretBundle) {
-          console.log(`✅ Found valid session tokens in MongoDB for ${clientId}`);
-          console.log(`🔄 Token keys: ${Object.keys(sessionToken).join(', ')}`);
-          console.log(`🎯 Using session tokens from MongoDB - works across ANY server!`);
+        hasSession = await downloadBrowserSessionFromMongo(clientId);
+        if (hasSession) {
+          console.log(`✅ Browser session restored from MongoDB GridFS for ${clientId}`);
+          console.log(`🎯 Session folder extracted - will auto-login!`);
+          // Wait for filesystem to stabilize after extraction
+          await new Promise(resolve => setTimeout(resolve, 1000));
         } else {
-          console.log(`📝 No session tokens found in MongoDB for ${clientId}`);
-          console.log(`📝 Will generate QR code for authentication`);
+          console.log(`📝 No browser session found in MongoDB GridFS for ${clientId}`);
+          console.log(`📝 Will generate QR code for new authentication`);
         }
       } catch (error) {
-        console.error(`❌ Error retrieving session token for ${clientId}:`, error);
+        console.error(`❌ Error downloading browser session for ${clientId}:`, error);
         console.log(`📝 Will generate QR code for authentication`);
       }
       
+      // Session tokens are just placeholders for WPPConnect - ignore them
       const client = await create({
         session: clientId,
         tokenStore: this.standaloneTokenStore, // Custom MongoDB TokenStore
-        sessionToken: sessionToken || undefined, // Pass saved token if available
         
         // Browser configuration
         headless: true,
