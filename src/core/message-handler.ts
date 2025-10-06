@@ -955,8 +955,16 @@ export class WPPConnectMessageHandler {
       const idx = extractedMediaList.length;
       const cap = String(alt || '').trim();
       const cleanedUrl = this.cleanupUrl(String(url));
-      const mediaItem: { url: string; caption?: string; isSticker?: boolean } = { url: cleanedUrl };
-      if (cap.length > 0) {
+      
+      // Check if this is a GIF or WEBP - treat as animated sticker
+      const isAnimatedImage = /\.(gif|webp)(\?.*)?$/i.test(cleanedUrl);
+      
+      const mediaItem: { url: string; caption?: string; isSticker?: boolean } = { 
+        url: cleanedUrl,
+        isSticker: isAnimatedImage // Automatically mark GIF/WEBP as stickers
+      };
+      if (cap.length > 0 && !isAnimatedImage) {
+        // Don't add caption to stickers (captions not supported for stickers)
         mediaItem.caption = cap;
       }
       extractedMediaList.push(mediaItem);
