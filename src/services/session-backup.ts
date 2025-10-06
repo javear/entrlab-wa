@@ -43,11 +43,15 @@ export class WhatsAppSessionBackup {
       'Secure Preferences',
       'Web Data',
       'Web Data-journal',
-      'Local State',
       'Network Persistent State', // Network session data
       'TransportSecurity', // SSL/TLS session data
       'Trust Tokens', // Trust token data
       'Trust Tokens-journal'
+    ];
+
+    // Root-level essential files
+    const rootEssentialFiles = [
+      'Local State' // Critical for browser session state
     ];
 
     // Essential folders (excluding cache and temporary data)
@@ -86,6 +90,7 @@ export class WhatsAppSessionBackup {
     const fileName = path.basename(filePath);
     
     // Exclude lock files and Chrome version files (cause crashes or are unnecessary)
+    // But keep Local State which is critical for session persistence
     const lockFiles = [
       'SingletonLock',
       'lockfile', 
@@ -188,11 +193,25 @@ export class WhatsAppSessionBackup {
         });
       }
 
-      // Also add any root-level session files (excluding problematic ones)
+      // Add root-level essential files (like Local State)
+      const rootEssentialFiles = ['Local State'];
+      for (const file of rootEssentialFiles) {
+        const filePath = path.join(sessionPath, file);
+        if (fs.existsSync(filePath)) {
+          try {
+            archive.file(filePath, { name: file });
+            console.log(`📁 [${clientId}] Added root file: ${file}`);
+          } catch (fileError) {
+            console.warn(`⚠️  [${clientId}] Skipping root file ${file}: ${fileError}`);
+          }
+        }
+      }
+
+      // Also add any other root-level session files (excluding problematic ones)
       try {
         const rootFiles = fs.readdirSync(sessionPath);
         for (const file of rootFiles) {
-          if (file === 'Default') continue; // Already added above
+          if (file === 'Default' || rootEssentialFiles.includes(file)) continue; // Already added above
           
           const filePath = path.join(sessionPath, file);
           if (!this.shouldExcludeFile(filePath)) {

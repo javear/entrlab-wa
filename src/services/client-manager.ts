@@ -4,7 +4,7 @@ import {
   deleteBrowserSessionFromMongo,
   listBrowserSessionsInMongo
 } from './tokenstore';
-import { WhatsAppSessionBackup } from './session-backup';
+import { RobustSessionBackup } from './robust-session-backup';
 import fs from 'fs';
 import path from 'path';
 
@@ -37,7 +37,7 @@ export class WPPConnectClientManager {
   private clients: Map<string, WPPConnectClientInfo> = new Map();
   private config: WPPConnectClientManagerConfig;
   private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
-  private sessionBackup: WhatsAppSessionBackup | null = null;
+  private sessionBackup: RobustSessionBackup | null = null;
   private isMongoConnected: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private sessionBackupInterval: NodeJS.Timeout | null = null;
@@ -57,9 +57,9 @@ export class WPPConnectClientManager {
     try {
       if (mongoose.connection.readyState === 1) {
         this.isMongoConnected = true;
-        // Initialize session backup service
-        this.sessionBackup = new WhatsAppSessionBackup();
-        console.log('✅ WhatsApp Session Backup service initialized');
+        // Initialize robust session backup service
+        this.sessionBackup = new RobustSessionBackup();
+        console.log('✅ Robust Session Backup service initialized');
       } else {
         throw new Error('MongoDB connection not available');
       }
@@ -83,7 +83,7 @@ export class WPPConnectClientManager {
     // Try to restore session from MongoDB backup first (unless skipped)
     if (!skipRestore) {
       console.log(`🔄 [${clientId}] Attempting to restore session from MongoDB...`);
-      const restored = await this.sessionBackup!.restoreSession(clientId);
+      const restored = await this.sessionBackup!.restoreCompleteSession(clientId);
       
       if (restored) {
         console.log(`✅ [${clientId}] Session restored from MongoDB backup`);
@@ -187,15 +187,15 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ [${clientId}] Connected and ready`);
             
-            // Backup session to MongoDB after successful connection
+            // Backup COMPLETE session to MongoDB after successful connection
             setImmediate(async () => {
               try {
-                console.log(`💾 [${clientId}] Backing up session to MongoDB...`);
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for session to stabilize
-                await this.sessionBackup!.backupSession(clientId);
-                await this.sessionBackup!.cleanupOldBackups(clientId, 3); // Keep only 3 backups
+                console.log(`💾 [${clientId}] Backing up COMPLETE session to MongoDB...`);
+                await new Promise(resolve => setTimeout(resolve, 10000)); // Wait longer for session to fully stabilize
+                await this.sessionBackup!.backupCompleteSession(clientId);
+                await this.sessionBackup!.cleanupOldCompleteBackups(clientId, 2); // Keep only 2 complete backups
               } catch (error) {
-                console.error(`❌ [${clientId}] Session backup failed:`, error);
+                console.error(`❌ [${clientId}] Complete session backup failed:`, error);
               }
             });
           }
@@ -631,17 +631,17 @@ export class WPPConnectClientManager {
     }
 
     try {
-      // Get list of browser sessions from MongoDB GridFS (new backup service)
-      const sessions = await this.sessionBackup.listBackups('*');
-      console.log(`📋 Found ${sessions.length} existing browser sessions in MongoDB GridFS`);
+      // Get list of complete browser sessions from MongoDB GridFS
+      const sessions = await this.sessionBackup.listCompleteBackups('*');
+      console.log(`📋 Found ${sessions.length} existing complete browser sessions in MongoDB GridFS`);
 
       for (const session of sessions) {
-        const clientId = session.filename.replace('_session.zip', '');
-        console.log(`🔄 Restoring browser session for client: ${clientId}`);
+        const clientId = session.filename.replace('_complete_session.zip', '');
+        console.log(`🔄 Restoring COMPLETE browser session for client: ${clientId}`);
         
         try {
-          // Restore the session first, then create client
-          const restored = await this.sessionBackup.restoreSession(clientId);
+          // Restore the complete session first, then create client
+          const restored = await this.sessionBackup.restoreCompleteSession(clientId);
           if (restored) {
             console.log(`✅ Session restored for ${clientId}, waiting before creating client...`);
             // Wait longer for session to fully stabilize
