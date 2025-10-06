@@ -142,36 +142,7 @@ export class WPPConnectClientManager {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // Save session tokens after successful authentication
-          if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged' || statusSession === 'inChat') {
-            setImmediate(() => {
-              (async () => {
-                try {
-                  const clientInfo = this.clients.get(clientId);
-                  if (clientInfo?.client) {
-                    console.log(`💾 Getting session token from WPPConnect client ${clientId}...`);
-                    
-                    // Wait for session to stabilize
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    
-                    // Get token using WPPConnect's method
-                    const token = await clientInfo.client.getSessionTokenBrowser();
-                    console.log(`🔍 Retrieved token from getSessionTokenBrowser():`, JSON.stringify(token, null, 2));
-                    
-                    if (token) {
-                      // Manually save to our TokenStore
-                      const saved = await this.standaloneTokenStore.setToken(clientId, token);
-                      if (saved) {
-                        console.log(`✅ Session token manually saved to MongoDB for ${clientId}`);
-                      }
-                    }
-                  }
-                } catch (error) {
-                  console.error(`❌ Error saving session token for ${clientId}:`, error);
-                }
-              })().catch(err => console.error(`❌ Background save failed:`, err));
-            });
-          }
+          // We'll save tokens on CONNECTED state instead - more reliable timing
         },
         
         catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
@@ -214,7 +185,31 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // WPPConnect's TokenStore should handle session persistence automatically
+            // Save session token after CONNECTED - best timing for real token data
+            setImmediate(() => {
+              (async () => {
+                try {
+                  console.log(`💾 Getting session token from WPPConnect client ${clientId} (after CONNECTED)...`);
+                  
+                  // Wait longer for session to fully stabilize and write to disk
+                  await new Promise(resolve => setTimeout(resolve, 5000));
+                  
+                  const token = await clientInfo.client.getSessionTokenBrowser();
+                  console.log(`🔍 Retrieved token from getSessionTokenBrowser() after CONNECTED:`, JSON.stringify(token, null, 2));
+                  
+                  if (token && token.WABrowserId !== 'MultiDevice') {
+                    const saved = await this.standaloneTokenStore.setToken(clientId, token);
+                    if (saved) {
+                      console.log(`✅ Real session token saved to MongoDB for ${clientId}!`);
+                    }
+                  } else {
+                    console.warn(`⚠️  Still getting placeholder tokens - session data may not be available via getSessionTokenBrowser()`);
+                  }
+                } catch (error) {
+                  console.error(`❌ Error saving session token for ${clientId}:`, error);
+                }
+              })().catch(err => console.error(`❌ Background token save failed:`, err));
+            });
           }
           this.updateClientPhoneNumber(clientId);
         }
