@@ -63,11 +63,11 @@ RemoteAuth-*.zip
 *.wwebjs_auth
 *.wwebjs_cache
 
-# WPPConnect browser session files
-# Note: WPPConnect stores session tokens in MongoDB (via tokenStore)
-# but browser profiles (cache, cookies, etc.) are still stored in tokens/ folder
-# This folder can be safely deleted - sessions will be restored from MongoDB
+# WPPConnect session files
+# Using pure remote TokenStore - all sessions stored in MongoDB
+# No local token files needed! 100% cloud-based session persistence
 tokens/
+tokens_data/
 
 # Browser session folders (in case they're created in wrong location)
 goapotik/
