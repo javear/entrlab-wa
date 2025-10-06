@@ -154,6 +154,9 @@ export class WPPConnectWhatsAppController {
         return;
       }
 
+      // Debug logging
+      console.log(`🔍 Client ${clientId} - qrCode exists: ${!!client.qrCode}, length: ${client.qrCode?.length || 0}`);
+      
       res.json({
         success: true,
         client: {
@@ -432,6 +435,45 @@ export class WPPConnectWhatsAppController {
       res.status(500).json({
         success: false,
         message: 'Failed to remove WPPConnect client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Force cleanup of a stuck client session from MongoDB
+   * This endpoint can be used to manually clean up broken sessions
+   */
+  async forceCleanupClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      console.log(`🧹 Force cleanup requested for client: ${clientId}`);
+      const success = await this.whatsappService.forceCleanupSession(clientId);
+
+      if (success) {
+        res.json({
+          success: true,
+          message: `Force cleaned up session for client ${clientId} from MongoDB`
+        });
+      } else {
+        res.status(404).json({
+          success: false,
+          message: `Session for client ${clientId} was not found in MongoDB`
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error force cleaning client session:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to force cleanup client session',
         error: error instanceof Error ? error.message : 'Unknown error'
       });
     }

@@ -1,62 +1,37 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import { SessionToken } from '@wppconnect-team/wppconnect/dist/token-store/types';
+import fs from 'fs';
+import path from 'path';
+import archiver from 'archiver';
+import { Readable } from 'stream';
+import { GridFSBucket } from 'mongodb';
 
-// ============================================
-// WPPConnect MongoDB TokenStore Implementation
-// ============================================
-
-// MongoDB Schema for WPPConnect Session Storage (separate from whatsapp-web.js)
+// MongoDB Schema for WPPConnect Session Storage
 interface IWPPConnectSession extends Document {
   sessionName: string;
-  tokenData: any;
+  tokenData: SessionToken;
   createdAt: Date;
   updatedAt: Date;
 }
 
-// Create model with error handling to avoid overwrite issues
 let WPPConnectSession: mongoose.Model<IWPPConnectSession>;
 try {
   WPPConnectSession = mongoose.model<IWPPConnectSession>('WPPConnectSession');
 } catch (error) {
   const WPPConnectSessionSchema = new Schema<IWPPConnectSession>({
-    sessionName: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true
-    },
-    tokenData: {
-      type: Schema.Types.Mixed,
-      required: true
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now
-    },
-    updatedAt: {
-      type: Date,
-      default: Date.now
-    }
-  }, {
-    timestamps: true,
-    collection: 'wppconnect_sessions' // Separate collection from whatsapp-web.js
+    sessionName: { type: String, required: true, unique: true, index: true },
+    tokenData: { type: Object, required: true },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
   });
-
-  // Update the updatedAt timestamp on save
-  WPPConnectSessionSchema.pre('save', function(next) {
-    this.updatedAt = new Date();
-    next();
-  });
-
-  // Create indexes for better performance
   WPPConnectSessionSchema.index({ sessionName: 1 });
-  WPPConnectSessionSchema.index({ createdAt: 1 });
   WPPConnectSessionSchema.index({ updatedAt: 1 });
-
   WPPConnectSession = mongoose.model<IWPPConnectSession>('WPPConnectSession', WPPConnectSessionSchema);
 }
 
 // ============================================
-// Custom MongoDB TokenStore Class for WPPConnect
+// Custom MongoDB TokenStore for WPPConnect
+// Implements the exact TokenStore interface as a plain object
 // ============================================
 
 export class WPPConnectMongoTokenStore {
@@ -66,71 +41,70 @@ export class WPPConnectMongoTokenStore {
     this.connected = false;
   }
 
-  /**
-   * List all tokens (required by WPPConnect TokenStore interface)
-   * @returns {Promise<string[]>} Array of session names
-   */
-  async listTokens(): Promise<string[]> {
-    try {
-      const sessions = await WPPConnectSession.find({}, 'sessionName');
-      return sessions.map(session => session.sessionName);
-    } catch (error) {
-      console.error('❌ Error listing WPPConnect tokens:', error);
-      return [];
-    }
+  // Create a plain object that implements the TokenStore interface
+  // This matches the exact pattern from WPPConnect documentation
+  getTokenStore() {
+    return {
+      getToken: (sessionName: string) => this.getToken(sessionName),
+      setToken: (sessionName: string, tokenData: SessionToken) => this.setToken(sessionName, tokenData),
+      removeToken: (sessionName: string) => this.removeToken(sessionName),
+      listTokens: () => this.listTokens()
+    };
   }
 
-  /**
-   * Connect to MongoDB (reuse existing connection)
-   */
   async connect(): Promise<void> {
+    if (this.connected) {
+      console.log('✅ WPPConnect MongoDB TokenStore already connected.');
+      return;
+    }
     try {
-      if (!this.connected && mongoose.connection.readyState === 1) {
+      // For standalone TokenStore, we don't need explicit connection checking
+      // Mongoose connection is managed globally in app.ts
         this.connected = true;
         console.log('✅ WPPConnect MongoDB TokenStore connected successfully');
-      } else if (mongoose.connection.readyState !== 1) {
-        throw new Error('MongoDB connection not available');
-      }
     } catch (error) {
       console.error('❌ WPPConnect MongoDB connection error:', error);
       throw error;
     }
   }
 
-  /**
-   * Get token data for a session
-   * @param {string} sessionName - Name of the session
-   * @returns {Promise<any|null>} Token data or null
-   */
-  async getToken(sessionName: string): Promise<any | null> {
+  async getToken(sessionName: string): Promise<SessionToken | undefined> {
     try {
       console.log(`🔍 TokenStore.getToken() called for: ${sessionName}`);
       const session = await WPPConnectSession.findOne({ sessionName });
       
-      if (session) {
+      if (session && session.tokenData) {
         console.log(`📥 Retrieved WPPConnect session from MongoDB: ${sessionName}`);
-        console.log(`📥 Token data keys: ${Object.keys(session.tokenData || {}).join(', ')}`);
-        return session.tokenData;
+        console.log(`📥 Token data keys: ${Object.keys(session.tokenData).join(', ')}`);
+        
+        const tokenData = session.tokenData;
+        if (tokenData.WABrowserId && tokenData.WASecretBundle && tokenData.WAToken1 && tokenData.WAToken2) {
+          console.log(`✅ Valid SessionToken found for ${sessionName}`);
+          return tokenData as SessionToken;
+        } else {
+          console.log(`⚠️  Invalid SessionToken structure for ${sessionName}`);
+          return undefined;
+        }
       }
       
       console.log(`⚠️  No WPPConnect session found in MongoDB: ${sessionName}`);
-      return null;
+      return undefined;
     } catch (error) {
       console.error(`❌ Error getting WPPConnect token for ${sessionName}:`, error);
-      return null;
+      return undefined;
     }
   }
 
-  /**
-   * Save or update token data for a session
-   * @param {string} sessionName - Name of the session
-   * @param {any} tokenData - Token data to store
-   * @returns {Promise<boolean>} Success status
-   */
-  async setToken(sessionName: string, tokenData: any): Promise<boolean> {
+  async setToken(sessionName: string, tokenData: SessionToken): Promise<boolean> {
     try {
-      console.log(`💾 Saving WPPConnect session to MongoDB: ${sessionName}`);
+      console.log(`💾 TokenStore.setToken() called for: ${sessionName}`);
       console.log(`💾 Token data keys: ${Object.keys(tokenData || {}).join(', ')}`);
+      console.log(`💾 Full token data:`, JSON.stringify(tokenData, null, 2));
+      
+      if (!tokenData.WABrowserId || !tokenData.WASecretBundle || !tokenData.WAToken1 || !tokenData.WAToken2) {
+        console.error(`❌ Invalid SessionToken structure for ${sessionName}`);
+        return false;
+      }
       
       await WPPConnectSession.findOneAndUpdate(
         { sessionName },
@@ -140,7 +114,7 @@ export class WPPConnectMongoTokenStore {
           updatedAt: new Date()
         },
         { 
-          upsert: true,  // Create if doesn't exist
+          upsert: true,
           new: true 
         }
       );
@@ -153,15 +127,11 @@ export class WPPConnectMongoTokenStore {
     }
   }
 
-  /**
-   * Remove token data for a session
-   * @param {string} sessionName - Name of the session
-   * @returns {Promise<boolean>} Success status
-   */
   async removeToken(sessionName: string): Promise<boolean> {
     try {
+      console.log(`🗑️  TokenStore.removeToken() called for: ${sessionName}`);
       await WPPConnectSession.deleteOne({ sessionName });
-      console.log(`🗑️  Removed WPPConnect session: ${sessionName}`);
+      console.log(`✅ Removed WPPConnect session: ${sessionName}`);
       return true;
     } catch (error) {
       console.error(`❌ Error removing WPPConnect token for ${sessionName}:`, error);
@@ -169,38 +139,19 @@ export class WPPConnectMongoTokenStore {
     }
   }
 
-  /**
-   * List all stored sessions
-   * @returns {Promise<Array>} Array of session names
-   */
-  async listSessions(): Promise<any[]> {
+  async listTokens(): Promise<string[]> {
     try {
-      const sessions = await WPPConnectSession.find({}, 'sessionName createdAt updatedAt');
-      return sessions;
+      console.log(`🔍 TokenStore.listTokens() called`);
+      const sessions = await WPPConnectSession.find({}, 'sessionName');
+      const sessionNames = sessions.map(session => session.sessionName);
+      console.log(`📋 Found ${sessionNames.length} sessions: ${sessionNames.join(', ')}`);
+      return sessionNames;
     } catch (error) {
-      console.error('❌ Error listing WPPConnect sessions:', error);
+      console.error('❌ Error listing WPPConnect tokens:', error);
       return [];
     }
   }
 
-  /**
-   * Check if session exists
-   * @param {string} sessionName - Name of the session
-   * @returns {Promise<boolean>} Session exists status
-   */
-  async sessionExists(sessionName: string): Promise<boolean> {
-    try {
-      const session = await WPPConnectSession.findOne({ sessionName });
-      return !!session;
-    } catch (error) {
-      console.error(`❌ Error checking WPPConnect session existence for ${sessionName}:`, error);
-      return false;
-    }
-  }
-
-  /**
-   * Close MongoDB connection (reuse existing connection)
-   */
   async disconnect(): Promise<void> {
     if (this.connected) {
       this.connected = false;
@@ -209,4 +160,412 @@ export class WPPConnectMongoTokenStore {
   }
 }
 
-export default WPPConnectMongoTokenStore;
+// ============================================
+// Browser Session Storage in MongoDB (GridFS)
+// Store entire /tokens/{clientId}/ folder in MongoDB
+// ============================================
+
+let gridFSBucket: GridFSBucket | null = null;
+
+function getGridFSBucket(): GridFSBucket {
+  if (!gridFSBucket) {
+    const db = mongoose.connection.db;
+    if (!db) {
+      throw new Error('MongoDB connection not established');
+    }
+    gridFSBucket = new GridFSBucket(db, {
+      bucketName: 'wppconnect-browser-sessions'
+    });
+  }
+  return gridFSBucket;
+}
+
+// Track ongoing uploads to prevent duplicates
+const uploadLocks = new Map<string, Promise<boolean>>();
+
+// Track last upload time to prevent rapid successive uploads
+const lastUploadTime = new Map<string, number>();
+const MIN_UPLOAD_INTERVAL = 10000; // 10 seconds minimum between uploads
+
+/**
+ * Upload browser session folder to MongoDB GridFS
+ * Compresses the entire /tokens/{clientId}/ folder into a zip and stores it
+ */
+export async function uploadBrowserSessionToMongo(clientId: string): Promise<boolean> {
+  // Check if upload is already in progress
+  if (uploadLocks.has(clientId)) {
+    console.log(`⏳ Upload already in progress for ${clientId}, skipping duplicate request`);
+    return true; // Return true to indicate session will be saved
+  }
+
+  // Check if we've uploaded too recently (debounce)
+  const lastUpload = lastUploadTime.get(clientId);
+  if (lastUpload) {
+    const timeSinceLastUpload = Date.now() - lastUpload;
+    if (timeSinceLastUpload < MIN_UPLOAD_INTERVAL) {
+      console.log(`⏭️  Skipping upload for ${clientId} - uploaded ${Math.round(timeSinceLastUpload / 1000)}s ago (min interval: ${MIN_UPLOAD_INTERVAL / 1000}s)`);
+      return true; // Return true since we have a recent upload
+    }
+  }
+
+  // Create upload promise with timeout
+  const uploadPromise = (async (): Promise<boolean> => {
+    try {
+      const tokensPath = path.join(process.cwd(), 'tokens', clientId);
+      
+      if (!fs.existsSync(tokensPath)) {
+        console.log(`⚠️  Browser session folder not found for ${clientId}`);
+        return false;
+      }
+
+      const bucket = getGridFSBucket();
+      
+      // ATOMIC REPLACE STRATEGY:
+      // 1. Upload to temporary filename (clientId.tmp)
+      // 2. Only delete old backup AFTER new upload succeeds
+      // 3. This prevents corruption if upload fails mid-way
+      const tempFilename = `${clientId}.tmp`;
+
+      console.log(`📦 Compressing browser session folder for ${clientId}...`);
+
+      // Create zip archive with fastest compression (store mode = no compression for max speed)
+      const archive = archiver('zip', { zlib: { level: 0 } }); // Level 0 = store only, no compression (fastest)
+      const uploadStream = bucket.openUploadStream(tempFilename, {
+        metadata: { 
+          clientId, 
+          uploadedAt: new Date(),
+          type: 'browser-session',
+          isTemporary: true
+        }
+      });
+
+      // Set up abort mechanism
+      let uploadAborted = false;
+      const abortUpload = () => {
+        if (!uploadAborted) {
+          uploadAborted = true;
+          console.log(`⚠️  Aborting upload for ${clientId} due to timeout`);
+          try {
+            archive.abort();
+            uploadStream.destroy();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        }
+      };
+
+      archive.pipe(uploadStream);
+      archive.directory(tokensPath, false);
+      
+      // Finalize in background
+      archive.finalize().catch((err) => {
+        if (!uploadAborted) {
+          console.error(`❌ Archive finalize error for ${clientId}:`, err);
+        }
+      });
+
+      // Add timeout to prevent hanging during shutdown (longer for reliability)
+      let cleanupDone = false; // Track if cleanup already happened
+      const result = await Promise.race([
+        new Promise<boolean>(async (resolve, reject) => {
+          uploadStream.on('finish', async () => {
+            if (!uploadAborted) {
+              try {
+                // ATOMIC REPLACE: Now that upload succeeded, replace old backup with new one
+                console.log(`🔄 Replacing old backup with new one for ${clientId}...`);
+                
+                // Delete old backup files (with actual clientId filename)
+                const oldFiles = await bucket.find({ filename: clientId }).toArray();
+                for (const file of oldFiles) {
+                  await bucket.delete(file._id);
+                }
+                
+                // Rename temp file to actual filename by re-uploading with correct name
+                // (GridFS doesn't support rename, so we download and re-upload)
+                const tempFiles = await bucket.find({ filename: tempFilename }).toArray();
+                if (tempFiles.length > 0 && tempFiles[0]) {
+                  const tempFile = tempFiles[0];
+                  const downloadStream = bucket.openDownloadStream(tempFile._id);
+                  const finalUploadStream = bucket.openUploadStream(clientId, {
+                    metadata: { 
+                      clientId, 
+                      uploadedAt: new Date(),
+                      type: 'browser-session',
+                      isTemporary: false
+                    }
+                  });
+                  
+                  await new Promise<void>((resolveRename, rejectRename) => {
+                    downloadStream.pipe(finalUploadStream);
+                    finalUploadStream.on('finish', () => resolveRename());
+                    finalUploadStream.on('error', (err) => rejectRename(err));
+                  });
+                  
+                  // Delete temp file - mark cleanup as done
+                  if (tempFile._id && !cleanupDone) {
+                    cleanupDone = true;
+                    await bucket.delete(tempFile._id);
+                  }
+                }
+                
+                console.log(`✅ Browser session uploaded to MongoDB for ${clientId} (atomic replace)`);
+                lastUploadTime.set(clientId, Date.now()); // Record successful upload time
+                resolve(true);
+              } catch (replaceError) {
+                console.error(`❌ Error during atomic replace for ${clientId}:`, replaceError);
+                // Don't reject - just keep old backup
+                // This prevents crash if temp file was already deleted by timeout
+                console.log(`⚠️  Keeping old backup for ${clientId} due to atomic replace error`);
+                resolve(false);
+              }
+            }
+          });
+          uploadStream.on('error', (error) => {
+            if (!uploadAborted) {
+              console.error(`❌ Error uploading browser session for ${clientId}:`, error);
+              // Clean up temp file on error - only if not already done
+              if (!cleanupDone) {
+                cleanupDone = true;
+                bucket.find({ filename: tempFilename }).toArray().then(tempFiles => {
+                  tempFiles.forEach(file => bucket.delete(file._id).catch(() => {}));
+                }).catch(() => {});
+              }
+              resolve(false); // Don't reject - just keep old backup
+            }
+          });
+        }),
+        new Promise<boolean>((resolve) => {
+          setTimeout(() => {
+            abortUpload();
+            console.log(`⏱️  Upload timeout for ${clientId} after 30s, keeping old backup...`);
+            // Clean up temp file on timeout - only if not already done
+            if (!cleanupDone) {
+              cleanupDone = true;
+              bucket.find({ filename: tempFilename }).toArray().then(tempFiles => {
+                tempFiles.forEach(file => bucket.delete(file._id).catch(() => {}));
+              }).catch(() => {});
+            }
+            resolve(false); // Return false instead of rejecting to prevent crash
+          }, 30000); // 30 seconds for reliable upload
+        })
+      ]);
+      
+      // Even on timeout, record attempt time to prevent immediate retries
+      if (!result) {
+        lastUploadTime.set(clientId, Date.now());
+      }
+      
+      return result;
+    } catch (error) {
+      console.error(`❌ Failed to upload browser session for ${clientId}:`, error);
+      return false;
+    } finally {
+      // Remove lock when done
+      uploadLocks.delete(clientId);
+    }
+  })();
+
+  // Store the promise in locks
+  uploadLocks.set(clientId, uploadPromise);
+  
+  return uploadPromise;
+}
+
+/**
+ * Download browser session folder from MongoDB GridFS
+ * Extracts the zip to /tokens/{clientId}/
+ */
+export async function downloadBrowserSessionFromMongo(clientId: string): Promise<boolean> {
+  try {
+    const bucket = getGridFSBucket();
+    
+    const files = await bucket.find({ filename: clientId }).toArray();
+    if (files.length === 0) {
+      console.log(`📋 No browser session found in MongoDB for ${clientId}`);
+      return false;
+    }
+
+    console.log(`📥 Downloading browser session from MongoDB for ${clientId}...`);
+
+    const tokensPath = path.join(process.cwd(), 'tokens', clientId);
+    
+    // Create tokens directory if it doesn't exist
+    if (!fs.existsSync(path.join(process.cwd(), 'tokens'))) {
+      fs.mkdirSync(path.join(process.cwd(), 'tokens'), { recursive: true });
+    }
+
+    // Download and extract
+    const downloadStream = bucket.openDownloadStreamByName(clientId);
+    const extract = require('extract-zip');
+    const tmpZipPath = path.join(process.cwd(), 'tokens', `${clientId}.zip`);
+
+    return new Promise((resolve, reject) => {
+      const writeStream = fs.createWriteStream(tmpZipPath);
+      
+      downloadStream.pipe(writeStream);
+      
+      writeStream.on('finish', async () => {
+        try {
+          await extract(tmpZipPath, { dir: tokensPath });
+          fs.unlinkSync(tmpZipPath); // Clean up zip file
+          console.log(`✅ Browser session extracted to /tokens/${clientId}/`);
+          resolve(true);
+        } catch (error) {
+          console.error(`❌ Error extracting browser session for ${clientId}:`, error);
+          reject(error);
+        }
+      });
+      
+      writeStream.on('error', (error) => {
+        console.error(`❌ Error downloading browser session for ${clientId}:`, error);
+        reject(error);
+      });
+    });
+  } catch (error) {
+    console.error(`❌ Failed to download browser session for ${clientId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Delete browser session from MongoDB GridFS
+ */
+export async function deleteBrowserSessionFromMongo(clientId: string): Promise<boolean> {
+  try {
+    const bucket = getGridFSBucket();
+    const files = await bucket.find({ filename: clientId }).toArray();
+    
+    for (const file of files) {
+      await bucket.delete(file._id);
+    }
+    
+    if (files.length > 0) {
+      console.log(`🗑️  Deleted browser session from MongoDB for ${clientId}`);
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error(`❌ Failed to delete browser session for ${clientId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * List all browser sessions in MongoDB
+ */
+export async function listBrowserSessionsInMongo(): Promise<string[]> {
+  try {
+    const bucket = getGridFSBucket();
+    const files = await bucket.find({}).toArray();
+    const clientIds = files.map(file => file.filename as string);
+    return [...new Set(clientIds)]; // Remove duplicates
+  } catch (error) {
+    console.error('❌ Failed to list browser sessions:', error);
+    return [];
+  }
+}
+
+// ============================================
+// Standalone MongoDB TokenStore Object
+// This follows the exact pattern from WPPConnect documentation
+// ============================================
+
+export function createMongoTokenStore(): any {
+  return {
+    getToken: (sessionName: string) => {
+      console.log(`🔍 TokenStore.getToken() called for: ${sessionName}`);
+      return new Promise((resolve) => {
+        WPPConnectSession.findOne({ sessionName })
+          .then(session => {
+            if (session && session.tokenData) {
+              console.log(`📥 Retrieved WPPConnect session from MongoDB: ${sessionName}`);
+              console.log(`📥 Token data keys: ${Object.keys(session.tokenData).join(', ')}`);
+              
+              const tokenData = session.tokenData;
+              if (tokenData.WABrowserId && tokenData.WASecretBundle && tokenData.WAToken1 && tokenData.WAToken2) {
+                console.log(`✅ Valid SessionToken found for ${sessionName}`);
+                resolve(tokenData as SessionToken);
+              } else {
+                console.log(`⚠️  Invalid SessionToken structure for ${sessionName}`);
+                resolve(undefined);
+              }
+            } else {
+              console.log(`⚠️  No WPPConnect session found in MongoDB: ${sessionName}`);
+              resolve(undefined);
+            }
+          })
+          .catch(error => {
+            console.error(`❌ Error getting WPPConnect token for ${sessionName}:`, error);
+            resolve(undefined);
+          });
+      });
+    },
+
+    setToken: (sessionName: string, tokenData: SessionToken) => {
+      console.log(`💾 TokenStore.setToken() called for: ${sessionName}`);
+      console.log(`💾 Token data keys: ${Object.keys(tokenData || {}).join(', ')}`);
+      console.log(`💾 Full token data:`, JSON.stringify(tokenData, null, 2));
+      
+      return new Promise((resolve) => {
+        // Relaxed validation - WPPConnect might not pass all keys immediately
+        if (!tokenData || Object.keys(tokenData).length === 0) {
+          console.error(`❌ Invalid SessionToken structure for ${sessionName} - empty or null`);
+          resolve(false);
+          return;
+        }
+        
+        WPPConnectSession.findOneAndUpdate(
+          { sessionName },
+          { 
+            sessionName,
+            tokenData,
+            updatedAt: new Date()
+          },
+          { 
+            upsert: true,
+            new: true 
+          }
+        )
+        .then(() => {
+          console.log(`✅ Successfully saved WPPConnect session: ${sessionName}`);
+          resolve(true);
+        })
+        .catch(error => {
+          console.error(`❌ Error setting WPPConnect token for ${sessionName}:`, error);
+          resolve(false);
+        });
+      });
+    },
+
+    removeToken: (sessionName: string) => {
+      return new Promise((resolve) => {
+        WPPConnectSession.deleteOne({ sessionName })
+          .then(() => {
+            console.log(`🗑️  Removed WPPConnect session: ${sessionName}`);
+            resolve(true);
+          })
+          .catch(error => {
+            console.error(`❌ Error removing WPPConnect token for ${sessionName}:`, error);
+            resolve(false);
+          });
+      });
+    },
+
+    listTokens: () => {
+      console.log(`🔍 TokenStore.listTokens() called`);
+      return new Promise((resolve) => {
+        WPPConnectSession.find({}, 'sessionName')
+          .then(sessions => {
+            const sessionNames = sessions.map(session => session.sessionName);
+            console.log(`📋 Found ${sessionNames.length} sessions: ${sessionNames.join(', ')}`);
+            resolve(sessionNames);
+          })
+          .catch(error => {
+            console.error('❌ Error listing WPPConnect tokens:', error);
+            resolve([]);
+          });
+      });
+    }
+  };
+}

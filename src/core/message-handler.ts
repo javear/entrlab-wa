@@ -774,13 +774,30 @@ export class WPPConnectMessageHandler {
               // Check if it's a sticker (starts with #sticker:)
               if (mediaUrl.startsWith('#sticker:')) {
                 const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
-                console.log(`🎭 Sending as sticker: ${stickerUrl}`);
+                const urlLower = stickerUrl.toLowerCase();
                 
-                await client.client.sendImageAsSticker(
-                  formattedNumber || '',
-                  stickerUrl
-                );
-                console.log(`✅ Sent sticker from ${stickerUrl}`);
+                console.log(`🔍 Sticker URL: ${stickerUrl}`);
+                console.log(`🔍 URL lowercase: ${urlLower}`);
+                
+                // Check if it's an animated sticker (GIF or WEBP)
+                const isAnimated = urlLower.match(/\.(gif|webp)(\?.*)?$/i);
+                console.log(`🔍 isAnimated match result: ${isAnimated ? 'YES - ' + isAnimated[0] : 'NO'}`);
+                
+                if (isAnimated) {
+                  console.log(`🎭 Sending as animated sticker (GIF/WEBP): ${stickerUrl}`);
+                  await client.client.sendImageAsStickerGif(
+                    formattedNumber || '',
+                    stickerUrl
+                  );
+                  console.log(`✅ Sent animated sticker from ${stickerUrl}`);
+                } else {
+                  console.log(`🎭 Sending as static sticker: ${stickerUrl}`);
+                  await client.client.sendImageAsSticker(
+                    formattedNumber || '',
+                    stickerUrl
+                  );
+                  console.log(`✅ Sent static sticker from ${stickerUrl}`);
+                }
               } else {
                 // Determine media type from URL extension or content
                 const urlLower = mediaUrl.toLowerCase();
@@ -834,6 +851,27 @@ export class WPPConnectMessageHandler {
               console.log(`⚠️ Failed to send media ${String(part.value)}:`, mediaErr?.message || mediaErr);
               // Fallback: send URL as text
               await client.client.sendText(formattedNumber || '', String(part.value));
+            }
+          } else if (part.kind === 'link') {
+            // Send link preview
+            try {
+              const linkUrl = String(part.value);
+              const linkTitle = part.caption || '';
+              
+              console.log(`🔗 Sending link preview: "${linkTitle}" -> ${linkUrl}`);
+              
+              await client.client.sendLinkPreview(
+                formattedNumber || '',
+                linkUrl,
+                linkTitle
+              );
+              console.log(`✅ Sent link preview: ${linkUrl}`);
+              
+            } catch (linkErr: any) {
+              console.log(`⚠️ Failed to send link preview ${String(part.value)}:`, linkErr?.message || linkErr);
+              // Fallback: send URL as text with title
+              const fallbackText = part.caption ? `${part.caption} ${part.value}` : String(part.value);
+              await client.client.sendText(formattedNumber || '', fallbackText);
             }
           } else {
             // Send text part - check for sticker patterns
@@ -893,28 +931,37 @@ export class WPPConnectMessageHandler {
     }
   }
 
-  private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media', value: string, caption?: string }> {
-    const outgoingParts: Array<{ kind: 'text' | 'media', value: string, caption?: string }> = [];
+  private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string }> {
+    const outgoingParts: Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string }> = [];
     
     // Pre-process text to remove duplicate URLs in parentheses
     // Pattern: url (url) -> url
     text = text.replace(/(https?:\/\/[^\s]+)\s+\(\1\)/g, '$1');
     
-    // First, extract markdown-style images: ![alt](url)
+    // First, extract sticker patterns: #sticker: url or #sticker url
+    const stickerRegex = /#sticker:?\s*(https?:\/\/[^\s\)]+)/gi;
+    const extractedMediaList: { url: string; caption?: string; isSticker?: boolean }[] = [];
+    text = text.replace(stickerRegex, (_m: string, url: string) => {
+      const idx = extractedMediaList.length;
+      const cleanedUrl = this.cleanupUrl(String(url));
+      extractedMediaList.push({ url: cleanedUrl, isSticker: true });
+      return `[[MEDIA_${idx}]]`;
+    });
+    
+    // Then, extract markdown-style images: ![alt](url)
     // Updated regex to exclude trailing ) or ] from the URL capture
     const imageMdRegex = /!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g;
-    const extractedMediaList: { url: string; caption?: string }[] = [];
-      const withMediaTokens = text.replace(imageMdRegex, (_m: string, alt: string, url: string) => {
-        const idx = extractedMediaList.length;
-        const cap = String(alt || '').trim();
-        const cleanedUrl = this.cleanupUrl(String(url));
-        const mediaItem: { url: string; caption?: string } = { url: cleanedUrl };
-        if (cap.length > 0) {
-          mediaItem.caption = cap;
-        }
-        extractedMediaList.push(mediaItem);
-        return `[[MEDIA_${idx}]]`;
-      });
+    const withMediaTokens = text.replace(imageMdRegex, (_m: string, alt: string, url: string) => {
+      const idx = extractedMediaList.length;
+      const cap = String(alt || '').trim();
+      const cleanedUrl = this.cleanupUrl(String(url));
+      const mediaItem: { url: string; caption?: string; isSticker?: boolean } = { url: cleanedUrl };
+      if (cap.length > 0) {
+        mediaItem.caption = cap;
+      }
+      extractedMediaList.push(mediaItem);
+      return `[[MEDIA_${idx}]]`;
+    });
     
     // Split by double newlines to create separate chat bubbles (matching main branch)
     const rawBlocks = withMediaTokens.split('\n\n').map(b => b.trim()).filter(Boolean);
@@ -951,7 +998,9 @@ export class WPPConnectMessageHandler {
           const idx = Number(match[2] ?? -1);
           const meta = extractedMediaList[idx];
           if (meta && meta.url) {
-            const mediaPart: { kind: 'media'; value: string; caption?: string } = { kind: 'media', value: meta.url };
+            // If it's a sticker, prefix with #sticker:
+            const mediaUrl = meta.isSticker ? `#sticker:${meta.url}` : meta.url;
+            const mediaPart: { kind: 'media'; value: string; caption?: string } = { kind: 'media', value: mediaUrl };
             if (meta.caption) {
               mediaPart.caption = meta.caption;
             }
@@ -979,9 +1028,36 @@ export class WPPConnectMessageHandler {
           outgoingParts.push({ kind: 'text', value: textAfter });
         }
       } else {
-        // If no media found in this block, add the whole block as text
-        if (block.trim()) {
-          outgoingParts.push({ kind: 'text', value: block });
+        // If no media found in this block, check for link previews (non-media URLs)
+        const linkPreviewRegex = /^(.*?)\s*(https?:\/\/[^\s\)]+?)(\s*\)?)\s*$/i;
+        const linkMatch = block.match(linkPreviewRegex);
+        
+        if (linkMatch && linkMatch[2]) {
+          const textBeforeUrl = linkMatch[1] ? linkMatch[1].trim() : '';
+          const url = this.cleanupUrl(linkMatch[2]);
+          
+          // Check if URL is NOT a media file (not image/video/audio)
+          const isMediaUrl = /\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)(\?.*)?$/i.test(url);
+          
+          if (!isMediaUrl && textBeforeUrl) {
+            // This is a link preview: text + URL
+            console.log(`🔗 Detected link preview: "${textBeforeUrl}" -> ${url}`);
+            outgoingParts.push({ 
+              kind: 'link', 
+              value: url, 
+              caption: textBeforeUrl 
+            });
+          } else {
+            // Just add as text
+            if (block.trim()) {
+              outgoingParts.push({ kind: 'text', value: block });
+            }
+          }
+        } else {
+          // No URL found, add as regular text
+          if (block.trim()) {
+            outgoingParts.push({ kind: 'text', value: block });
+          }
         }
       }
     }

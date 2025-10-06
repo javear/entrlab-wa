@@ -68,3 +68,11 @@ RemoteAuth-*.zip
 # but browser profiles (cache, cookies, etc.) are still stored in tokens/ folder
 # This folder can be safely deleted - sessions will be restored from MongoDB
 tokens/
+
+# Browser session folders (in case they're created in wrong location)
+goapotik/
+Herbakof/
+official-docs-test/
+
+# Process ID file
+.wppconnect.pid

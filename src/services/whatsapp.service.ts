@@ -87,6 +87,10 @@ export class WPPConnectWhatsAppService {
     return await this.clientManager.disconnectClient(clientId);
   }
 
+  public async forceCleanupSession(clientId: string): Promise<boolean> {
+    return await this.clientManager.forceCleanupSession(clientId);
+  }
+
   public getClient(clientId: string): WPPConnectClientInfo | undefined {
     return this.clientManager.getClient(clientId);
   }

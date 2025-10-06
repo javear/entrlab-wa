@@ -12,6 +12,7 @@ export function createWhatsAppRoutes(whatsappController: WPPConnectWhatsAppContr
     router.get('/clients/:clientId/qr-image', (req, res) => whatsappController.getQRImage(req, res));
     router.post('/clients/:clientId/send', (req, res) => whatsappController.sendMessage(req, res));
     router.post('/clients/:clientId/disconnect', (req, res) => whatsappController.disconnectClient(req, res));
+    router.post('/clients/:clientId/force-cleanup', (req, res) => whatsappController.forceCleanupClient(req, res));
     router.delete('/clients/:clientId', (req, res) => whatsappController.removeClient(req, res));
     // Note: WPPConnect doesn't have recover/reset methods - clients are managed differently
     

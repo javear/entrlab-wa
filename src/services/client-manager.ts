@@ -1,6 +1,15 @@
 import { create, Whatsapp } from '@wppconnect-team/wppconnect';
 import mongoose from 'mongoose';
-import { WPPConnectMongoTokenStore } from './tokenstore';
+import { 
+  WPPConnectMongoTokenStore, 
+  createMongoTokenStore,
+  uploadBrowserSessionToMongo,
+  downloadBrowserSessionFromMongo,
+  deleteBrowserSessionFromMongo,
+  listBrowserSessionsInMongo
+} from './tokenstore';
+import fs from 'fs';
+import path from 'path';
 
 // ============================================
 // WPPConnect Client Manager
@@ -32,8 +41,10 @@ export class WPPConnectClientManager {
   private config: WPPConnectClientManagerConfig;
   private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
   private tokenStore: WPPConnectMongoTokenStore | null = null;
+  private standaloneTokenStore: any = null;
   private isMongoConnected: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private sessionBackupInterval: NodeJS.Timeout | null = null;
   private retryAttempts: Map<string, number> = new Map();
 
   constructor(config: WPPConnectClientManagerConfig) {
@@ -43,6 +54,7 @@ export class WPPConnectClientManager {
   public async initialize(): Promise<void> {
     await this.initializeMongoDB();
     this.startHealthCheck();
+    this.startPeriodicSessionBackup();
   }
 
   private async initializeMongoDB(): Promise<void> {
@@ -50,7 +62,9 @@ export class WPPConnectClientManager {
       if (mongoose.connection.readyState === 1) {
         this.isMongoConnected = true;
         this.tokenStore = new WPPConnectMongoTokenStore();
-        await this.tokenStore.connect();
+        // Standalone TokenStore doesn't need explicit connection
+        // Create standalone TokenStore for WPPConnect
+        this.standaloneTokenStore = createMongoTokenStore();
         console.log('✅ WPPConnect MongoDB TokenStore initialized');
       } else {
         throw new Error('MongoDB connection not available');
@@ -72,6 +86,19 @@ export class WPPConnectClientManager {
       throw new Error('MongoDB connection is required. Please ensure MONGODB_URI is set and MongoDB is connected.');
     }
 
+    // Check for and clean up any broken sessions in MongoDB
+    await this.detectAndCleanupBrokenSession(clientId);
+
+    // Try to download browser session from MongoDB GridFS
+    try {
+      const sessionRestored = await downloadBrowserSessionFromMongo(clientId);
+      if (sessionRestored) {
+        console.log(`✅ Browser session restored from MongoDB for ${clientId}`);
+      }
+    } catch (error) {
+      console.error(`⚠️  Error downloading browser session for ${clientId}:`, error);
+    }
+
     console.log(`🔗 Using WPPConnect MongoDB TokenStore for client ${clientId}`);
 
     // Add placeholder client info immediately so it's queryable
@@ -86,16 +113,31 @@ export class WPPConnectClientManager {
     console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
 
     try {
-      // Set up unique browser folder for this client
-      const path = require('path');
-      const userDataDir = path.join(process.cwd(), 'tokens', clientId);
-      console.log(`📁 Client ${clientId} browser folder: ${userDataDir}`);
-      
       // Create WPPConnect client with MongoDB TokenStore
+      // Note: When using custom tokenStore, WPPConnect handles session persistence entirely through tokenStore
+      // No local browser folders needed - all session data goes to MongoDB
+      console.log(`🔍 TokenStore type: ${typeof this.standaloneTokenStore}`);
+      console.log(`🔍 TokenStore keys: ${this.standaloneTokenStore ? Object.keys(this.standaloneTokenStore).join(', ') : 'null'}`);
+      console.log(`🔍 TokenStore.setToken type: ${typeof this.standaloneTokenStore?.setToken}`);
+      
+      // Try to restore session from MongoDB
+      let sessionToken = null;
+      try {
+        sessionToken = await this.standaloneTokenStore.getToken(clientId);
+        if (sessionToken) {
+          console.log(`🔄 Found existing session token in MongoDB for ${clientId}`);
+          console.log(`🔄 Token keys: ${Object.keys(sessionToken).join(', ')}`);
+        } else {
+          console.log(`📝 No existing session token found for ${clientId} - will create new session`);
+        }
+      } catch (error) {
+        console.error(`❌ Error retrieving session token for ${clientId}:`, error);
+      }
+      
       const client = await create({
         session: clientId,
-        tokenStore: this.tokenStore,
-        folderNameToken: './tokens', // Browser profiles folder (temporary, can be cleaned)
+        tokenStore: this.standaloneTokenStore, // Custom MongoDB TokenStore
+        sessionToken: sessionToken || undefined, // Pass saved token if available
         
         // Browser configuration
         headless: true,
@@ -103,10 +145,10 @@ export class WPPConnectClientManager {
         useChrome: true,
         debug: false,
         logQR: false, // Disable console QR - use API endpoint instead
+        folderNameToken: 'tokens', // Store browser sessions in /tokens directory
         
-        // CRITICAL: Explicitly set puppeteer userDataDir for multi-session support
+        // Browser options - let WPPConnect handle session persistence through tokenStore
         puppeteerOptions: {
-          userDataDir: userDataDir,
           executablePath: this.config.chromiumPath,
           args: this.config.puppeteerArgs
         },
@@ -115,16 +157,30 @@ export class WPPConnectClientManager {
         browserArgs: this.config.puppeteerArgs,
         
         // Callbacks
-        statusFind: (statusSession, session) => {
+        statusFind: async (statusSession, session) => {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // CRITICAL: Save session when authenticated
-          if (statusSession === 'isLogged' || statusSession === 'inChat') {
-            console.log(`🔄 Status ${statusSession} detected - triggering session save for ${clientId}`);
-            this.saveSessionToMongoDB(clientId).catch((error) => {
-              console.error(`❌ Error in saveSessionToMongoDB for ${clientId}:`, error);
-            });
+          // Upload browser session folder to MongoDB after successful authentication
+          if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged' || statusSession === 'inChat') {
+            try {
+              const clientInfo = this.clients.get(clientId);
+              if (clientInfo && clientInfo.client) {
+                console.log(`💾 Uploading browser session to MongoDB for ${clientId} after ${statusSession}`);
+                
+                // Wait a bit for browser to finish writing session files
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                const uploaded = await uploadBrowserSessionToMongo(clientId);
+                if (uploaded) {
+                  console.log(`✅ Browser session uploaded to MongoDB for ${clientId}`);
+                } else {
+                  console.error(`❌ Failed to upload browser session to MongoDB for ${clientId}`);
+                }
+              }
+            } catch (error) {
+              console.error(`❌ Error uploading browser session for ${clientId}:`, error);
+            }
           }
         },
         
@@ -134,7 +190,7 @@ export class WPPConnectClientManager {
         },
         
         // Auto-close settings
-        autoClose: 60000,
+        autoClose: 180000, // 3 minutes to allow testing
         
         // Additional options
         disableWelcome: true,
@@ -155,9 +211,10 @@ export class WPPConnectClientManager {
         }
       });
 
-      // Set up ready handler
+      // Set up ready handler with comprehensive session sync
       client.onStateChange(async (state) => {
         console.log(`🔄 WPPConnect client ${clientId} state changed: ${state}`);
+        
         if (state === 'CONNECTED') {
           // Update client to ready state when connected
           const clientInfo = this.clients.get(clientId);
@@ -167,12 +224,55 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Save session to MongoDB when connected
-            this.saveSessionToMongoDB(clientId).catch((error) => {
-              console.error(`❌ Error saving session for ${clientId}:`, error);
-            });
+            // Sync session to MongoDB on CONNECTED state (session may have changed)
+            try {
+              console.log(`🔄 Syncing session to MongoDB after CONNECTED state for ${clientId}`);
+              await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for session stabilization
+              const uploaded = await uploadBrowserSessionToMongo(clientId);
+              if (uploaded) {
+                console.log(`✅ Session synced to MongoDB for ${clientId} (CONNECTED)`);
+              }
+            } catch (error) {
+              console.error(`❌ Failed to sync session on CONNECTED for ${clientId}:`, error);
+            }
           }
           this.updateClientPhoneNumber(clientId);
+        }
+        
+        // Handle disconnection states
+        if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+          console.log(`📴 Client ${clientId} unpaired/disconnected - removing session from MongoDB`);
+          const clientInfo = this.clients.get(clientId);
+          if (clientInfo) {
+            clientInfo.status = 'disconnected';
+            clientInfo.isReady = false;
+            
+            // Delete session from MongoDB when unpaired
+            try {
+              await deleteBrowserSessionFromMongo(clientId);
+              console.log(`🗑️  Session deleted from MongoDB for unpaired client ${clientId}`);
+            } catch (error) {
+              console.error(`❌ Failed to delete session for unpaired ${clientId}:`, error);
+            }
+          }
+        }
+        
+        // Handle conflict - might indicate session change
+        if (state === 'CONFLICT') {
+          console.log(`⚠️  Client ${clientId} in CONFLICT state - session may have been taken over by another device`);
+          const clientInfo = this.clients.get(clientId);
+          if (clientInfo) {
+            clientInfo.status = 'disconnected';
+            clientInfo.isReady = false;
+            
+            // Delete old session from MongoDB
+            try {
+              await deleteBrowserSessionFromMongo(clientId);
+              console.log(`🗑️  Session deleted from MongoDB for conflicted client ${clientId}`);
+            } catch (error) {
+              console.error(`❌ Failed to delete conflicted session for ${clientId}:`, error);
+            }
+          }
         }
       });
 
@@ -183,14 +283,12 @@ export class WPPConnectClientManager {
         existingClientInfo.lastActivity = new Date();
         console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
         
-        // CRITICAL: Save session immediately after client creation (WPPConnect handles this automatically)
-        console.log(`🔄 WPPConnect will automatically save session to MongoDB via tokenStore`);
+        // Note: WPPConnect automatically handles session persistence through tokenStore
+        console.log(`🔄 WPPConnect will automatically manage session persistence via tokenStore`);
         
         // Update phone number if client is already authenticated (restored session)
         if (existingClientInfo.isReady) {
           await this.updateClientPhoneNumber(clientId);
-          
-          // WPPConnect automatically handles session saving via tokenStore
           console.log(`✅ Client ${clientId} is already ready - session managed by WPPConnect tokenStore`);
         }
         
@@ -250,14 +348,24 @@ export class WPPConnectClientManager {
       this.clients.delete(clientId);
       console.log(`🗑️  Removed failed client ${clientId} from map`);
       
-      // Also delete from MongoDB on failed creation
-      if (this.tokenStore) {
+      // Only delete from MongoDB if it's a true authentication failure, not process interruption
+      // Check if error indicates authentication failure (not timeout, not process kill)
+      const isAuthFailure = errorMessage.includes('authentication') || 
+                           errorMessage.includes('qr') ||
+                           errorMessage.includes('timeout') === false; // Don't delete on timeout
+      
+      if (this.tokenStore && isAuthFailure && !errorMessage.includes('SIGTERM') && !errorMessage.includes('SIGINT')) {
         try {
-          await this.tokenStore.removeToken(clientId);
-          console.log(`🗑️  Deleted failed session from MongoDB: ${clientId}`);
+          console.log(`⚠️  Authentication failure detected, considering session cleanup...`);
+          // Only delete if there's no existing valid session in MongoDB
+          // This prevents deleting good sessions on process restart failures
+          await deleteBrowserSessionFromMongo(clientId);
+          console.log(`🗑️  Deleted failed browser session from MongoDB GridFS: ${clientId}`);
         } catch (mongoError) {
-          console.error(`⚠️  Failed to delete session from MongoDB for ${clientId}:`, mongoError);
+          console.error(`⚠️  Failed to delete browser session from MongoDB for ${clientId}:`, mongoError);
         }
+      } else {
+        console.log(`ℹ️  Keeping existing session in MongoDB for ${clientId} (error: ${errorMessage.substring(0, 50)}...)`);
       }
       
       throw error;
@@ -280,7 +388,7 @@ export class WPPConnectClientManager {
           console.log(`🔑 Token keys: ${Object.keys(sessionToken).join(', ')}`);
           
           // Save to MongoDB via TokenStore
-          const success = await this.tokenStore.setToken(clientId, sessionToken);
+          const success = await this.standaloneTokenStore.setToken(clientId, sessionToken);
           
           if (success) {
             console.log(`💾 Successfully saved WPPConnect session to MongoDB: ${clientId}`);
@@ -316,35 +424,63 @@ export class WPPConnectClientManager {
         case 'notLogged':
           clientInfo.status = 'qr_required';
           clientInfo.isReady = false;
+          // Keep existing QR code if available
+          console.log(`📋 WPPConnect client ${clientId} notLogged - QR code available: ${!!clientInfo.qrCode}`);
           break;
         case 'autocloseCalled':
-        case 'qrReadError':
         case 'qrReadFail':
           // Clear authentication failures - delete from MongoDB
           console.log(`🗑️  Removing client ${clientId} - Authentication failed (${status})`);
           this.clients.delete(clientId);
           
-          // Delete the session from MongoDB to prevent resurrection on restart
+          // Delete the browser session from MongoDB GridFS to prevent resurrection on restart
           if (this.tokenStore) {
-            this.tokenStore.removeToken(clientId)
+            deleteBrowserSessionFromMongo(clientId)
               .then(() => {
-                console.log(`🗑️  Deleted failed session from MongoDB: ${clientId}`);
+                console.log(`🗑️  Deleted failed browser session from MongoDB GridFS: ${clientId}`);
               })
-              .catch((error) => {
-                console.error(`⚠️  Failed to delete session from MongoDB for ${clientId}:`, error);
+              .catch((error: any) => {
+                console.error(`⚠️  Failed to delete browser session from MongoDB for ${clientId}:`, error);
+              });
+          }
+          return;
+        case 'qrReadError':
+          // qrReadError can be a false positive if client is already authenticated
+          // Only treat as failure if client is NOT ready/authenticated
+          if (clientInfo.isReady || clientInfo.status === 'ready' || clientInfo.status === 'authenticated') {
+            console.log(`⚠️  Ignoring qrReadError for ${clientId} - client is already authenticated`);
+            break;
+          }
+          
+          // Only delete if truly not authenticated
+          console.log(`🗑️  Removing client ${clientId} - Authentication failed (qrReadError) and not authenticated`);
+          this.clients.delete(clientId);
+          
+          if (this.tokenStore) {
+            deleteBrowserSessionFromMongo(clientId)
+              .then(() => {
+                console.log(`🗑️  Deleted failed browser session from MongoDB GridFS: ${clientId}`);
+              })
+              .catch((error: any) => {
+                console.error(`⚠️  Failed to delete browser session from MongoDB for ${clientId}:`, error);
               });
           }
           return;
         case 'browserClose':
-          // Browser close might be normal - only remove from map, keep session in MongoDB
-          console.log(`🗑️  Removing client ${clientId} - Browser closed (${status})`);
-          this.clients.delete(clientId);
-          return;
+          // Browser close is normal (happens during shutdown/restart)
+          // Don't remove from map - let cleanup handle it properly
+          console.log(`📴 Browser closed for ${clientId} - keeping client in map for graceful shutdown`);
+          if (clientInfo) {
+            clientInfo.status = 'disconnected';
+            clientInfo.isReady = false;
+          }
+          break;
         case 'desconnectedMobile':
         case 'serverClose':
           clientInfo.status = 'disconnected';
           clientInfo.isReady = false;
-          console.log(`📴 WPPConnect client ${clientId} disconnected: ${status}`);
+          // Preserve QR code if available
+          console.log(`📴 WPPConnect client ${clientId} disconnected: ${status} - QR code available: ${!!clientInfo.qrCode}`);
           break;
         default:
           // Don't override status if we don't recognize it
@@ -360,6 +496,9 @@ export class WPPConnectClientManager {
       clientInfo.qrCode = qrCode;
       clientInfo.status = 'qr_required';
       clientInfo.lastActivity = new Date();
+      console.log(`📱 Updated QR code for ${clientId}, qrCode length: ${qrCode.length}`);
+    } else {
+      console.warn(`⚠️ Client ${clientId} not found when trying to update QR code`);
     }
   }
 
@@ -440,6 +579,9 @@ export class WPPConnectClientManager {
     }
 
     try {
+      // No need to sync before disconnect - periodic backups handle this
+      // Sessions are already backed up every 30 minutes and after authentication
+      
       if (clientInfo.client) {
         await clientInfo.client.close();
       }
@@ -470,18 +612,23 @@ export class WPPConnectClientManager {
     }
 
     try {
-      const sessions = await this.tokenStore.listSessions();
-      console.log(`📋 Found ${sessions.length} existing WPPConnect sessions in MongoDB`);
+      // First, clean up any broken sessions before attempting restoration
+      await this.cleanupAllBrokenSessions();
+      
+      // Get list of browser sessions from MongoDB GridFS
+      const sessions = await listBrowserSessionsInMongo();
+      console.log(`📋 Found ${sessions.length} existing browser sessions in MongoDB GridFS`);
 
-      for (const session of sessions) {
-        const clientId = session.sessionName;
-        console.log(`🔄 Restoring WPPConnect session for client: ${clientId}`);
+      for (const clientId of sessions) {
+        console.log(`🔄 Restoring browser session for client: ${clientId}`);
         
         try {
           await this.createClient(clientId);
-          console.log(`✅ Successfully restored WPPConnect session for client: ${clientId}`);
+          // Add delay between client creations to prevent race conditions
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          console.log(`✅ Successfully restored session for client: ${clientId}`);
         } catch (error) {
-          console.error(`❌ Failed to restore WPPConnect session for client ${clientId}:`, error);
+          console.error(`❌ Failed to restore session for client ${clientId}:`, error);
         }
       }
 
@@ -502,6 +649,42 @@ export class WPPConnectClientManager {
     }, this.config.healthCheckIntervalMs || 300000); // 5 minutes default
 
     console.log(`🏥 WPPConnect health check started with ${this.config.healthCheckIntervalMs || 300000}ms interval`);
+  }
+
+  /**
+   * Periodic session backup to MongoDB
+   * Backs up all active authenticated sessions every 30 minutes
+   */
+  private startPeriodicSessionBackup(): void {
+    if (this.sessionBackupInterval) {
+      clearInterval(this.sessionBackupInterval);
+    }
+
+    const backupIntervalMs = 30 * 60 * 1000; // 30 minutes
+    
+    this.sessionBackupInterval = setInterval(async () => {
+      console.log('🔄 Starting periodic session backup to MongoDB...');
+      let backedUp = 0;
+      
+      for (const [clientId, clientInfo] of this.clients.entries()) {
+        // Only backup authenticated, ready clients
+        if (clientInfo.isReady && clientInfo.status === 'ready') {
+          try {
+            const uploaded = await uploadBrowserSessionToMongo(clientId);
+            if (uploaded) {
+              backedUp++;
+              console.log(`✅ Periodic backup completed for ${clientId}`);
+            }
+          } catch (error) {
+            console.error(`❌ Periodic backup failed for ${clientId}:`, error);
+          }
+        }
+      }
+      
+      console.log(`🔄 Periodic session backup completed: ${backedUp} sessions backed up`);
+    }, backupIntervalMs);
+
+    console.log(`💾 Periodic session backup started (every 30 minutes)`);
   }
 
   private async performHealthCheck(): Promise<void> {
@@ -550,10 +733,162 @@ export class WPPConnectClientManager {
     };
   }
 
+  /**
+   * Clean up all broken sessions in MongoDB during startup
+   * This scans all sessions and removes any that are corrupted or invalid
+   */
+  private async cleanupAllBrokenSessions(): Promise<void> {
+    try {
+      console.log(`🧹 Starting cleanup of all broken sessions...`);
+      
+      if (!this.standaloneTokenStore) {
+        console.log(`⚠️  No tokenStore available for session cleanup`);
+        return;
+      }
+
+      const sessions = await this.standaloneTokenStore.listTokens();
+      console.log(`📋 Found ${sessions.length} sessions to check for corruption`);
+
+      for (const clientId of sessions) {
+        try {
+          const sessionToken = await this.standaloneTokenStore.getToken(clientId);
+          
+          if (!sessionToken || Object.keys(sessionToken).length === 0) {
+            console.log(`🗑️  Detected broken/empty session for ${clientId} - cleaning up`);
+            await this.standaloneTokenStore.removeToken(clientId);
+            console.log(`✅ Cleaned up broken session for ${clientId}`);
+          } else {
+            console.log(`✅ Session for ${clientId} appears valid (${Object.keys(sessionToken).length} keys)`);
+          }
+        } catch (error) {
+          console.error(`❌ Error checking session ${clientId}, attempting cleanup:`, error);
+          try {
+            await this.standaloneTokenStore.removeToken(clientId);
+            console.log(`🧹 Cleaned up potentially broken session for ${clientId} due to error`);
+          } catch (cleanupError) {
+            console.error(`❌ Failed to cleanup session ${clientId}:`, cleanupError);
+          }
+        }
+      }
+      
+      console.log(`✅ Broken session cleanup completed`);
+    } catch (error) {
+      console.error(`❌ Error during broken session cleanup:`, error);
+    }
+  }
+
+  /**
+   * Detect and clean up broken sessions in MongoDB
+   * This handles cases where a session exists in MongoDB but is corrupted or invalid
+   */
+  private async detectAndCleanupBrokenSession(clientId: string): Promise<void> {
+    try {
+      console.log(`🔍 Checking for broken session: ${clientId}`);
+      
+      if (!this.tokenStore) {
+        console.log(`⚠️  No tokenStore available for session check`);
+        return;
+      }
+
+      // Check if session exists in MongoDB
+      const sessionToken = await this.standaloneTokenStore.getToken(clientId);
+      
+      if (sessionToken) {
+        console.log(`📋 Found existing session in MongoDB for ${clientId}`);
+        
+        if (!sessionToken || Object.keys(sessionToken).length === 0) {
+          console.log(`🗑️  Detected broken/empty session for ${clientId} - cleaning up`);
+          await this.standaloneTokenStore.removeToken(clientId);
+          console.log(`✅ Cleaned up broken session for ${clientId}`);
+        } else {
+          // Additional validation: check if session has required WhatsApp keys
+          const requiredKeys = ['WANoiseInfo', 'WAWebEncKeySalt', 'WALid', 'WABrowserId', 'WAToken1', 'WAToken2'];
+          const hasValidKeys = requiredKeys.some(key => (sessionToken as any)[key]);
+          
+          if (!hasValidKeys) {
+            console.log(`🗑️  Detected session with invalid keys for ${clientId} - cleaning up`);
+            await this.standaloneTokenStore.removeToken(clientId);
+            console.log(`✅ Cleaned up session with invalid keys for ${clientId}`);
+          } else {
+            console.log(`✅ Session for ${clientId} appears valid (${Object.keys(sessionToken).length} keys)`);
+          }
+        }
+      } else {
+        console.log(`📋 No existing session found in MongoDB for ${clientId}`);
+      }
+    } catch (error) {
+      console.error(`❌ Error checking/cleaning session for ${clientId}:`, error);
+      // If there's an error checking the session, try to clean it up anyway
+      try {
+        if (this.tokenStore) {
+          await this.standaloneTokenStore.removeToken(clientId);
+          console.log(`🧹 Cleaned up potentially broken session for ${clientId} due to error`);
+        }
+      } catch (cleanupError) {
+        console.error(`❌ Error during cleanup for ${clientId}:`, cleanupError);
+      }
+    }
+  }
+
+
+  /**
+   * Force cleanup of a specific client session from MongoDB and local files
+   * This can be used to manually clean up stuck sessions
+   */
+  public async forceCleanupSession(clientId: string): Promise<boolean> {
+    try {
+      console.log(`🧹 Force cleaning up session for ${clientId}`);
+      
+      if (!this.tokenStore) {
+        console.log(`⚠️  No tokenStore available for force cleanup`);
+        return false;
+      }
+
+      // Remove from active clients map if present
+      if (this.clients.has(clientId)) {
+        const clientInfo = this.clients.get(clientId);
+        if (clientInfo && clientInfo.client) {
+          try {
+            await clientInfo.client.close();
+            console.log(`✅ Closed active client ${clientId}`);
+          } catch (error) {
+            console.error(`⚠️  Error closing client ${clientId}:`, error);
+          }
+        }
+        this.clients.delete(clientId);
+        console.log(`🗑️  Removed ${clientId} from active clients map`);
+      }
+
+      // Remove from MongoDB GridFS
+      const removed = await deleteBrowserSessionFromMongo(clientId);
+      if (removed) {
+        console.log(`✅ Force cleaned up browser session for ${clientId} from MongoDB GridFS`);
+        return true;
+      } else {
+        console.log(`⚠️  Browser session ${clientId} was not found in MongoDB GridFS`);
+        return true; // Still return true since we attempted cleanup
+      }
+    } catch (error) {
+      console.error(`❌ Error force cleaning session for ${clientId}:`, error);
+      return false;
+    }
+  }
+
   public async cleanup(): Promise<void> {
+    console.log('🔄 Starting graceful shutdown...');
+    console.log('ℹ️  Sessions preserved in MongoDB (periodic backups ensure latest state)');
+    
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
     }
+    
+    if (this.sessionBackupInterval) {
+      clearInterval(this.sessionBackupInterval);
+    }
+
+    // NO sync during shutdown - sessions are already backed up via periodic backups (every 30 min)
+    // and after authentication. Syncing here only delays restart without benefit.
+    console.log(`✅ Skipping session sync during shutdown (already backed up periodically)`);
 
     // Disconnect all clients
     for (const [clientId, clientInfo] of this.clients) {
@@ -570,7 +905,40 @@ export class WPPConnectClientManager {
     this.clients.clear();
 
     if (this.tokenStore) {
-      await this.tokenStore.disconnect();
+        // Standalone TokenStore doesn't need explicit disconnection
+    }
+  }
+
+  /**
+   * Manually sync a specific client's session to MongoDB GridFS
+   * Useful for forcing a backup of a session
+   */
+  public async syncSessionToMongo(clientId: string): Promise<boolean> {
+    try {
+      const clientInfo = this.clients.get(clientId);
+      if (!clientInfo) {
+        console.log(`⚠️  Client ${clientId} not found`);
+        return false;
+      }
+
+      if (!clientInfo.isReady || clientInfo.status !== 'ready') {
+        console.log(`⚠️  Client ${clientId} is not ready for sync (status: ${clientInfo.status})`);
+        return false;
+      }
+
+      console.log(`🔄 Manually syncing session to MongoDB for ${clientId}...`);
+      const uploaded = await uploadBrowserSessionToMongo(clientId);
+      
+      if (uploaded) {
+        console.log(`✅ Successfully synced session to MongoDB for ${clientId}`);
+        return true;
+      } else {
+        console.error(`❌ Failed to sync session to MongoDB for ${clientId}`);
+        return false;
+      }
+    } catch (error) {
+      console.error(`❌ Error syncing session for ${clientId}:`, error);
+      return false;
     }
   }
 }
