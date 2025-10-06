@@ -307,6 +307,13 @@ export class WhatsAppSessionBackup {
       if (fs.existsSync(defaultPath)) {
         const files = fs.readdirSync(defaultPath);
         console.log(`📋 [${clientId}] Default folder contains: ${files.length} items`);
+        
+        // Clean up any lock files that might prevent session restoration
+        this.cleanupLockFiles(sessionPath);
+        
+        // Wait for filesystem to stabilize
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
       } else {
         console.error(`❌ [${clientId}] Default folder missing after restore!`);
         return false;
@@ -348,6 +355,31 @@ export class WhatsAppSessionBackup {
     } catch (error) {
       console.error(`❌ Error listing backups for ${clientId}:`, error);
       return [];
+    }
+  }
+
+  /**
+   * Clean up lock files that might prevent session restoration
+   */
+  private cleanupLockFiles(sessionPath: string): void {
+    const lockFiles = [
+      'SingletonLock',
+      'lockfile',
+      'SingletonSocket', 
+      'SingletonCookie',
+      'DevToolsActivePort'
+    ];
+
+    for (const lockFile of lockFiles) {
+      const lockPath = path.join(sessionPath, lockFile);
+      if (fs.existsSync(lockPath)) {
+        try {
+          fs.unlinkSync(lockPath);
+          console.log(`🧹 Cleaned up lock file: ${lockFile}`);
+        } catch (error) {
+          console.warn(`⚠️  Could not remove lock file ${lockFile}:`, error);
+        }
+      }
     }
   }
 

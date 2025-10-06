@@ -643,7 +643,10 @@ export class WPPConnectClientManager {
           // Restore the session first, then create client
           const restored = await this.sessionBackup.restoreSession(clientId);
           if (restored) {
-            console.log(`✅ Session restored for ${clientId}, creating client...`);
+            console.log(`✅ Session restored for ${clientId}, waiting before creating client...`);
+            // Wait longer for session to fully stabilize
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            console.log(`🚀 Creating client for ${clientId}...`);
             await this.createClient(clientId, true); // Skip restore since we already did it
             // Add delay between client creations to prevent race conditions
             await new Promise(resolve => setTimeout(resolve, 3000));
