@@ -160,43 +160,46 @@ export class WPPConnectClientManager {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // Save session tokens to MongoDB after successful authentication
+          // Save session tokens to MongoDB after successful authentication (NON-BLOCKING)
           if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged' || statusSession === 'inChat') {
-            try {
-              const clientInfo = this.clients.get(clientId);
-              if (clientInfo && clientInfo.client) {
-                console.log(`💾 Saving session tokens to MongoDB for ${clientId} after ${statusSession}`);
-                
-                // Wait for browser to finish writing session files
-                await new Promise(resolve => setTimeout(resolve, 3000));
-                
-                // Get session token from WPPConnect client
-                const sessionToken = await clientInfo.client.getSessionTokenBrowser();
-                console.log(`🔍 Retrieved session token from WPPConnect:`, JSON.stringify(sessionToken, null, 2));
-                
-                // Save to MongoDB via TokenStore
-                if (sessionToken && Object.keys(sessionToken).length > 0) {
-                  const saved = await this.standaloneTokenStore.setToken(clientId, sessionToken);
-                  if (saved) {
-                    console.log(`✅ Session tokens saved to MongoDB for ${clientId}`);
-                    console.log(`🎯 Session will work across ANY server deployment!`);
-                  } else {
-                    console.error(`❌ Failed to save session tokens to MongoDB for ${clientId}`);
-                  }
-                } else {
-                  console.warn(`⚠️  No valid session token retrieved from WPPConnect for ${clientId}`);
+            // Run in background - don't block the callback
+            (async () => {
+              try {
+                const clientInfo = this.clients.get(clientId);
+                if (clientInfo && clientInfo.client) {
+                  console.log(`💾 Saving session tokens to MongoDB for ${clientId} after ${statusSession} (background)`);
                   
-                  // Fallback: Try extracting from browser folder
-                  console.log(`📁 Attempting fallback: extracting from browser folder...`);
-                  const uploaded = await uploadBrowserSessionToMongo(clientId);
-                  if (uploaded) {
-                    console.log(`✅ Fallback extraction successful`);
+                  // Wait for browser to finish writing session files
+                  await new Promise(resolve => setTimeout(resolve, 3000));
+                  
+                  // Get session token from WPPConnect client
+                  const sessionToken = await clientInfo.client.getSessionTokenBrowser();
+                  console.log(`🔍 Retrieved session token from WPPConnect:`, JSON.stringify(sessionToken, null, 2));
+                  
+                  // Save to MongoDB via TokenStore
+                  if (sessionToken && Object.keys(sessionToken).length > 0) {
+                    const saved = await this.standaloneTokenStore.setToken(clientId, sessionToken);
+                    if (saved) {
+                      console.log(`✅ Session tokens saved to MongoDB for ${clientId}`);
+                      console.log(`🎯 Session will work across ANY server deployment!`);
+                    } else {
+                      console.error(`❌ Failed to save session tokens to MongoDB for ${clientId}`);
+                    }
+                  } else {
+                    console.warn(`⚠️  No valid session token retrieved from WPPConnect for ${clientId}`);
+                    
+                    // Fallback: Try extracting from browser folder
+                    console.log(`📁 Attempting fallback: extracting from browser folder...`);
+                    const uploaded = await uploadBrowserSessionToMongo(clientId);
+                    if (uploaded) {
+                      console.log(`✅ Fallback extraction successful`);
+                    }
                   }
                 }
+              } catch (error) {
+                console.error(`❌ Error saving session tokens for ${clientId}:`, error);
               }
-            } catch (error) {
-              console.error(`❌ Error saving session tokens for ${clientId}:`, error);
-            }
+            })().catch(err => console.error(`❌ Background token save failed for ${clientId}:`, err));
           }
         },
         
@@ -240,17 +243,19 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Extract and sync session tokens to MongoDB on CONNECTED state
-            try {
-              console.log(`🔄 Extracting session tokens after CONNECTED state for ${clientId}`);
-              await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for session stabilization
-              const uploaded = await uploadBrowserSessionToMongo(clientId);
-              if (uploaded) {
-                console.log(`✅ Session tokens extracted and synced to MongoDB for ${clientId}`);
+            // Extract and sync session tokens to MongoDB on CONNECTED state (NON-BLOCKING)
+            (async () => {
+              try {
+                console.log(`🔄 Extracting session tokens after CONNECTED state for ${clientId} (background)`);
+                await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for session stabilization
+                const uploaded = await uploadBrowserSessionToMongo(clientId);
+                if (uploaded) {
+                  console.log(`✅ Session tokens extracted and synced to MongoDB for ${clientId}`);
+                }
+              } catch (error) {
+                console.error(`❌ Failed to extract session tokens on CONNECTED for ${clientId}:`, error);
               }
-            } catch (error) {
-              console.error(`❌ Failed to extract session tokens on CONNECTED for ${clientId}:`, error);
-            }
+            })().catch(err => console.error(`❌ Background sync failed for ${clientId}:`, err));
           }
           this.updateClientPhoneNumber(clientId);
         }
