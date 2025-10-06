@@ -251,6 +251,64 @@ export class WPPConnectWhatsAppController {
 
   /**
    * @swagger
+   * /api/whatsapp/clients/{clientId}/reset:
+   *   delete:
+   *     summary: Reset WPPConnect client (delete session and recreate for fresh QR)
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Client reset successfully
+   */
+  async resetClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+      
+      console.log(`🔄 Resetting client: ${clientId}`);
+      
+      // Disconnect existing client
+      await this.whatsappService.disconnectClient(clientId);
+      
+      // Delete from MongoDB (via remote TokenStore)
+      const clientManager = (this.whatsappService as any).clientManager;
+      if (clientManager && clientManager.remoteTokenStore) {
+        await clientManager.remoteTokenStore.removeToken(clientId);
+        console.log(`🗑️  [${clientId}] Session deleted from MongoDB`);
+      }
+      
+      // Recreate client (will generate fresh QR)
+      await this.whatsappService.createClient(clientId);
+      
+      res.json({
+        success: true,
+        message: `Client ${clientId} reset successfully - new QR code will be generated`,
+        clientId
+      });
+    } catch (error) {
+      console.error(`❌ Error resetting client:`, error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to reset client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * @swagger
    * /api/whatsapp/clients/{clientId}/send:
    *   post:
    *     summary: Send message via WPPConnect client

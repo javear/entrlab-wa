@@ -10,6 +10,7 @@ export function createWhatsAppRoutes(whatsappController: WPPConnectWhatsAppContr
     
     // Specific routes must come before general ones
     router.get('/clients/:clientId/qr-image', (req, res) => whatsappController.getQRImage(req, res));
+    router.delete('/clients/:clientId/reset', (req, res) => whatsappController.resetClient(req, res));
     router.post('/clients/:clientId/send', (req, res) => whatsappController.sendMessage(req, res));
     router.post('/clients/:clientId/disconnect', (req, res) => whatsappController.disconnectClient(req, res));
     router.post('/clients/:clientId/force-cleanup', (req, res) => whatsappController.forceCleanupClient(req, res));
