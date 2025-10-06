@@ -142,8 +142,36 @@ export class WPPConnectClientManager {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // WPPConnect should automatically call tokenStore.setToken() with real tokens
-          // after authentication succeeds. We'll see it in the logs if it happens.
+          // Save session tokens after successful authentication
+          if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged' || statusSession === 'inChat') {
+            setImmediate(() => {
+              (async () => {
+                try {
+                  const clientInfo = this.clients.get(clientId);
+                  if (clientInfo?.client) {
+                    console.log(`💾 Getting session token from WPPConnect client ${clientId}...`);
+                    
+                    // Wait for session to stabilize
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                    // Get token using WPPConnect's method
+                    const token = await clientInfo.client.getSessionTokenBrowser();
+                    console.log(`🔍 Retrieved token from getSessionTokenBrowser():`, JSON.stringify(token, null, 2));
+                    
+                    if (token) {
+                      // Manually save to our TokenStore
+                      const saved = await this.standaloneTokenStore.setToken(clientId, token);
+                      if (saved) {
+                        console.log(`✅ Session token manually saved to MongoDB for ${clientId}`);
+                      }
+                    }
+                  }
+                } catch (error) {
+                  console.error(`❌ Error saving session token for ${clientId}:`, error);
+                }
+              })().catch(err => console.error(`❌ Background save failed:`, err));
+            });
+          }
         },
         
         catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
