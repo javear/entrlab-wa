@@ -160,6 +160,33 @@ export class WPPConnectClientManager {
 
       console.log(`✅ WPPConnect client created: ${clientId}`);
 
+      // Check for existing QR code immediately after creation
+      // (in case QR was generated before catchQR callback was attached)
+      setImmediate(async () => {
+        try {
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for initialization
+          
+          const clientInfo = this.clients.get(clientId);
+          if (clientInfo && !clientInfo.qrCode && clientInfo.status === 'qr_required') {
+            console.log(`🔍 [${clientId}] Checking for QR code via getQrCode()...`);
+            try {
+              const qrData = await client.getQrCode();
+              if (qrData && qrData.base64Image) {
+                console.log(`✅ [${clientId}] Retrieved QR code manually (base64)`);
+                this.updateClientQR(clientId, qrData.base64Image);
+              } else if (qrData && qrData.urlCode) {
+                console.log(`✅ [${clientId}] Retrieved QR URL: ${qrData.urlCode}`);
+                // Could convert URL to base64 here if needed
+              }
+            } catch (qrError) {
+              console.log(`⚠️  [${clientId}] getQrCode() not available:`, qrError);
+            }
+          }
+        } catch (error) {
+          console.error(`❌ [${clientId}] Error checking for QR:`, error);
+        }
+      });
+
       // Set up message handler
       client.onMessage(async (message) => {
         console.log(`📨 Message received on WPPConnect client ${clientId}:`, message.body);
