@@ -282,11 +282,11 @@ export class WPPConnectWhatsAppController {
       // Disconnect existing client
       await this.whatsappService.disconnectClient(clientId);
       
-      // Delete from MongoDB (via remote TokenStore)
+      // Delete session backup from MongoDB
       const clientManager = (this.whatsappService as any).clientManager;
-      if (clientManager && clientManager.remoteTokenStore) {
-        await clientManager.remoteTokenStore.removeToken(clientId);
-        console.log(`🗑️  [${clientId}] Session deleted from MongoDB`);
+      if (clientManager && clientManager.sessionBackup) {
+        // Note: We don't delete backups on reset, just recreate client
+        console.log(`🔄 [${clientId}] Will create fresh session (backups preserved)`);
       }
       
       // Recreate client (will generate fresh QR)
