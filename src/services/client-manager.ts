@@ -163,26 +163,35 @@ export class WPPConnectClientManager {
       // Check for QR code manually (catchQR callback sometimes doesn't fire)
       setImmediate(async () => {
         try {
-          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for initialization
+          console.log(`🔍 [${clientId}] Starting manual QR check...`);
+          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait longer for initialization
           
           const clientInfo = this.clients.get(clientId);
-          if (clientInfo && !clientInfo.qrCode && clientInfo.status === 'qr_required') {
-            console.log(`🔍 [${clientId}] Checking for QR code via getQrCode()...`);
+          console.log(`🔍 [${clientId}] Client info: status=${clientInfo?.status}, hasQR=${!!clientInfo?.qrCode}`);
+          
+          if (clientInfo && !clientInfo.qrCode) {
+            console.log(`🔍 [${clientId}] No QR code found, trying getQrCode()...`);
             try {
               const qrData = await client.getQrCode();
+              console.log(`🔍 [${clientId}] getQrCode() result:`, qrData ? 'found' : 'null');
+              
               if (qrData && qrData.base64Image) {
                 console.log(`✅ [${clientId}] Retrieved QR code manually (base64)`);
                 this.updateClientQR(clientId, qrData.base64Image);
               } else if (qrData && qrData.urlCode) {
                 console.log(`✅ [${clientId}] Retrieved QR URL: ${qrData.urlCode}`);
                 // Convert URL to base64 if needed
+              } else {
+                console.log(`⚠️  [${clientId}] getQrCode() returned no usable data`);
               }
             } catch (qrError) {
-              console.log(`⚠️  [${clientId}] getQrCode() not available:`, qrError);
+              console.log(`⚠️  [${clientId}] getQrCode() error:`, qrError);
             }
+          } else {
+            console.log(`ℹ️  [${clientId}] QR code already exists or client not ready`);
           }
         } catch (error) {
-          console.error(`❌ [${clientId}] Error checking for QR:`, error);
+          console.error(`❌ [${clientId}] Error in manual QR check:`, error);
         }
       });
 
