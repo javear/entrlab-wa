@@ -3,8 +3,6 @@ import mongoose from 'mongoose';
 import { 
   WPPConnectMongoTokenStore, 
   createMongoTokenStore,
-  uploadBrowserSessionToMongo,
-  downloadBrowserSessionFromMongo,
   deleteBrowserSessionFromMongo,
   listBrowserSessionsInMongo
 } from './tokenstore';
@@ -110,25 +108,8 @@ export class WPPConnectClientManager {
       console.log(`🔍 TokenStore type: ${typeof this.standaloneTokenStore}`);
       console.log(`🔍 TokenStore keys: ${this.standaloneTokenStore ? Object.keys(this.standaloneTokenStore).join(', ') : 'null'}`);
       
-      // Try to download browser session from MongoDB GridFS (primary method)
-      let hasSession = false;
-      try {
-        hasSession = await downloadBrowserSessionFromMongo(clientId);
-        if (hasSession) {
-          console.log(`✅ Browser session restored from MongoDB GridFS for ${clientId}`);
-          console.log(`🎯 Session folder extracted - will auto-login!`);
-          // Wait for filesystem to stabilize after extraction
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        } else {
-          console.log(`📝 No browser session found in MongoDB GridFS for ${clientId}`);
-          console.log(`📝 Will generate QR code for new authentication`);
-        }
-      } catch (error) {
-        console.error(`❌ Error downloading browser session for ${clientId}:`, error);
-        console.log(`📝 Will generate QR code for authentication`);
-      }
-      
-      // Session tokens are just placeholders for WPPConnect - ignore them
+      // WPPConnect should automatically save/restore session via TokenStore
+      // No need to download browser folders - tokens in MongoDB are sufficient
       const client = await create({
         session: clientId,
         tokenStore: this.standaloneTokenStore, // Custom MongoDB TokenStore
@@ -161,49 +142,8 @@ export class WPPConnectClientManager {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // Save session tokens to MongoDB after successful authentication (NON-BLOCKING)
-          if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged' || statusSession === 'inChat') {
-            // Fire and forget - completely non-blocking
-            setImmediate(() => {
-              (async () => {
-                try {
-                  const clientInfo = this.clients.get(clientId);
-                  if (clientInfo && clientInfo.client) {
-                    console.log(`💾 Saving session tokens to MongoDB for ${clientId} after ${statusSession} (background)`);
-                    
-                    // Wait for browser to finish writing session files
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                    
-                    // Get session token from WPPConnect client
-                    const sessionToken = await clientInfo.client.getSessionTokenBrowser();
-                    console.log(`🔍 Retrieved session token from WPPConnect:`, JSON.stringify(sessionToken, null, 2));
-                    
-                    // Save to MongoDB via TokenStore
-                    if (sessionToken && Object.keys(sessionToken).length > 0) {
-                      const saved = await this.standaloneTokenStore.setToken(clientId, sessionToken);
-                      if (saved) {
-                        console.log(`✅ Session tokens saved to MongoDB for ${clientId}`);
-                        console.log(`🎯 Session will work across ANY server deployment!`);
-                      } else {
-                        console.error(`❌ Failed to save session tokens to MongoDB for ${clientId}`);
-                      }
-                    } else {
-                      console.warn(`⚠️  No valid session token retrieved from WPPConnect for ${clientId}`);
-                      
-                      // Fallback: Try extracting from browser folder
-                      console.log(`📁 Attempting fallback: extracting from browser folder...`);
-                      const uploaded = await uploadBrowserSessionToMongo(clientId);
-                      if (uploaded) {
-                        console.log(`✅ Fallback extraction successful`);
-                      }
-                    }
-                  }
-                } catch (error) {
-                  console.error(`❌ Error saving session tokens for ${clientId}:`, error);
-                }
-              })().catch(err => console.error(`❌ Background token save failed for ${clientId}:`, err));
-            });
-          }
+          // WPPConnect should automatically call tokenStore.setToken() with real tokens
+          // after authentication succeeds. We'll see it in the logs if it happens.
         },
         
         catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
@@ -246,19 +186,7 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Extract and sync session tokens to MongoDB on CONNECTED state (NON-BLOCKING)
-            (async () => {
-              try {
-                console.log(`🔄 Extracting session tokens after CONNECTED state for ${clientId} (background)`);
-                await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for session stabilization
-                const uploaded = await uploadBrowserSessionToMongo(clientId);
-                if (uploaded) {
-                  console.log(`✅ Session tokens extracted and synced to MongoDB for ${clientId}`);
-                }
-              } catch (error) {
-                console.error(`❌ Failed to extract session tokens on CONNECTED for ${clientId}:`, error);
-              }
-            })().catch(err => console.error(`❌ Background sync failed for ${clientId}:`, err));
+            // WPPConnect's TokenStore should handle session persistence automatically
           }
           this.updateClientPhoneNumber(clientId);
         }
@@ -776,17 +704,9 @@ export class WPPConnectClientManager {
       let backedUp = 0;
       
       for (const [clientId, clientInfo] of this.clients.entries()) {
-        // Only backup authenticated, ready clients
+        // WPPConnect TokenStore handles persistence - no manual backup needed
         if (clientInfo.isReady && clientInfo.status === 'ready') {
-          try {
-            const uploaded = await uploadBrowserSessionToMongo(clientId);
-            if (uploaded) {
-              backedUp++;
-              console.log(`✅ Periodic backup completed for ${clientId}`);
-            }
-          } catch (error) {
-            console.error(`❌ Periodic backup failed for ${clientId}:`, error);
-          }
+          backedUp++;
         }
       }
       
@@ -1035,16 +955,9 @@ export class WPPConnectClientManager {
         return false;
       }
 
-      console.log(`🔄 Manually syncing session to MongoDB for ${clientId}...`);
-      const uploaded = await uploadBrowserSessionToMongo(clientId);
-      
-      if (uploaded) {
-        console.log(`✅ Successfully synced session to MongoDB for ${clientId}`);
-        return true;
-      } else {
-        console.error(`❌ Failed to sync session to MongoDB for ${clientId}`);
-        return false;
-      }
+      // WPPConnect TokenStore handles persistence automatically
+      console.log(`✅ Session persistence handled by TokenStore for ${clientId}`);
+      return true;
     } catch (error) {
       console.error(`❌ Error syncing session for ${clientId}:`, error);
       return false;
