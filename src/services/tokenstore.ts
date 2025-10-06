@@ -255,7 +255,22 @@ export async function uploadBrowserSessionToMongo(clientId: string): Promise<boo
       };
 
       archive.pipe(uploadStream);
-      archive.directory(tokensPath, false);
+      
+      // Add directory but exclude lock files to prevent "profile in use" errors
+      // These lock files should never be preserved across restarts
+      archive.glob('**/*', {
+        cwd: tokensPath,
+        ignore: [
+          'SingletonLock',
+          'SingletonSocket', 
+          'SingletonCookie',
+          'lockfile',
+          '**/SingletonLock',
+          '**/SingletonSocket',
+          '**/SingletonCookie',
+          '**/lockfile'
+        ]
+      });
       
       // Finalize in background
       archive.finalize().catch((err) => {
