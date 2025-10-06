@@ -85,13 +85,17 @@ export class WhatsAppSessionBackup {
   private shouldExcludeFile(filePath: string): boolean {
     const fileName = path.basename(filePath);
     
-    // Exclude lock files (cause crashes)
+    // Exclude lock files and Chrome version files (cause crashes or are unnecessary)
     const lockFiles = [
       'SingletonLock',
       'lockfile', 
       'SingletonSocket',
       'SingletonCookie',
-      'DevToolsActivePort'
+      'DevToolsActivePort',
+      'RunningChromeVersion',
+      'Last Version',
+      'ChromeFeatureState',
+      'Variations'
     ];
 
     // Exclude cache directories (unnecessary and large)
@@ -185,24 +189,33 @@ export class WhatsAppSessionBackup {
       }
 
       // Also add any root-level session files (excluding problematic ones)
-      const rootFiles = fs.readdirSync(sessionPath);
-      for (const file of rootFiles) {
-        if (file === 'Default') continue; // Already added above
-        
-        const filePath = path.join(sessionPath, file);
-        if (!this.shouldExcludeFile(filePath)) {
-          const stat = fs.statSync(filePath);
-          if (stat.isDirectory()) {
-            archive.directory(filePath, file, (entry) => {
-              if (this.shouldExcludeFile(entry.name)) {
-                return false;
+      try {
+        const rootFiles = fs.readdirSync(sessionPath);
+        for (const file of rootFiles) {
+          if (file === 'Default') continue; // Already added above
+          
+          const filePath = path.join(sessionPath, file);
+          if (!this.shouldExcludeFile(filePath)) {
+            try {
+              const stat = fs.statSync(filePath);
+              if (stat.isDirectory()) {
+                archive.directory(filePath, file, (entry) => {
+                  if (this.shouldExcludeFile(entry.name)) {
+                    return false;
+                  }
+                  return entry;
+                });
+              } else {
+                archive.file(filePath, { name: file });
               }
-              return entry;
-            });
-          } else {
-            archive.file(filePath, { name: file });
+            } catch (fileError) {
+              console.warn(`⚠️  [${clientId}] Skipping file ${file}: ${fileError}`);
+              continue;
+            }
           }
         }
+      } catch (dirError) {
+        console.warn(`⚠️  [${clientId}] Error reading root directory: ${dirError}`);
       }
 
       await archive.finalize();
