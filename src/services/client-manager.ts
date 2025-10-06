@@ -321,17 +321,58 @@ export class WPPConnectClientManager {
         console.log(`🔄 Browser/profile lock detected for ${clientId}, attempting cleanup...`);
         
         try {
-          // Try to clean up the browser folder locks
+          const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
           const browserPath = path.join(process.cwd(), 'tokens', clientId);
+          
+          // Extract PID from error message if available
+          const pidMatch = errorMessage.match(/process \((\d+)\)/);
+          if (pidMatch && pidMatch[1]) {
+            const lockingPid = pidMatch[1];
+            console.log(`🔍 Found locking process PID: ${lockingPid}`);
+            
+            try {
+              // Check if process exists and kill it
+              execSync(`kill -0 ${lockingPid} 2>/dev/null && kill -9 ${lockingPid}`, { 
+                stdio: 'ignore',
+                timeout: 5000 
+              });
+              console.log(`💀 Killed stale Chromium process: ${lockingPid}`);
+              
+              // Wait for process to fully terminate
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            } catch (killError) {
+              console.log(`ℹ️  Process ${lockingPid} already terminated or not found`);
+            }
+          }
+          
+          // Also kill any Chromium processes using this profile
+          try {
+            const grepCmd = `ps aux | grep -i "[c]hromium.*${clientId}" | awk '{print $2}'`;
+            const pids = execSync(grepCmd, { encoding: 'utf8', timeout: 5000 }).trim();
+            if (pids) {
+              const pidList = pids.split('\n').filter(Boolean);
+              for (const pid of pidList) {
+                try {
+                  execSync(`kill -9 ${pid}`, { stdio: 'ignore', timeout: 5000 });
+                  console.log(`💀 Killed Chromium process using ${clientId}: ${pid}`);
+                } catch (e) {
+                  // Process already gone
+                }
+              }
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          } catch (grepError) {
+            console.log(`ℹ️  No Chromium processes found for ${clientId}`);
+          }
           
           // Remove Chromium lock files
           const lockFiles = [
             'SingletonLock', 
             'SingletonSocket', 
             'SingletonCookie',
-            'lockfile' // Additional Chromium lock file
+            'lockfile'
           ];
           
           for (const lockFile of lockFiles) {
@@ -346,13 +387,13 @@ export class WPPConnectClientManager {
             }
           }
           
-          console.log(`✅ Browser locks cleaned up for ${clientId}, retrying...`);
+          console.log(`✅ Browser locks and processes cleaned up for ${clientId}, retrying...`);
           
           // Remove the failed placeholder
           this.clients.delete(clientId);
           
-          // Add a small delay before retry to ensure file system sync
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Add a delay before retry to ensure full cleanup
+          await new Promise(resolve => setTimeout(resolve, 3000));
           
           // Retry creating the client
           return await this.createClient(clientId);
