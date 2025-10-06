@@ -322,18 +322,27 @@ export class WPPConnectWhatsAppBotApp {
       await this.whatsappService.initialize();
       console.log('✅ WPPConnect WhatsApp service initialized');
       
-      // Restore existing sessions from MongoDB
-      await this.whatsappService.restoreExistingSessions();
-      console.log('✅ Existing WPPConnect sessions restored');
-      
-      // Load agent assignments
-      await this.whatsappService.loadAgentAssignments();
-      console.log('✅ WPPConnect agent assignments loaded');
+      // Restore existing sessions from MongoDB (NON-BLOCKING - runs in background)
+      setImmediate(() => {
+        this.whatsappService.restoreExistingSessions()
+          .then(() => {
+            console.log('✅ Existing WPPConnect sessions restored');
+            // Load agent assignments after sessions are restored
+            return this.whatsappService.loadAgentAssignments();
+          })
+          .then(() => {
+            console.log('✅ WPPConnect agent assignments loaded');
+          })
+          .catch(error => {
+            console.error('❌ Error restoring sessions or loading assignments:', error);
+          });
+      });
+      console.log('🔄 Session restoration queued in background...');
       
       // Initialize auto-restart service
       this.autoRestartService.initialize();
       
-      console.log('🚀 WPPConnect WhatsApp Bot API ready - existing sessions restored, new clients can be created via API endpoints');
+      console.log('🚀 WPPConnect WhatsApp Bot API ready - sessions will restore in background');
     } catch (error) {
       console.error('❌ Failed to initialize WPPConnect WhatsApp Bot Application:', error);
       throw error;
