@@ -139,7 +139,28 @@ export class WPPConnectClientManager {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // We'll save tokens on CONNECTED state instead - more reliable timing
+          // Save session after successful QR scan or when logged in
+          if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged') {
+            setImmediate(() => {
+              (async () => {
+                try {
+                  console.log(`💾 Saving session token for ${clientId} after ${statusSession}...`);
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+                  
+                  const clientInfo = this.clients.get(clientId);
+                  if (clientInfo?.client) {
+                    const token = await clientInfo.client.getSessionTokenBrowser();
+                    if (token) {
+                      console.log(`🔑 Got session token, saving to MongoDB...`);
+                      await this.remoteTokenStore.setToken(clientId, token);
+                    }
+                  }
+                } catch (error) {
+                  console.error(`❌ Error saving session token:`, error);
+                }
+              })();
+            });
+          }
         },
         
         catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
@@ -182,7 +203,25 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Hybrid TokenStore (FileTokenStore + MongoDB) handles persistence automatically
+            // Manually save session token to MongoDB after connection
+            setImmediate(() => {
+              (async () => {
+                try {
+                  console.log(`💾 Saving session token for ${clientId} after CONNECTED...`);
+                  await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for session to stabilize
+                  
+                  const token = await clientInfo.client.getSessionTokenBrowser();
+                  if (token) {
+                    console.log(`🔑 Got session token for ${clientId}, saving to remote store...`);
+                    await this.remoteTokenStore.setToken(clientId, token);
+                  } else {
+                    console.warn(`⚠️  No token returned for ${clientId}`);
+                  }
+                } catch (error) {
+                  console.error(`❌ Error saving session token for ${clientId}:`, error);
+                }
+              })();
+            });
           }
           this.updateClientPhoneNumber(clientId);
         }
