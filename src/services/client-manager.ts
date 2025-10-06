@@ -310,10 +310,15 @@ export class WPPConnectClientManager {
     } catch (error) {
       console.error(`❌ Failed to create WPPConnect client ${clientId}:`, error);
       
-      // Check if error is due to browser already running
+      // Check if error is due to browser already running or profile locked
       const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes('browser is already running') || errorMessage.includes('userDataDir')) {
-        console.log(`🔄 Browser lock detected for ${clientId}, attempting cleanup...`);
+      const isBrowserLockError = errorMessage.includes('browser is already running') || 
+                                 errorMessage.includes('userDataDir') ||
+                                 errorMessage.includes('profile appears to be in use') ||
+                                 errorMessage.includes('locked the profile');
+      
+      if (isBrowserLockError) {
+        console.log(`🔄 Browser/profile lock detected for ${clientId}, attempting cleanup...`);
         
         try {
           // Try to clean up the browser folder locks
@@ -321,13 +326,23 @@ export class WPPConnectClientManager {
           const path = require('path');
           const browserPath = path.join(process.cwd(), 'tokens', clientId);
           
-          // Remove lock files
-          const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+          // Remove Chromium lock files
+          const lockFiles = [
+            'SingletonLock', 
+            'SingletonSocket', 
+            'SingletonCookie',
+            'lockfile' // Additional Chromium lock file
+          ];
+          
           for (const lockFile of lockFiles) {
             const lockPath = path.join(browserPath, lockFile);
             if (fs.existsSync(lockPath)) {
-              fs.unlinkSync(lockPath);
-              console.log(`🗑️  Removed lock file: ${lockFile}`);
+              try {
+                fs.unlinkSync(lockPath);
+                console.log(`🗑️  Removed lock file: ${lockFile}`);
+              } catch (unlinkError) {
+                console.log(`⚠️  Could not remove ${lockFile}: ${unlinkError}`);
+              }
             }
           }
           
@@ -335,6 +350,9 @@ export class WPPConnectClientManager {
           
           // Remove the failed placeholder
           this.clients.delete(clientId);
+          
+          // Add a small delay before retry to ensure file system sync
+          await new Promise(resolve => setTimeout(resolve, 1000));
           
           // Retry creating the client
           return await this.createClient(clientId);
@@ -348,13 +366,19 @@ export class WPPConnectClientManager {
       this.clients.delete(clientId);
       console.log(`🗑️  Removed failed client ${clientId} from map`);
       
-      // Only delete from MongoDB if it's a true authentication failure, not process interruption
-      // Check if error indicates authentication failure (not timeout, not process kill)
+      // Only delete from MongoDB if it's a true authentication failure, not process interruption or browser lock
+      // Check if error indicates authentication failure (not timeout, not process kill, not browser lock)
       const isAuthFailure = errorMessage.includes('authentication') || 
                            errorMessage.includes('qr') ||
                            errorMessage.includes('timeout') === false; // Don't delete on timeout
       
-      if (this.tokenStore && isAuthFailure && !errorMessage.includes('SIGTERM') && !errorMessage.includes('SIGINT')) {
+      const isBrowserIssue = errorMessage.includes('SIGTERM') || 
+                            errorMessage.includes('SIGINT') ||
+                            errorMessage.includes('profile appears to be in use') ||
+                            errorMessage.includes('locked the profile') ||
+                            errorMessage.includes('browser is already running');
+      
+      if (this.tokenStore && isAuthFailure && !isBrowserIssue) {
         try {
           console.log(`⚠️  Authentication failure detected, considering session cleanup...`);
           // Only delete if there's no existing valid session in MongoDB
