@@ -216,6 +216,9 @@ export class WPPConnectWhatsAppBotApp {
         }
       });
     });
+    
+    // Debug endpoint to check MongoDB tokens
+    this.app.get('/debug/mongo-tokens', (req, res) => this.apiController.debugMongoTokens(req, res));
   }
 
   private setupMessageHandling(): void {

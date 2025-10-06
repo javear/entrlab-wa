@@ -49,6 +49,38 @@ export class ApiController {
     }
 
     /**
+     * Debug endpoint to check MongoDB session tokens
+     */
+    async debugMongoTokens(req: Request, res: Response): Promise<void> {
+        try {
+            const mongoose = require('mongoose');
+            const WPPConnectSession = mongoose.model('WPPConnectSession');
+            const sessions = await WPPConnectSession.find({}).lean();
+            
+            res.json({
+                success: true,
+                totalSessions: sessions.length,
+                sessions: sessions.map((s: any) => ({
+                    sessionName: s.sessionName,
+                    hasTokenData: !!s.tokenData,
+                    tokenKeys: s.tokenData ? Object.keys(s.tokenData) : [],
+                    hasWABrowserId: !!s.tokenData?.WABrowserId,
+                    hasWASecretBundle: !!s.tokenData?.WASecretBundle,
+                    hasWAToken1: !!s.tokenData?.WAToken1,
+                    hasWAToken2: !!s.tokenData?.WAToken2,
+                    createdAt: s.createdAt,
+                    updatedAt: s.updatedAt
+                }))
+            });
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
      * @swagger
      * /api/memory/stats:
      *   get:
