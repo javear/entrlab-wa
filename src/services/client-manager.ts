@@ -353,13 +353,14 @@ export class WPPConnectClientManager {
           const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
-          const browserPath = path.join(process.cwd(), 'tokens', clientId);
+          const tokensPath = path.join(process.cwd(), 'tokens');
           
-          // CRITICAL: Delete the entire browser folder to force clean slate
-          console.log(`🗑️  Removing entire browser folder for clean extraction: ${browserPath}`);
-          if (fs.existsSync(browserPath)) {
-            fs.rmSync(browserPath, { recursive: true, force: true });
-            console.log(`✅ Browser folder removed successfully`);
+          // CRITICAL: Delete the entire tokens folder to force clean slate for all clients
+          // This prevents any stale files from interfering with fresh downloads
+          console.log(`🗑️  Removing entire tokens folder for clean extraction: ${tokensPath}`);
+          if (fs.existsSync(tokensPath)) {
+            fs.rmSync(tokensPath, { recursive: true, force: true });
+            console.log(`✅ Tokens folder removed successfully`);
           }
           
           // Extract PID from error message if available
