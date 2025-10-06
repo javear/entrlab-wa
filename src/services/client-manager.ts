@@ -1,11 +1,10 @@
 import { create, Whatsapp } from '@wppconnect-team/wppconnect';
 import mongoose from 'mongoose';
 import { 
-  WPPConnectMongoTokenStore, 
-  createMongoTokenStore,
   deleteBrowserSessionFromMongo,
   listBrowserSessionsInMongo
 } from './tokenstore';
+import { HybridMongoTokenStore, createHybridTokenStore } from './hybrid-tokenstore';
 import fs from 'fs';
 import path from 'path';
 
@@ -38,7 +37,7 @@ export class WPPConnectClientManager {
   private clients: Map<string, WPPConnectClientInfo> = new Map();
   private config: WPPConnectClientManagerConfig;
   private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
-  private tokenStore: WPPConnectMongoTokenStore | null = null;
+  private tokenStore: HybridMongoTokenStore | null = null;
   private standaloneTokenStore: any = null;
   private isMongoConnected: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
@@ -59,11 +58,11 @@ export class WPPConnectClientManager {
     try {
       if (mongoose.connection.readyState === 1) {
         this.isMongoConnected = true;
-        this.tokenStore = new WPPConnectMongoTokenStore();
-        // Standalone TokenStore doesn't need explicit connection
+        this.tokenStore = new HybridMongoTokenStore();
+        await this.tokenStore.connect();
         // Create standalone TokenStore for WPPConnect
-        this.standaloneTokenStore = createMongoTokenStore();
-        console.log('✅ WPPConnect MongoDB TokenStore initialized');
+        this.standaloneTokenStore = createHybridTokenStore();
+        console.log('✅ Hybrid MongoDB TokenStore initialized');
       } else {
         throw new Error('MongoDB connection not available');
       }
@@ -185,31 +184,7 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Save session token after CONNECTED - best timing for real token data
-            setImmediate(() => {
-              (async () => {
-                try {
-                  console.log(`💾 Getting session token from WPPConnect client ${clientId} (after CONNECTED)...`);
-                  
-                  // Wait longer for session to fully stabilize and write to disk
-                  await new Promise(resolve => setTimeout(resolve, 5000));
-                  
-                  const token = await clientInfo.client.getSessionTokenBrowser();
-                  console.log(`🔍 Retrieved token from getSessionTokenBrowser() after CONNECTED:`, JSON.stringify(token, null, 2));
-                  
-                  if (token && token.WABrowserId !== 'MultiDevice') {
-                    const saved = await this.standaloneTokenStore.setToken(clientId, token);
-                    if (saved) {
-                      console.log(`✅ Real session token saved to MongoDB for ${clientId}!`);
-                    }
-                  } else {
-                    console.warn(`⚠️  Still getting placeholder tokens - session data may not be available via getSessionTokenBrowser()`);
-                  }
-                } catch (error) {
-                  console.error(`❌ Error saving session token for ${clientId}:`, error);
-                }
-              })().catch(err => console.error(`❌ Background token save failed:`, err));
-            });
+            // Hybrid TokenStore (FileTokenStore + MongoDB) handles persistence automatically
           }
           this.updateClientPhoneNumber(clientId);
         }

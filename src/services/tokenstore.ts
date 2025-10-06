@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 import { SessionToken } from '@wppconnect-team/wppconnect/dist/token-store/types';
+import { FileTokenStore } from '@wppconnect-team/wppconnect/dist/token-store';
 import fs from 'fs';
 import path from 'path';
 import archiver from 'archiver';
