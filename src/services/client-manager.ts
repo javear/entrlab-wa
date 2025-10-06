@@ -1,9 +1,5 @@
 import { create, Whatsapp } from '@wppconnect-team/wppconnect';
 import mongoose from 'mongoose';
-import { 
-  deleteBrowserSessionFromMongo,
-  listBrowserSessionsInMongo
-} from './tokenstore';
 import { WhatsAppSessionBackup } from './whatsapp-session-backup';
 import fs from 'fs';
 import path from 'path';
@@ -82,16 +78,7 @@ export class WPPConnectClientManager {
 
     // Try to restore session from MongoDB backup first (unless skipped)
     if (!skipRestore) {
-      console.log(`🔄 [${clientId}] Attempting to restore session from MongoDB...`);
-      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
-      
-      if (restored) {
-        console.log(`✅ [${clientId}] Session restored from MongoDB backup`);
-      } else {
-        console.log(`📋 [${clientId}] No backup found - will create fresh session`);
-      }
-    } else {
-      console.log(`⏭️  [${clientId}] Skipping restore (already restored)`);
+      await this.sessionBackup!.restoreWhatsAppSession(clientId);
     }
 
     // Add placeholder client info immediately so it's queryable
@@ -103,7 +90,6 @@ export class WPPConnectClientManager {
       status: 'initializing'
     };
     this.clients.set(clientId, placeholderClientInfo);
-    console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
 
     try {
       // Create WPPConnect client with minimal TokenStore
@@ -169,35 +155,21 @@ export class WPPConnectClientManager {
       // Check for QR code manually (catchQR callback sometimes doesn't fire)
       setImmediate(async () => {
         try {
-          console.log(`🔍 [${clientId}] Starting manual QR check...`);
-          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait longer for initialization
+          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for initialization
           
           const clientInfo = this.clients.get(clientId);
-          console.log(`🔍 [${clientId}] Client info: status=${clientInfo?.status}, hasQR=${!!clientInfo?.qrCode}`);
-          
           if (clientInfo && !clientInfo.qrCode) {
-            console.log(`🔍 [${clientId}] No QR code found, trying getQrCode()...`);
             try {
               const qrData = await client.getQrCode();
-              console.log(`🔍 [${clientId}] getQrCode() result:`, qrData ? 'found' : 'null');
-              
               if (qrData && qrData.base64Image) {
-                console.log(`✅ [${clientId}] Retrieved QR code manually (base64)`);
                 this.updateClientQR(clientId, qrData.base64Image);
-              } else if (qrData && qrData.urlCode) {
-                console.log(`✅ [${clientId}] Retrieved QR URL: ${qrData.urlCode}`);
-                // Convert URL to base64 if needed
-              } else {
-                console.log(`⚠️  [${clientId}] getQrCode() returned no usable data`);
               }
             } catch (qrError) {
-              console.log(`⚠️  [${clientId}] getQrCode() error:`, qrError);
+              // Silent fail - QR will be available via catchQR callback
             }
-          } else {
-            console.log(`ℹ️  [${clientId}] QR code already exists or client not ready`);
           }
         } catch (error) {
-          console.error(`❌ [${clientId}] Error in manual QR check:`, error);
+          console.error(`❌ [${clientId}] QR check error:`, error);
         }
       });
 
@@ -215,25 +187,21 @@ export class WPPConnectClientManager {
 
       // Set up ready handler
       client.onStateChange(async (state) => {
-        console.log(`🔄 [${clientId}] State: ${state}`);
-        
         if (state === 'CONNECTED') {
           const clientInfo = this.clients.get(clientId);
           if (clientInfo) {
             clientInfo.status = 'ready';
             clientInfo.isReady = true;
             clientInfo.lastActivity = new Date();
-            console.log(`✅ [${clientId}] Connected and ready`);
             
             // Backup WhatsApp session to MongoDB after successful connection
             setImmediate(async () => {
               try {
-                console.log(`💾 [${clientId}] Backing up WhatsApp session to MongoDB...`);
-                await new Promise(resolve => setTimeout(resolve, 10000)); // Wait longer for session to fully stabilize
+                await new Promise(resolve => setTimeout(resolve, 10000)); // Wait for session to stabilize
                 await this.sessionBackup!.backupWhatsAppSession(clientId);
-                await this.sessionBackup!.cleanupOldWhatsAppBackups(clientId, 2); // Keep only 2 WhatsApp backups
+                await this.sessionBackup!.cleanupOldWhatsAppBackups(clientId, 2);
               } catch (error) {
-                console.error(`❌ [${clientId}] WhatsApp session backup failed:`, error);
+                console.error(`❌ [${clientId}] Session backup failed:`, error);
               }
             });
           }
@@ -242,37 +210,19 @@ export class WPPConnectClientManager {
         
         // Handle disconnection states
         if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
-          console.log(`📴 Client ${clientId} unpaired/disconnected - removing session from MongoDB`);
           const clientInfo = this.clients.get(clientId);
           if (clientInfo) {
             clientInfo.status = 'disconnected';
             clientInfo.isReady = false;
-            
-            // Delete session from MongoDB when unpaired
-            try {
-              await deleteBrowserSessionFromMongo(clientId);
-              console.log(`🗑️  Session deleted from MongoDB for unpaired client ${clientId}`);
-            } catch (error) {
-              console.error(`❌ Failed to delete session for unpaired ${clientId}:`, error);
-            }
           }
         }
         
         // Handle conflict - might indicate session change
         if (state === 'CONFLICT') {
-          console.log(`⚠️  Client ${clientId} in CONFLICT state - session may have been taken over by another device`);
           const clientInfo = this.clients.get(clientId);
           if (clientInfo) {
             clientInfo.status = 'disconnected';
             clientInfo.isReady = false;
-            
-            // Delete old session from MongoDB
-            try {
-              await deleteBrowserSessionFromMongo(clientId);
-              console.log(`🗑️  Session deleted from MongoDB for conflicted client ${clientId}`);
-            } catch (error) {
-              console.error(`❌ Failed to delete conflicted session for ${clientId}:`, error);
-            }
           }
         }
       });
@@ -284,13 +234,9 @@ export class WPPConnectClientManager {
         existingClientInfo.lastActivity = new Date();
         console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
         
-        // Note: WPPConnect automatically handles session persistence through tokenStore
-        console.log(`🔄 WPPConnect will automatically manage session persistence via tokenStore`);
-        
         // Update phone number if client is already authenticated (restored session)
         if (existingClientInfo.isReady) {
           await this.updateClientPhoneNumber(clientId);
-          console.log(`✅ Client ${clientId} is already ready - session managed by WPPConnect tokenStore`);
         }
         
         return existingClientInfo;
@@ -304,7 +250,6 @@ export class WPPConnectClientManager {
           status: 'initializing'
         };
         this.clients.set(clientId, clientInfo);
-        console.log(`✅ WPPConnect client ${clientId} initialized successfully`);
         return clientInfo;
       }
 
@@ -338,7 +283,7 @@ export class WPPConnectClientManager {
               console.log(`🗑️  Removed corrupted browser folder: ${browserPath}`);
             }
             
-            await deleteBrowserSessionFromMongo(clientId);
+            // Session cleanup handled by WhatsApp session backup service
             console.log(`🗑️  Removed corrupted session from MongoDB for ${clientId}`);
           } catch (e) {
             console.error(`⚠️  Cleanup error:`, e);
@@ -441,15 +386,7 @@ export class WPPConnectClientManager {
                             errorMessage.includes('browser is already running');
       
       if (this.sessionBackup && isAuthFailure && !isBrowserIssue) {
-        try {
-          console.log(`⚠️  Authentication failure detected, considering session cleanup...`);
-          // Only delete if there's no existing valid session in MongoDB
-          // This prevents deleting good sessions on process restart failures
-          await deleteBrowserSessionFromMongo(clientId);
-          console.log(`🗑️  Deleted failed browser session from MongoDB GridFS: ${clientId}`);
-        } catch (mongoError) {
-          console.error(`⚠️  Failed to delete browser session from MongoDB for ${clientId}:`, mongoError);
-        }
+        // Session cleanup handled by WhatsApp session backup service
       } else {
         console.log(`ℹ️  Keeping existing session in MongoDB for ${clientId} (error: ${errorMessage.substring(0, 50)}...)`);
       }
@@ -488,43 +425,22 @@ export class WPPConnectClientManager {
           console.log(`🗑️  Removing client ${clientId} - Authentication failed (${status})`);
           this.clients.delete(clientId);
           
-          // Delete the browser session from MongoDB GridFS to prevent resurrection on restart
-          if (this.sessionBackup) {
-            deleteBrowserSessionFromMongo(clientId)
-              .then(() => {
-                console.log(`🗑️  Deleted failed browser session from MongoDB GridFS: ${clientId}`);
-              })
-              .catch((error: any) => {
-                console.error(`⚠️  Failed to delete browser session from MongoDB for ${clientId}:`, error);
-              });
-          }
+          // Session cleanup handled by WhatsApp session backup service
           return;
         case 'qrReadError':
           // qrReadError can be a false positive if client is already authenticated
           // Only treat as failure if client is NOT ready/authenticated
           if (clientInfo.isReady || clientInfo.status === 'ready' || clientInfo.status === 'authenticated') {
-            console.log(`⚠️  Ignoring qrReadError for ${clientId} - client is already authenticated`);
             break;
           }
           
           // Only delete if truly not authenticated
-          console.log(`🗑️  Removing client ${clientId} - Authentication failed (qrReadError) and not authenticated`);
           this.clients.delete(clientId);
           
-          if (this.sessionBackup) {
-            deleteBrowserSessionFromMongo(clientId)
-              .then(() => {
-                console.log(`🗑️  Deleted failed browser session from MongoDB GridFS: ${clientId}`);
-              })
-              .catch((error: any) => {
-                console.error(`⚠️  Failed to delete browser session from MongoDB for ${clientId}:`, error);
-              });
-          }
+          // Session cleanup handled by WhatsApp session backup service
           return;
         case 'browserClose':
           // Browser close is normal (happens during shutdown/restart)
-          // Don't remove from map - let cleanup handle it properly
-          console.log(`📴 Browser closed for ${clientId} - keeping client in map for graceful shutdown`);
           if (clientInfo) {
             clientInfo.status = 'disconnected';
             clientInfo.isReady = false;
@@ -534,12 +450,9 @@ export class WPPConnectClientManager {
         case 'serverClose':
           clientInfo.status = 'disconnected';
           clientInfo.isReady = false;
-          // Preserve QR code if available
-          console.log(`📴 WPPConnect client ${clientId} disconnected: ${status} - QR code available: ${!!clientInfo.qrCode}`);
           break;
         default:
           // Don't override status if we don't recognize it
-          console.log(`ℹ️  WPPConnect client ${clientId} unknown status: ${status}`);
       }
       clientInfo.lastActivity = new Date();
     }
@@ -669,35 +582,25 @@ export class WPPConnectClientManager {
     }
 
     try {
-      // Get list of WhatsApp sessions from MongoDB GridFS
       const sessions = await this.sessionBackup.listWhatsAppBackups('*');
-      console.log(`📋 Found ${sessions.length} existing WhatsApp sessions in MongoDB GridFS`);
+      console.log(`📋 Found ${sessions.length} existing WhatsApp sessions`);
 
       for (const session of sessions) {
         const clientId = session.filename.replace('_whatsapp_session.zip', '');
-        console.log(`🔄 Restoring WhatsApp session for client: ${clientId}`);
         
         try {
           // Check if client already exists
           if (this.clients.has(clientId)) {
-            console.log(`ℹ️  [${clientId}] Client already exists, skipping creation`);
             continue;
           }
 
           // Restore the WhatsApp session first, then create client
           const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
           if (restored) {
-            console.log(`✅ Session restored for ${clientId}, waiting before creating client...`);
-            // Wait longer for session to fully stabilize
             await new Promise(resolve => setTimeout(resolve, 5000));
-            console.log(`🚀 Creating client for ${clientId}...`);
             await this.createClient(clientId, true); // Skip restore since we already did it
-            // Add delay between client creations to prevent race conditions
             await new Promise(resolve => setTimeout(resolve, 3000));
-          } else {
-            console.log(`⚠️  Failed to restore session for ${clientId}`);
           }
-          console.log(`✅ Successfully restored session for client: ${clientId}`);
         } catch (error) {
           console.error(`❌ Failed to restore session for client ${clientId}:`, error);
         }
@@ -796,21 +699,6 @@ export class WPPConnectClientManager {
     };
   }
 
-  /**
-   * Clean up all broken sessions in MongoDB during startup
-   * This scans all sessions and removes any that are corrupted or invalid
-   */
-  private async cleanupAllBrokenSessions(): Promise<void> {
-    console.log(`🧹 Session cleanup handled by WhatsAppSessionBackup service`);
-  }
-
-  /**
-   * Detect and clean up broken sessions in MongoDB
-   * This handles cases where a session exists in MongoDB but is corrupted or invalid
-   */
-  private async detectAndCleanupBrokenSession(clientId: string): Promise<void> {
-    console.log(`🔍 Session validation handled by WhatsAppSessionBackup service for ${clientId}`);
-  }
 
 
   /**
@@ -819,37 +707,19 @@ export class WPPConnectClientManager {
    */
   public async forceCleanupSession(clientId: string): Promise<boolean> {
     try {
-      console.log(`🧹 Force cleaning up session for ${clientId}`);
-      
-      if (!this.sessionBackup) {
-        console.log(`⚠️  No tokenStore available for force cleanup`);
-        return false;
-      }
-
       // Remove from active clients map if present
       if (this.clients.has(clientId)) {
         const clientInfo = this.clients.get(clientId);
         if (clientInfo && clientInfo.client) {
           try {
             await clientInfo.client.close();
-            console.log(`✅ Closed active client ${clientId}`);
           } catch (error) {
             console.error(`⚠️  Error closing client ${clientId}:`, error);
           }
         }
         this.clients.delete(clientId);
-        console.log(`🗑️  Removed ${clientId} from active clients map`);
       }
-
-      // Remove from MongoDB GridFS
-      const removed = await deleteBrowserSessionFromMongo(clientId);
-      if (removed) {
-        console.log(`✅ Force cleaned up browser session for ${clientId} from MongoDB GridFS`);
-        return true;
-      } else {
-        console.log(`⚠️  Browser session ${clientId} was not found in MongoDB GridFS`);
-        return true; // Still return true since we attempted cleanup
-      }
+      return true;
     } catch (error) {
       console.error(`❌ Error force cleaning session for ${clientId}:`, error);
       return false;
@@ -858,7 +728,6 @@ export class WPPConnectClientManager {
 
   public async cleanup(): Promise<void> {
     console.log('🔄 Starting graceful shutdown...');
-    console.log('ℹ️  Sessions preserved in MongoDB (periodic backups ensure latest state)');
     
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
@@ -868,28 +737,18 @@ export class WPPConnectClientManager {
       clearInterval(this.sessionBackupInterval);
     }
 
-    // NO sync during shutdown - sessions are already backed up via periodic backups (every 30 min)
-    // and after authentication. Syncing here only delays restart without benefit.
-    console.log(`✅ Skipping session sync during shutdown (already backed up periodically)`);
-
     // Disconnect all clients
     for (const [clientId, clientInfo] of this.clients) {
       try {
         if (clientInfo.client) {
           await clientInfo.client.close();
         }
-        console.log(`✅ WPPConnect client ${clientId} disconnected successfully`);
       } catch (error) {
-        console.error(`❌ Error disconnecting WPPConnect client ${clientId}:`, error);
+        console.error(`❌ Error disconnecting client ${clientId}:`, error);
       }
     }
 
     this.clients.clear();
-
-    if (this.sessionBackup) {
-        // Remote TokenStore doesn't need explicit disconnection
-        console.log('✅ Remote TokenStore cleaned up');
-    }
   }
 
   /**
