@@ -387,6 +387,36 @@ export async function uploadBrowserSessionToMongo(clientId: string): Promise<boo
 }
 
 /**
+ * Clean Chromium lock files from browser session folder
+ * These files prevent profile from being used on different servers/processes
+ */
+function cleanChromiumLockFiles(tokensPath: string): void {
+  const lockFiles = [
+    'SingletonLock',
+    'SingletonSocket', 
+    'SingletonCookie',
+    'lockfile'
+  ];
+  
+  let cleanedCount = 0;
+  for (const lockFile of lockFiles) {
+    const lockPath = path.join(tokensPath, lockFile);
+    if (fs.existsSync(lockPath)) {
+      try {
+        fs.unlinkSync(lockPath);
+        cleanedCount++;
+      } catch (error) {
+        console.warn(`⚠️  Could not remove lock file ${lockFile}:`, error);
+      }
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned ${cleanedCount} Chromium lock file(s) from ${tokensPath}`);
+  }
+}
+
+/**
  * Download browser session folder from MongoDB GridFS
  * Extracts the zip to /tokens/{clientId}/
  */
@@ -423,6 +453,11 @@ export async function downloadBrowserSessionFromMongo(clientId: string): Promise
         try {
           await extract(tmpZipPath, { dir: tokensPath });
           fs.unlinkSync(tmpZipPath); // Clean up zip file
+          
+          // CRITICAL: Clean Chromium lock files after extraction
+          // This allows the session to work on different servers/processes
+          cleanChromiumLockFiles(tokensPath);
+          
           console.log(`✅ Browser session extracted to /tokens/${clientId}/`);
           resolve(true);
         } catch (error) {
