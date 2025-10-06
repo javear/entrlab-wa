@@ -427,6 +427,54 @@ export class WPPConnectClientManager {
       this.clients.delete(clientId);
       console.log(`🗑️  Removed failed client ${clientId} from map`);
       
+      // Check if this is a corrupted/incompatible session error
+      const isIncompatibleSession = errorMessage.includes('Target closed') || 
+                                   errorMessage.includes('Target.setAutoAttach') ||
+                                   errorMessage.includes('Protocol error') ||
+                                   errorMessage.includes('TargetCloseError');
+      
+      if (isIncompatibleSession) {
+        // Check if we've already tried to recover from incompatible session
+        const retryKey = `incompatible_retry_${clientId}`;
+        const hasRetried = (this as any)[retryKey];
+        
+        if (hasRetried) {
+          console.error(`❌ Still getting incompatible session error after cleanup - giving up`);
+          delete (this as any)[retryKey];
+          throw new Error('Failed to create client even with fresh session. Please try again later.');
+        }
+        
+        console.log(`⚠️  Incompatible browser session detected (corrupted or from different server/Chromium version)`);
+        console.log(`🧹 Cleaning up incompatible session and retrying with fresh session...`);
+        
+        // Delete both local and MongoDB session
+        const fs = require('fs');
+        const path = require('path');
+        const tokensPath = path.join(process.cwd(), 'tokens');
+        
+        if (fs.existsSync(tokensPath)) {
+          fs.rmSync(tokensPath, { recursive: true, force: true });
+          console.log(`🗑️  Removed local tokens folder`);
+        }
+        
+        await deleteBrowserSessionFromMongo(clientId);
+        console.log(`🗑️  Removed incompatible MongoDB session for ${clientId}`);
+        
+        // Mark that we've retried to prevent infinite loops
+        (this as any)[retryKey] = true;
+        
+        // Retry once with fresh session (no downloaded session)
+        console.log(`🔄 Retrying client creation with fresh session (QR code required)...`);
+        try {
+          const result = await this.createClient(clientId); // Recursive call, but MongoDB session is now deleted so it won't download
+          delete (this as any)[retryKey]; // Clear retry flag on success
+          return result;
+        } catch (retryError) {
+          delete (this as any)[retryKey]; // Clear retry flag before re-throwing
+          throw retryError;
+        }
+      }
+      
       // Only delete from MongoDB if it's a true authentication failure, not process interruption or browser lock
       // Check if error indicates authentication failure (not timeout, not process kill, not browser lock)
       const isAuthFailure = errorMessage.includes('authentication') || 
