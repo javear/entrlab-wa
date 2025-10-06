@@ -101,11 +101,18 @@ export class WPPConnectMongoTokenStore {
       console.log(`💾 Token data keys: ${Object.keys(tokenData || {}).join(', ')}`);
       console.log(`💾 Full token data:`, JSON.stringify(tokenData, null, 2));
       
-      if (!tokenData.WABrowserId || !tokenData.WASecretBundle || !tokenData.WAToken1 || !tokenData.WAToken2) {
-        console.error(`❌ Invalid SessionToken structure for ${sessionName}`);
+      // Check if we have valid session data
+      const hasValidData = tokenData && (
+        (tokenData.WABrowserId && tokenData.WASecretBundle) || // MultiDevice tokens
+        Object.keys(tokenData).length > 0  // Any token data
+      );
+      
+      if (!hasValidData) {
+        console.error(`❌ No valid session token data for ${sessionName}`);
         return false;
       }
       
+      // Save whatever WPPConnect gives us - don't be strict about structure
       await WPPConnectSession.findOneAndUpdate(
         { sessionName },
         { 
@@ -119,7 +126,8 @@ export class WPPConnectMongoTokenStore {
         }
       );
       
-      console.log(`✅ Successfully saved WPPConnect session: ${sessionName}`);
+      console.log(`✅ Successfully saved WPPConnect session to MongoDB: ${sessionName}`);
+      console.log(`✅ Saved token keys: ${Object.keys(tokenData).join(', ')}`);
       return true;
     } catch (error) {
       console.error(`❌ Error setting WPPConnect token for ${sessionName}:`, error);
