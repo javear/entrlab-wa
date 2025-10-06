@@ -4,7 +4,7 @@ import {
   deleteBrowserSessionFromMongo,
   listBrowserSessionsInMongo
 } from './tokenstore';
-import { RobustSessionBackup } from './robust-session-backup';
+import { WhatsAppSessionBackup } from './whatsapp-session-backup';
 import fs from 'fs';
 import path from 'path';
 
@@ -37,7 +37,7 @@ export class WPPConnectClientManager {
   private clients: Map<string, WPPConnectClientInfo> = new Map();
   private config: WPPConnectClientManagerConfig;
   private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
-  private sessionBackup: RobustSessionBackup | null = null;
+  private sessionBackup: WhatsAppSessionBackup | null = null;
   private isMongoConnected: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private sessionBackupInterval: NodeJS.Timeout | null = null;
@@ -57,9 +57,9 @@ export class WPPConnectClientManager {
     try {
       if (mongoose.connection.readyState === 1) {
         this.isMongoConnected = true;
-        // Initialize robust session backup service
-        this.sessionBackup = new RobustSessionBackup();
-        console.log('✅ Robust Session Backup service initialized');
+        // Initialize WhatsApp-specific session backup service
+        this.sessionBackup = new WhatsAppSessionBackup();
+        console.log('✅ WhatsApp Session Backup service initialized');
       } else {
         throw new Error('MongoDB connection not available');
       }
@@ -83,7 +83,7 @@ export class WPPConnectClientManager {
     // Try to restore session from MongoDB backup first (unless skipped)
     if (!skipRestore) {
       console.log(`🔄 [${clientId}] Attempting to restore session from MongoDB...`);
-      const restored = await this.sessionBackup!.restoreCompleteSession(clientId);
+      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
       
       if (restored) {
         console.log(`✅ [${clientId}] Session restored from MongoDB backup`);
@@ -160,8 +160,31 @@ export class WPPConnectClientManager {
 
       console.log(`✅ WPPConnect client created: ${clientId}`);
 
-      // WPPConnect TokenStore handles everything automatically
-      // No manual QR retrieval needed - follows official pattern
+      // Check for QR code manually (catchQR callback sometimes doesn't fire)
+      setImmediate(async () => {
+        try {
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for initialization
+          
+          const clientInfo = this.clients.get(clientId);
+          if (clientInfo && !clientInfo.qrCode && clientInfo.status === 'qr_required') {
+            console.log(`🔍 [${clientId}] Checking for QR code via getQrCode()...`);
+            try {
+              const qrData = await client.getQrCode();
+              if (qrData && qrData.base64Image) {
+                console.log(`✅ [${clientId}] Retrieved QR code manually (base64)`);
+                this.updateClientQR(clientId, qrData.base64Image);
+              } else if (qrData && qrData.urlCode) {
+                console.log(`✅ [${clientId}] Retrieved QR URL: ${qrData.urlCode}`);
+                // Convert URL to base64 if needed
+              }
+            } catch (qrError) {
+              console.log(`⚠️  [${clientId}] getQrCode() not available:`, qrError);
+            }
+          }
+        } catch (error) {
+          console.error(`❌ [${clientId}] Error checking for QR:`, error);
+        }
+      });
 
       // Set up message handler
       client.onMessage(async (message) => {
@@ -187,15 +210,15 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ [${clientId}] Connected and ready`);
             
-            // Backup COMPLETE session to MongoDB after successful connection
+            // Backup WhatsApp session to MongoDB after successful connection
             setImmediate(async () => {
               try {
-                console.log(`💾 [${clientId}] Backing up COMPLETE session to MongoDB...`);
+                console.log(`💾 [${clientId}] Backing up WhatsApp session to MongoDB...`);
                 await new Promise(resolve => setTimeout(resolve, 10000)); // Wait longer for session to fully stabilize
-                await this.sessionBackup!.backupCompleteSession(clientId);
-                await this.sessionBackup!.cleanupOldCompleteBackups(clientId, 2); // Keep only 2 complete backups
+                await this.sessionBackup!.backupWhatsAppSession(clientId);
+                await this.sessionBackup!.cleanupOldWhatsAppBackups(clientId, 2); // Keep only 2 WhatsApp backups
               } catch (error) {
-                console.error(`❌ [${clientId}] Complete session backup failed:`, error);
+                console.error(`❌ [${clientId}] WhatsApp session backup failed:`, error);
               }
             });
           }
@@ -631,17 +654,17 @@ export class WPPConnectClientManager {
     }
 
     try {
-      // Get list of complete browser sessions from MongoDB GridFS
-      const sessions = await this.sessionBackup.listCompleteBackups('*');
-      console.log(`📋 Found ${sessions.length} existing complete browser sessions in MongoDB GridFS`);
+      // Get list of WhatsApp sessions from MongoDB GridFS
+      const sessions = await this.sessionBackup.listWhatsAppBackups('*');
+      console.log(`📋 Found ${sessions.length} existing WhatsApp sessions in MongoDB GridFS`);
 
       for (const session of sessions) {
-        const clientId = session.filename.replace('_complete_session.zip', '');
-        console.log(`🔄 Restoring COMPLETE browser session for client: ${clientId}`);
+        const clientId = session.filename.replace('_whatsapp_session.zip', '');
+        console.log(`🔄 Restoring WhatsApp session for client: ${clientId}`);
         
         try {
-          // Restore the complete session first, then create client
-          const restored = await this.sessionBackup.restoreCompleteSession(clientId);
+          // Restore the WhatsApp session first, then create client
+          const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
           if (restored) {
             console.log(`✅ Session restored for ${clientId}, waiting before creating client...`);
             // Wait longer for session to fully stabilize
