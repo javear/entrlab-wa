@@ -106,11 +106,17 @@ export class WPPConnectClientManager {
     console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
 
     try {
-      // Create WPPConnect client without TokenStore
-      // Session persistence handled by browser profile backup/restore
+      // Create WPPConnect client with minimal TokenStore
+      // Session persistence handled by WhatsApp session backup/restore
       const client = await create({
         session: clientId,
-        // No tokenStore - using browser profile backup instead
+        // Use a simple TokenStore that doesn't interfere with WhatsApp backup
+        tokenStore: {
+          getToken: async () => undefined, // Don't restore from TokenStore
+          setToken: async () => true, // Don't save to TokenStore
+          removeToken: async () => true,
+          listTokens: async () => []
+        },
         
         // Browser configuration
         headless: true,
@@ -672,6 +678,12 @@ export class WPPConnectClientManager {
         console.log(`🔄 Restoring WhatsApp session for client: ${clientId}`);
         
         try {
+          // Check if client already exists
+          if (this.clients.has(clientId)) {
+            console.log(`ℹ️  [${clientId}] Client already exists, skipping creation`);
+            continue;
+          }
+
           // Restore the WhatsApp session first, then create client
           const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
           if (restored) {
