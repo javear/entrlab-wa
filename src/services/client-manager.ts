@@ -103,50 +103,28 @@ export class WPPConnectClientManager {
     console.log(`📝 Client ${clientId} added to map with 'initializing' status`);
 
     try {
-      // BULLETPROOF SESSION RESTORATION STRATEGY:
-      // 1. Try session tokens first (cross-server compatible, like whatsapp-web.js)
-      // 2. Fallback to browser folder if tokens don't work
-      // 3. Generate QR only if both fail
+      // BULLETPROOF SESSION RESTORATION - MONGODB ONLY (NO LOCAL FILES)
+      // Session tokens stored in MongoDB work across ANY server/deployment
+      // No dependency on /tokens folder (which is not committed to git)
       
       console.log(`🔍 TokenStore type: ${typeof this.standaloneTokenStore}`);
       console.log(`🔍 TokenStore keys: ${this.standaloneTokenStore ? Object.keys(this.standaloneTokenStore).join(', ') : 'null'}`);
-      console.log(`🔍 TokenStore.setToken type: ${typeof this.standaloneTokenStore?.setToken}`);
       
-      // STEP 1: Try to restore session tokens from MongoDB (PREFERRED - cross-server compatible)
+      // Try to restore session tokens from MongoDB
       let sessionToken = null;
-      let hasSessionTokens = false;
       try {
         sessionToken = await this.standaloneTokenStore.getToken(clientId);
         if (sessionToken && sessionToken.WABrowserId && sessionToken.WASecretBundle) {
           console.log(`✅ Found valid session tokens in MongoDB for ${clientId}`);
           console.log(`🔄 Token keys: ${Object.keys(sessionToken).join(', ')}`);
-          hasSessionTokens = true;
-          
-          // Don't download browser folder if we have valid tokens
-          // Session tokens are sufficient for authentication and work across servers
-          console.log(`🎯 Using session tokens for cross-server authentication`);
+          console.log(`🎯 Using session tokens from MongoDB - works across ANY server!`);
         } else {
-          console.log(`⚠️  Session tokens found but invalid/incomplete for ${clientId}`);
+          console.log(`📝 No session tokens found in MongoDB for ${clientId}`);
+          console.log(`📝 Will generate QR code for authentication`);
         }
       } catch (error) {
         console.error(`❌ Error retrieving session token for ${clientId}:`, error);
-      }
-      
-      // STEP 2: If no valid tokens, try browser folder backup (fallback for same-server)
-      if (!hasSessionTokens) {
-        try {
-          const sessionRestored = await downloadBrowserSessionFromMongo(clientId);
-          if (sessionRestored) {
-            console.log(`✅ Browser session restored from MongoDB for ${clientId} (fallback)`);
-            // Wait for filesystem to stabilize after extraction
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          } else {
-            console.log(`📝 No browser session or tokens found - will generate QR code for ${clientId}`);
-          }
-        } catch (error) {
-          console.error(`⚠️  Error downloading browser session for ${clientId}:`, error);
-          console.log(`📝 Will generate QR code for authentication`);
-        }
+        console.log(`📝 Will generate QR code for authentication`);
       }
       
       const client = await create({
@@ -182,25 +160,27 @@ export class WPPConnectClientManager {
           console.log(`📊 WPPConnect Status for ${session}: ${statusSession}`);
           this.updateClientStatus(clientId, statusSession);
           
-          // Upload browser session folder to MongoDB after successful authentication
+          // Save session tokens to MongoDB after successful authentication
           if (statusSession === 'qrReadSuccess' || statusSession === 'isLogged' || statusSession === 'inChat') {
             try {
               const clientInfo = this.clients.get(clientId);
               if (clientInfo && clientInfo.client) {
-                console.log(`💾 Uploading browser session to MongoDB for ${clientId} after ${statusSession}`);
+                console.log(`💾 Extracting and saving session tokens to MongoDB for ${clientId} after ${statusSession}`);
                 
-                // Wait a bit for browser to finish writing session files
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                // Wait for browser to finish writing session files to Local Storage
+                await new Promise(resolve => setTimeout(resolve, 3000));
                 
+                // Upload browser session to extract tokens from it
                 const uploaded = await uploadBrowserSessionToMongo(clientId);
                 if (uploaded) {
-                  console.log(`✅ Browser session uploaded to MongoDB for ${clientId}`);
+                  console.log(`✅ Session tokens extracted and saved to MongoDB for ${clientId}`);
+                  console.log(`🎯 Session will work across ANY server deployment!`);
                 } else {
-                  console.error(`❌ Failed to upload browser session to MongoDB for ${clientId}`);
+                  console.error(`❌ Failed to extract session tokens for ${clientId}`);
                 }
               }
             } catch (error) {
-              console.error(`❌ Error uploading browser session for ${clientId}:`, error);
+              console.error(`❌ Error saving session tokens for ${clientId}:`, error);
             }
           }
         },
@@ -245,16 +225,16 @@ export class WPPConnectClientManager {
             clientInfo.lastActivity = new Date();
             console.log(`✅ WPPConnect client ${clientId} is now READY (CONNECTED)`);
             
-            // Sync session to MongoDB on CONNECTED state (session may have changed)
+            // Extract and sync session tokens to MongoDB on CONNECTED state
             try {
-              console.log(`🔄 Syncing session to MongoDB after CONNECTED state for ${clientId}`);
+              console.log(`🔄 Extracting session tokens after CONNECTED state for ${clientId}`);
               await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for session stabilization
               const uploaded = await uploadBrowserSessionToMongo(clientId);
               if (uploaded) {
-                console.log(`✅ Session synced to MongoDB for ${clientId} (CONNECTED)`);
+                console.log(`✅ Session tokens extracted and synced to MongoDB for ${clientId}`);
               }
             } catch (error) {
-              console.error(`❌ Failed to sync session on CONNECTED for ${clientId}:`, error);
+              console.error(`❌ Failed to extract session tokens on CONNECTED for ${clientId}:`, error);
             }
           }
           this.updateClientPhoneNumber(clientId);

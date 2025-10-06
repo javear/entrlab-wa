@@ -244,9 +244,15 @@ async function extractSessionTokensFromBrowser(clientId: string): Promise<Sessio
 }
 
 /**
- * Upload browser session folder to MongoDB GridFS
- * Compresses the entire /tokens/{clientId}/ folder into a zip and stores it
- * Also extracts and saves session tokens for cross-server portability
+ * Extract and save session tokens from browser Local Storage to MongoDB
+ * 
+ * PRIMARY PURPOSE: Extract WABrowserId, WASecretBundle, WAToken1, WAToken2
+ * from Chromium's Local Storage and save to MongoDB for cross-server use
+ * 
+ * SECONDARY: Also backs up browser folder to GridFS (for debugging/fallback)
+ * 
+ * NOTE: Session tokens in MongoDB are sufficient for authentication across
+ * any server. Browser folder is temporary and not relied upon for deployment.
  */
 export async function uploadBrowserSessionToMongo(clientId: string): Promise<boolean> {
   // Check if upload is already in progress
