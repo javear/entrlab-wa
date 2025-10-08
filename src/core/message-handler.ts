@@ -638,7 +638,6 @@ export class WPPConnectMessageHandler {
     delete this.readReceiptSent[senderNumber];
     
     // Keep clientIdByUser for future messages from same user
-    console.log(`🧹 Cleaned up processing state for ${senderNumber}`);
   }
 
   private convertLLMToWhatsApp(content: string, preserveStructure: boolean = true): string {
@@ -751,11 +750,6 @@ export class WPPConnectMessageHandler {
         return formattedCode;
       });
 
-      console.log('✅ WhatsApp formatting completed', {
-        originalLength,
-        formattedLength: formattedContent.length,
-        reduction: originalLength - formattedContent.length
-      });
       return formattedContent;
     } catch (error) {
       console.log('⚠️ Error in WhatsApp formatting, sending original content', error);
@@ -778,8 +772,7 @@ export class WPPConnectMessageHandler {
       const formattedNumber = `${number || ''}@c.us`;
       
       if (initial) {
-        const response = await this.whatsappService.sendMessage(clientId, formattedNumber, message);
-        console.log('Message sent successfully:');
+        await this.whatsappService.sendMessage(clientId, formattedNumber, message);
         return;
       } 
 
@@ -815,11 +808,9 @@ export class WPPConnectMessageHandler {
       try {
         // Format the response for WhatsApp
         const formattedResponse = this.convertLLMToWhatsApp(aiagent.text);
-        console.log(`✅ WhatsApp formatting completed { originalLength: ${aiagent.text.length}, formattedLength: ${formattedResponse.length}, reduction: ${aiagent.text.length - formattedResponse.length} }`);
         
         // Parse response for media URLs and text parts
         const outgoingParts = this.parseResponseForMedia(formattedResponse);
-        console.log(`📝 Prepared ${outgoingParts.length} outgoing part(s) for ${formattedNumber}`);
         
         // Get client for sending
         const client = this.whatsappService.getClient(clientId);
@@ -972,7 +963,6 @@ export class WPPConnectMessageHandler {
               } else {
                 // Regular text
                 await client.client.sendText(formattedNumber || '', textContent);
-                console.log(`✅ Sent text part`);
               }
             } catch (textErr: any) {
               console.log('⚠️ Error sending text part:', textErr?.message || textErr);
@@ -991,8 +981,6 @@ export class WPPConnectMessageHandler {
             await new Promise(resolve => setTimeout(resolve, delayMs));
           }
         }
-        
-        console.log('Message sent successfully:', formattedResponse);
         
       } catch (error) {
         console.error('❌ Error sending message:', error);
@@ -1147,7 +1135,6 @@ export class WPPConnectMessageHandler {
       outgoingParts.push({ kind: 'text', value: text });
     }
     
-    console.log(`📝 Parsed ${outgoingParts.length} outgoing part(s) from text:`, outgoingParts.map(p => ({ kind: p.kind, length: p.value.length })));
     return outgoingParts;
   }
 
