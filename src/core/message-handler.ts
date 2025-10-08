@@ -867,18 +867,16 @@ export class WPPConnectMessageHandler {
       // Inline code: use WhatsApp monospace formatting
       formattedContent = formattedContent.replace(/__INLINECODE_(\d+)__/g, (_m, i) => '`' + (inlineCodes[Number(i)] ?? '') + '`');
       
-      // Code blocks: format content for WhatsApp (no triple backticks, just monospace)
+      // Code blocks: format content for WhatsApp
       formattedContent = formattedContent.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => {
         const codeContent = codeBlocks[Number(i)] ?? '';
         // Remove language identifier if present (e.g., ```javascript\n...)
         const cleanCode = codeContent.replace(/^[a-z]+\n/i, '');
-        // Format each line with monospace and preserve line breaks
-        const formattedCode = cleanCode
-          .split('\n')
-          .map(line => line.trim() ? `\`${line}\`` : '')
-          .filter(Boolean)
-          .join('\n');
-        return formattedCode;
+        
+        // For multi-line code blocks, just send as plain text (no backticks)
+        // WhatsApp doesn't support multi-line monospace formatting well
+        // Single backticks per line look messy
+        return '\n' + cleanCode.trim() + '\n';
       });
 
       return formattedContent;
