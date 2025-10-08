@@ -17,6 +17,7 @@ export class WPPConnectMessageHandler {
   private processingUsers: { [senderNumber: string]: number } = {};
   private readReceiptSent: { [senderNumber: string]: boolean } = {};
   private clientIdByUser: { [senderNumber: string]: string } = {};
+  private contactInfo: { [senderNumber: string]: any } = {}; // Store contact metadata
   private env: Environment;
   private tempDir: string;
   private readonly MAX_QUEUE_SIZE = MEMORY_CONFIG.MAX_QUEUE_SIZE;
@@ -98,6 +99,39 @@ export class WPPConnectMessageHandler {
       }
     } catch (error) {
       console.error('❌ Error during temp file cleanup:', error);
+    }
+  }
+
+  /**
+   * Extract contact information from message sender
+   */
+  private extractContactInfo(message: any): {
+    name: string;
+    pushname: string;
+    formattedName: string;
+    isBusiness: boolean;
+    isEnterprise: boolean;
+    verifiedName?: string;
+  } {
+    try {
+      const sender = message.sender || {};
+      
+      return {
+        name: sender.name || sender.pushname || sender.formattedName || 'WhatsApp User',
+        pushname: sender.pushname || sender.name || 'WhatsApp User',
+        formattedName: sender.formattedName || sender.name || sender.pushname || 'WhatsApp User',
+        isBusiness: sender.isBusiness || false,
+        isEnterprise: sender.isEnterprise || false,
+        verifiedName: sender.verifiedName || undefined
+      };
+    } catch (error) {
+      return {
+        name: 'WhatsApp User',
+        pushname: 'WhatsApp User',
+        formattedName: 'WhatsApp User',
+        isBusiness: false,
+        isEnterprise: false
+      };
     }
   }
 
@@ -203,6 +237,11 @@ export class WPPConnectMessageHandler {
       if (!this.clientIdByUser[senderNumber]) {
         this.clientIdByUser[senderNumber] = clientId;
       }
+      
+      // Extract and store contact information
+      const contactInfo = this.extractContactInfo(message);
+      this.contactInfo[senderNumber] = contactInfo;
+      console.log(`👤 Contact: ${contactInfo.name} (${senderNumber})`);
 
       // Check if we're in production mode
       const isProduction = this.env.NODE_ENV === 'production';
@@ -776,17 +815,17 @@ export class WPPConnectMessageHandler {
         return;
       } 
 
-      // Get user contact information
-      let userName: string = 'WhatsApp User';
-      try {
-        const client = this.whatsappService.getClient(clientId);
-        if (client) {
-          // WPPConnect doesn't have direct contact access, use default
-          userName = 'WhatsApp User';
-        }
-      } catch (error) {
-        console.log('Could not get contact info, using default name');
-      }
+      // Get user contact information from stored metadata
+      const phoneNumber = number.replace('@c.us', '');
+      const storedContact = this.contactInfo[phoneNumber] || {
+        name: 'WhatsApp User',
+        pushname: 'WhatsApp User',
+        formattedName: 'WhatsApp User',
+        isBusiness: false,
+        isEnterprise: false
+      };
+      
+      const userName = storedContact.name || 'WhatsApp User';
 
       let aiagent: any;
       console.log(`🤖 Calling AI API with message: "${message}"`);
@@ -1194,12 +1233,22 @@ export class WPPConnectMessageHandler {
         throw new Error('JWT_SECRET environment variable is not set');
       }
 
-      // Generate JWT token with proper payload structure (matching main branch)
+      // Get stored contact information for this user
+      const userContact = this.contactInfo[phoneNumber || ''] || {
+        name: userName,
+        pushname: userName,
+        formattedName: userName,
+        isBusiness: false,
+        isEnterprise: false
+      };
+
+      // Generate JWT token with proper payload structure including contact metadata
       const payload = {
         iss: 'whatsapp-bot',
-        sub: 'custom-user-id',
+        sub: `wa_${phoneNumber}`, // Unique identifier per user
         aud: 'authenticated',
         iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour expiration
         phone: phoneNumber || 'unknown',
         role: 'authenticated',
         agent_metadata: {
@@ -1211,13 +1260,29 @@ export class WPPConnectMessageHandler {
           providers: ['wa']
         },
         user_metadata: {
+          // Phone information
           phone: phoneNumber || 'unknown',
           phone_verified: true,
-          full_name: userName || 'WhatsApp User',
-          sub: 'custom-user-id',
+          
+          // User profile information from WhatsApp
+          full_name: userContact.name || userName || 'WhatsApp User',
+          pushname: userContact.pushname || userName || 'WhatsApp User',
+          formatted_name: userContact.formattedName || userName || 'WhatsApp User',
+          
+          // Business account information
+          is_business: userContact.isBusiness || false,
+          is_enterprise: userContact.isEnterprise || false,
+          verified_name: userContact.verifiedName || null,
+          
+          // Legacy fields for compatibility
+          sub: `wa_${phoneNumber}`,
           campaign_id: '6a793f4c-609d-4507-ad4f-d6d25c1218c8',
-          participant_name: userName || 'WhatsApp User',
-          participant_phone: phoneNumber || 'unknown'
+          participant_name: userContact.name || userName || 'WhatsApp User',
+          participant_phone: phoneNumber || 'unknown',
+          
+          // Additional context
+          message_timestamp: Math.floor(Date.now() / 1000),
+          client_id: clientId
         }
       };
 
