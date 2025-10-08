@@ -133,6 +133,59 @@ export class WPPConnectMessageHandler {
   }
 
   /**
+   * Parse sendText template data from AI response
+   * Detects JSON blocks containing sendText_args and sendText_data
+   */
+  private parseSendTextTemplate(text: string): {
+    hasTemplate: boolean;
+    cleanText: string;
+    templateData?: any;
+  } {
+    try {
+      // Look for JSON blocks in code blocks or plain JSON
+      const jsonBlockRegex = /```(?:json)?\s*(\{[\s\S]*?"sendText_args"\s*:\s*true[\s\S]*?\})\s*```/;
+      const plainJsonRegex = /(\{[\s\S]*?"sendText_args"\s*:\s*true[\s\S]*?\})/;
+      
+      let match = text.match(jsonBlockRegex) || text.match(plainJsonRegex);
+      
+      if (match && match[1]) {
+        try {
+          const jsonStr = match[1];
+          const parsed = JSON.parse(jsonStr);
+          
+          if (parsed.sendText_args === true && parsed.sendText_data) {
+            console.log(`🎯 Detected sendText template in AI response`);
+            console.log(`📋 Template data:`, JSON.stringify(parsed.sendText_data, null, 2));
+            
+            // Remove the JSON block from text
+            const cleanText = text.replace(match[0], '').trim();
+            
+            return {
+              hasTemplate: true,
+              cleanText: cleanText || 'Message with interactive buttons',
+              templateData: parsed.sendText_data
+            };
+          }
+        } catch (parseError) {
+          console.log(`⚠️  Could not parse sendText template JSON:`, parseError);
+        }
+      }
+      
+      return {
+        hasTemplate: false,
+        cleanText: text
+      };
+      
+    } catch (error) {
+      console.log(`⚠️  Error parsing sendText template:`, error);
+      return {
+        hasTemplate: false,
+        cleanText: text
+      };
+    }
+  }
+
+  /**
    * Send read receipt with retry mechanism
    */
   private async sendReadReceipt(clientId: string, senderNumber: string, maxRetries: number = 3): Promise<boolean> {
@@ -1015,28 +1068,43 @@ export class WPPConnectMessageHandler {
               await client.client.sendText(formattedNumber || '', fallbackText);
             }
           } else {
-            // Send text part - check for sticker patterns
+            // Send text part - check for special patterns
             try {
               const textContent = String(part.value);
               
-              // Check if text contains #sticker: pattern
-              const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
-              if (stickerMatch && stickerMatch[1]) {
-                const stickerUrl = stickerMatch[1];
-                console.log(`🎭 Sending as sticker from text: ${stickerUrl}`);
-                
-                const targetNumber = formattedNumber || '';
-                await client.client.sendImageAsSticker(
-                  targetNumber,
-                  stickerUrl
+              // Check for sendText template (buttons, etc.)
+              const templateParsed = this.parseSendTextTemplate(textContent);
+              
+              if (templateParsed.hasTemplate && templateParsed.templateData) {
+                // Send text with template buttons
+                console.log(`🔘 Sending text with template buttons to ${formattedNumber}`);
+                await client.client.sendText(
+                  formattedNumber || '',
+                  templateParsed.cleanText,
+                  templateParsed.templateData
                 );
-                console.log(`✅ Sent sticker from text: ${stickerUrl}`);
-                
-                // Remove the sticker part from the text and send the remaining text
-                const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
-                if (remainingText) {
-                  await client.client.sendText(formattedNumber || '', remainingText);
-                  console.log(`✅ Sent remaining text: ${remainingText}`);
+                console.log(`✅ Sent text with interactive buttons`);
+              }
+              // Check if text contains #sticker: pattern
+              else if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
+                const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
+                if (stickerMatch && stickerMatch[1]) {
+                  const stickerUrl = stickerMatch[1];
+                  console.log(`🎭 Sending as sticker from text: ${stickerUrl}`);
+                  
+                  const targetNumber = formattedNumber || '';
+                  await client.client.sendImageAsSticker(
+                    targetNumber,
+                    stickerUrl
+                  );
+                  console.log(`✅ Sent sticker from text: ${stickerUrl}`);
+                  
+                  // Remove the sticker part from the text and send the remaining text
+                  const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
+                  if (remainingText) {
+                    await client.client.sendText(formattedNumber || '', remainingText);
+                    console.log(`✅ Sent remaining text: ${remainingText}`);
+                  }
                 }
               } else {
                 // Regular text
