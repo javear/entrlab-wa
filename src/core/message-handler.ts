@@ -112,8 +112,6 @@ export class WPPConnectMessageHandler {
         const client = this.whatsappService.getClient(clientId);
         
         if (!client || !client.isReady || !client.client) {
-          console.log(`⚠️  Client ${clientId} not ready for read receipt (attempt ${attempt}/${maxRetries})`);
-          
           if (attempt < maxRetries) {
             await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
             continue;
@@ -122,11 +120,10 @@ export class WPPConnectMessageHandler {
         }
         
         await client.client.sendSeen(chatId);
-        console.log(`✅ Read receipt sent for ${senderNumber} (attempt ${attempt})`);
         return true;
         
       } catch (error) {
-        console.log(`⚠️  Read receipt attempt ${attempt}/${maxRetries} failed:`, error);
+        // Retry with backoff
         
         if (attempt < maxRetries) {
           await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
@@ -148,22 +145,18 @@ export class WPPConnectMessageHandler {
       const client = this.whatsappService.getClient(clientId);
       
       if (!client || !client.isReady || !client.client) {
-        console.log(`⚠️  Client ${clientId} not ready for typing indicator`);
         return false;
       }
       
       if (start) {
         await client.client.startTyping(chatId);
-        console.log(`✅ Typing indicator started for ${senderNumber}`);
       } else {
         await client.client.stopTyping(chatId);
-        console.log(`✅ Typing indicator stopped for ${senderNumber}`);
       }
       
       return true;
       
     } catch (error) {
-      console.log(`⚠️  Typing indicator ${start ? 'start' : 'stop'} failed:`, error);
       return false;
     }
   }
@@ -203,47 +196,33 @@ export class WPPConnectMessageHandler {
 
   public async handleIncomingMessage(clientId: string, message: any): Promise<void> {
     try {
-      console.log(`📨 MESSAGE RECEIVED from WPPConnect client ${clientId}: ${message.from}`);
-      console.log(`📨 MESSAGE BODY: ${message.body}`);
-      console.log(`📨 MESSAGE TIMESTAMP: ${new Date().toISOString()}`);
-
       const senderNumber = message.from.replace('@c.us', '');
-      console.log(`📨 Sender number: ${senderNumber}`);
+      console.log(`📨 Message from ${senderNumber} [${message.type}]`);
       
       // Store client ID for this user (for consistent read receipts)
       if (!this.clientIdByUser[senderNumber]) {
         this.clientIdByUser[senderNumber] = clientId;
-        console.log(`🔗 Associated ${senderNumber} with client ${clientId}`);
       }
 
       // Check if we're in production mode
       const isProduction = this.env.NODE_ENV === 'production';
-      console.log(`📨 Production mode: ${isProduction}`);
-
-      // Get allowed numbers from environment
       const allowedNumbers = this.env.ALLOWED_NUMBERS ? this.env.ALLOWED_NUMBERS.split(',') : [];
-      console.log(`📨 Allowed numbers: ${JSON.stringify(allowedNumbers)}`);
 
       // In production, check if sender is allowed
       if (isProduction && allowedNumbers.length > 0 && !allowedNumbers.includes(senderNumber)) {
-        console.log(`📨 Sender ${senderNumber} not in allowed list, ignoring message`);
         return;
       }
 
-      console.log(`📨 Processing message in production mode`);
-
-      // IMPORTANT: Check if this is a media message FIRST to avoid sending base64 to AI
+      // Check if this is a media message to avoid sending base64 to AI
       const isMediaMsg = this.isMediaMessage(message);
       let enhancedMessage = '';
       
       if (isMediaMsg) {
         // For media: ONLY use caption, NEVER use body (which contains base64)
         enhancedMessage = message.caption || '';
-        console.log(`📨 Media message detected - using caption only: "${enhancedMessage}"`);
       } else {
         // For text: use body
         enhancedMessage = message.body || '';
-        console.log(`📨 Text message body: "${enhancedMessage}"`);
       }
 
       // Handle quoted messages (WPPConnect format)
@@ -252,35 +231,27 @@ export class WPPConnectMessageHandler {
           const quoted = message.quotedMsg || (message.hasQuotedMsg ? await message.getQuotedMessage() : null);
           if (quoted && quoted.body) {
             enhancedMessage = `Replying to this message: "${quoted.body}"\n${enhancedMessage}`;
-            console.log(`📝 Enhanced message with quoted context: "${enhancedMessage}"`);
           }
         } catch (error) {
-          console.error('❌ Error getting quoted message:', error);
           // Continue with original message if quoted message retrieval fails
         }
-      } else {
-        console.log(`📨 Message quoted: false`);
       }
 
       // Handle media attachments (WPPConnect format)
       let mediaUrls: string[] = [];
       if (isMediaMsg) {
-        console.log(`📨 Message has media attachment: ${message.type}`);
         try {
           mediaUrls = await this.handleMediaMessage(message);
-          console.log(`📎 Media URLs generated: ${mediaUrls.length} file(s)`);
+          if (mediaUrls.length > 0) {
+            console.log(`📎 Media processed: ${mediaUrls.length} file(s)`);
+          }
         } catch (error) {
-          console.error('❌ Error handling media message:', error);
+          console.error('❌ Error handling media:', error);
         }
-      } else {
-        console.log(`📨 Message is text-only (type: ${message.type})`);
       }
 
       // If user is already being processed, mark this message as read immediately
       if (this.processingUsers[senderNumber]) {
-        console.log(`📖 User ${senderNumber} is already being processed, marking as read immediately`);
-        
-        // Use the stored client ID for consistent read receipts
         const userClientId = this.clientIdByUser[senderNumber] || clientId;
         await this.sendReadReceipt(userClientId, senderNumber);
       }
@@ -290,7 +261,6 @@ export class WPPConnectMessageHandler {
 
       // Start processing with delay
       const delay = 10000; // 10 seconds
-      console.log(`🔄 handleIncomingMessage called for ${senderNumber} with delay ${delay}ms`);
       this.startProcessing(senderNumber, delay);
 
     } catch (error) {
@@ -558,8 +528,6 @@ export class WPPConnectMessageHandler {
 
     // If already processing, clear the existing timer and reset it
     if (this.processingUsers[senderNumber]) {
-      console.log(`⏰ Resetting timer for ${senderNumber} - new message arrived`);
-      
       // Clear existing processing timer
       const existingTimer = (this.processingUsers as any)[`${senderNumber}_timer`];
       if (existingTimer) {
@@ -572,11 +540,9 @@ export class WPPConnectMessageHandler {
       }, delay);
       
       (this.processingUsers as any)[`${senderNumber}_timer`] = newTimer;
-      console.log(`⏰ Timer reset for ${senderNumber} (${delay}ms from now)`);
       return;
     }
 
-    console.log(`🚀 Starting initial processing for ${senderNumber}`);
     this.processingUsers[senderNumber] = 1;
 
     // Send read receipt immediately if not already sent
@@ -589,8 +555,6 @@ export class WPPConnectMessageHandler {
           if (readSent) {
             this.readReceiptSent[senderNumber] = true;
           }
-        } else {
-          console.log(`📖 Read receipt already sent for ${senderNumber}, skipping`);
         }
         
         // Start typing indicator
@@ -609,7 +573,6 @@ export class WPPConnectMessageHandler {
     }, delay);
     
     (this.processingUsers as any)[`${senderNumber}_timer`] = processingTimer;
-    console.log(`⏰ Initial timer set for ${senderNumber} (${delay}ms)`);
   }
 
   private async processQueuedMessages(senderNumber: string): Promise<void> {
@@ -621,7 +584,7 @@ export class WPPConnectMessageHandler {
         return;
       }
 
-      console.log(`🔄 FINAL PROCESSING: ${messages.length} messages from ${senderNumber} after timer expired`);
+      console.log(`🤖 Processing ${messages.length} message(s) from ${senderNumber}`);
 
       // Combine all messages and media URLs
       const combinedMessages = messages.map(item => {
@@ -631,7 +594,6 @@ export class WPPConnectMessageHandler {
         }
         return messageText;
       }).join(' ');
-      console.log(`📝 Combined messages: "${combinedMessages}"`);
 
       // Get client info
       const clients = this.whatsappService.getAllClients();
