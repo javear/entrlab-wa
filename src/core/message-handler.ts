@@ -941,6 +941,9 @@ export class WPPConnectMessageHandler {
         // Format the response for WhatsApp
         const formattedResponse = this.convertLLMToWhatsApp(aiagent.text);
         
+        console.log(`🔍 Checking for sendText template in formatted response...`);
+        console.log(`📝 First 200 chars:`, formattedResponse.substring(0, 200));
+        
         // Check if response contains sendText template BEFORE parsing into parts
         const templateCheck = this.parseSendTextTemplate(formattedResponse);
         
