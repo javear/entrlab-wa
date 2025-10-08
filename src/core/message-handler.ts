@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import FormData from 'form-data';
+import { MEMORY_CONFIG, getMemoryUsage, suggestGC } from '../config/memory-config';
 
 // ============================================
 // WPPConnect Message Handler
@@ -16,8 +17,8 @@ export class WPPConnectMessageHandler {
   private processingUsers: { [senderNumber: string]: number } = {};
   private env: Environment;
   private tempDir: string;
-  private readonly MAX_QUEUE_SIZE = 50; // Reduced from 100 to 50 for memory optimization
-  private readonly MAX_QUEUE_AGE = 180000; // Reduced from 5 minutes to 3 minutes for memory optimization
+  private readonly MAX_QUEUE_SIZE = MEMORY_CONFIG.MAX_QUEUE_SIZE;
+  private readonly MAX_QUEUE_AGE = MEMORY_CONFIG.MAX_QUEUE_AGE;
 
   constructor(
     private whatsappService: WPPConnectWhatsAppService,
@@ -42,17 +43,26 @@ export class WPPConnectMessageHandler {
   }
 
   private startQueueCleanup(): void {
-    // Clean up old messages every 3 minutes (increased from 2 minutes)
+    // Clean up old messages based on memory config
     setInterval(() => {
       this.cleanupMessageQueue();
-    }, 180000); // 3 minutes
+      
+      // Log memory usage periodically
+      const memUsage = getMemoryUsage();
+      if (memUsage.heapUsagePercent > 70) {
+        console.log(`⚠️  Memory usage: ${memUsage.heapUsedMB}MB / ${memUsage.heapTotalMB}MB (${memUsage.heapUsagePercent}%)`);
+      }
+    }, MEMORY_CONFIG.QUEUE_CLEANUP_INTERVAL);
   }
 
   private startTempFileCleanup(): void {
-    // Clean up old temporary files every 5 minutes
+    // Clean up old temporary files based on memory config
     setInterval(() => {
       this.cleanupTempFiles();
-    }, 300000); // 5 minutes
+      
+      // Suggest garbage collection after cleanup
+      suggestGC();
+    }, MEMORY_CONFIG.TEMP_FILE_CLEANUP_INTERVAL);
   }
 
   private cleanupTempFiles(): void {
@@ -71,11 +81,10 @@ export class WPPConnectMessageHandler {
           const stats = fs.statSync(filePath);
           const age = now - stats.mtime.getTime();
           
-          // Delete files older than 10 minutes
-          if (age > 600000) { // 10 minutes
+          // Delete files older than configured max age
+          if (age > MEMORY_CONFIG.TEMP_FILE_MAX_AGE) {
             fs.unlinkSync(filePath);
             cleanedCount++;
-            console.log(`🗑️ Cleaned up old temp file: ${file}`);
           }
         } catch (error) {
           console.error(`⚠️ Error cleaning up temp file ${file}:`, error);

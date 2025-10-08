@@ -4,11 +4,13 @@ import archiver from 'archiver';
 import { Readable } from 'stream';
 import { GridFSBucket } from 'mongodb';
 import mongoose from 'mongoose';
+import { MEMORY_CONFIG, suggestGC } from '../config/memory-config';
 
 // ============================================
 // WhatsApp-Specific Session Backup Service
 // Only backs up WhatsApp Web data that's portable across servers
 // Excludes environment-specific browser data
+// Optimized for low memory usage with streaming
 // ============================================
 
 export class WhatsAppSessionBackup {
@@ -121,9 +123,10 @@ export class WhatsAppSessionBackup {
         return false;
       }
 
-      // Create archive with WhatsApp data only
+      // Create archive with WhatsApp data only - balanced compression
       const archive = archiver('zip', { 
-        zlib: { level: 1 } // Fast compression
+        zlib: { level: MEMORY_CONFIG.BACKUP_COMPRESSION_LEVEL }, // Balanced compression
+        highWaterMark: MEMORY_CONFIG.BACKUP_CHUNK_SIZE // Control memory usage
       });
 
       const uploadStream = this.gridFS.openUploadStream(`${clientId}_whatsapp_session.zip`, {
@@ -164,6 +167,12 @@ export class WhatsAppSessionBackup {
       return new Promise((resolve, reject) => {
         uploadStream.on('finish', () => {
           console.log(`✅ [${clientId}] WhatsApp session backed up to MongoDB (${archive.pointer()} bytes)`);
+          
+          // Suggest garbage collection after large operation
+          if (MEMORY_CONFIG.GC_AFTER_LARGE_OPERATION) {
+            suggestGC();
+          }
+          
           resolve(true);
         });
 
@@ -322,8 +331,11 @@ export class WhatsAppSessionBackup {
         const toDelete = files.slice(keepCount);
         for (const file of toDelete) {
           await this.gridFS.delete(file._id);
-          console.log(`🗑️  [${clientId}] Deleted old WhatsApp backup from ${file.uploadDate}`);
         }
+        console.log(`🗑️  [${clientId}] Deleted ${toDelete.length} old WhatsApp backup(s)`);
+        
+        // Suggest GC after cleanup
+        suggestGC();
       }
     } catch (error) {
       console.error(`❌ Error cleaning up WhatsApp backups for ${clientId}:`, error);

@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { WhatsAppSessionBackup } from './whatsapp-session-backup';
 import fs from 'fs';
 import path from 'path';
+import { MEMORY_CONFIG, getMemoryUsage, suggestGC, needsMemoryWarning } from '../config/memory-config';
 
 // ============================================
 // WPPConnect Client Manager
@@ -620,6 +621,12 @@ export class WPPConnectClientManager {
 
     this.healthCheckInterval = setInterval(async () => {
       await this.performHealthCheck();
+      
+      // Log memory usage during health check
+      if (needsMemoryWarning()) {
+        const memUsage = getMemoryUsage();
+        console.log(`⚠️  Memory usage: ${memUsage.heapUsedMB}MB / ${memUsage.heapTotalMB}MB (${memUsage.heapUsagePercent}%)`);
+      }
     }, this.config.healthCheckIntervalMs || 300000); // 5 minutes default
 
     console.log(`🏥 WPPConnect health check started with ${this.config.healthCheckIntervalMs || 300000}ms interval`);
@@ -749,6 +756,14 @@ export class WPPConnectClientManager {
     }
 
     this.clients.clear();
+    
+    // Clear retry attempts map
+    this.retryAttempts.clear();
+    
+    // Suggest garbage collection after cleanup
+    if (MEMORY_CONFIG.GC_AFTER_CLIENT_CLOSE) {
+      suggestGC();
+    }
   }
 
   /**

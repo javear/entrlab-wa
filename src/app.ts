@@ -10,6 +10,7 @@ import { Environment } from './types';
 import { swaggerSpec } from './config/swagger';
 import { createAuthMiddleware } from './middleware/auth.middleware';
 import { AutoRestartService } from './services/auto-restart.service';
+import { MemoryMonitorService } from './services/memory-monitor.service';
 import fs from 'fs';
 
 // ============================================
@@ -23,6 +24,7 @@ export class WPPConnectWhatsAppBotApp {
   private whatsappController: WPPConnectWhatsAppController;
   private apiController: ApiController;
   private autoRestartService: AutoRestartService;
+  private memoryMonitor: MemoryMonitorService;
 
   constructor(private env: Environment) {
     this.app = express();
@@ -151,6 +153,9 @@ export class WPPConnectWhatsAppBotApp {
     this.autoRestartService = new AutoRestartService(env, async () => { 
       await this.gracefulShutdown(); 
     });
+    
+    // Initialize memory monitor
+    this.memoryMonitor = new MemoryMonitorService();
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -217,6 +222,15 @@ export class WPPConnectWhatsAppBotApp {
       });
     });
     
+    // Memory status endpoint
+    this.app.get('/memory/status', (req, res) => {
+      const memoryStats = this.memoryMonitor.getStats();
+      res.json({
+        success: true,
+        memory: memoryStats
+      });
+    });
+    
     // Debug endpoint to check MongoDB tokens
     this.app.get('/debug/mongo-tokens', (req, res) => this.apiController.debugMongoTokens(req, res));
   }
@@ -228,6 +242,9 @@ export class WPPConnectWhatsAppBotApp {
   }
 
   private setupMemoryOptimization(): void {
+    // Start memory monitor
+    this.memoryMonitor.start(60000); // Check every minute
+    
     // Memory tracking variables for intelligent management
     let lastMemoryUsage: NodeJS.MemoryUsage | null = null;
     let memoryTrend: 'increasing' | 'decreasing' | 'stable' = 'stable';
@@ -235,6 +252,7 @@ export class WPPConnectWhatsAppBotApp {
     
     // Smart garbage collection with adaptive intervals
     if (global.gc) {
+      console.log('✅ Garbage collection is available (--expose-gc flag detected)');
       setInterval(() => {
         try {
           const memUsage = process.memoryUsage();
@@ -245,11 +263,9 @@ export class WPPConnectWhatsAppBotApp {
             // Aggressive GC for high memory
             global.gc!();
             setTimeout(() => global.gc!(), 100);
-            console.log('🧹 Aggressive garbage collection completed');
           } else if (heapUsedMB > 200) {
             // Standard GC for medium memory
             global.gc!();
-            console.log('🧹 Standard garbage collection completed');
           }
           // Skip GC for low memory usage to avoid overhead
         } catch (error) {
@@ -371,6 +387,9 @@ export class WPPConnectWhatsAppBotApp {
     try {
       // Stop auto-restart service
       this.autoRestartService.stop();
+      
+      // Stop memory monitor
+      this.memoryMonitor.stop();
       
       // Disconnect all WPPConnect clients
       const clients = this.whatsappService.getAllClients();
