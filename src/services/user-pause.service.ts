@@ -43,7 +43,8 @@ export class UserPauseService {
   async pauseUser(
     clientId: string,
     phoneNumber: string,
-    pausedTill: Date
+    pausedTill: Date,
+    pauseReason?: string
   ): Promise<IUserPause> {
     try {
       const pauseRecord = await UserPause.findOneAndUpdate(
@@ -53,7 +54,8 @@ export class UserPauseService {
           phoneNumber,
           paused: true,
           paused_at: new Date(),
-          paused_till: pausedTill
+          paused_till: pausedTill,
+          pause_reason: pauseReason
         },
         {
           upsert: true,
@@ -61,7 +63,7 @@ export class UserPauseService {
         }
       );
 
-      console.log(`⏸️  User ${phoneNumber} paused on client ${clientId} until ${pausedTill.toISOString()}`);
+      console.log(`⏸️  User ${phoneNumber} paused on client ${clientId} until ${pausedTill.toISOString()}${pauseReason ? ` (reason: ${pauseReason})` : ''}`);
       return pauseRecord;
     } catch (error) {
       console.error(`❌ Error pausing user ${phoneNumber}:`, error);

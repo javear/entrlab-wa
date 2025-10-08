@@ -11,6 +11,7 @@ export interface IUserPause extends Document {
   paused: boolean;
   paused_at: Date;
   paused_till: Date;
+  pause_reason?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -40,6 +41,10 @@ const UserPauseSchema: Schema = new Schema(
     paused_till: {
       type: Date,
       required: true
+    },
+    pause_reason: {
+      type: String,
+      required: false
     }
   },
   {

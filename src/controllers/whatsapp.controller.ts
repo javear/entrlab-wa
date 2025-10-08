@@ -799,6 +799,10 @@ export class WPPConnectWhatsAppController {
    *                 format: date-time
    *                 description: ISO date string for when pause expires
    *                 example: "2025-10-09T12:00:00.000Z"
+   *               pauseReason:
+   *                 type: string
+   *                 description: Optional reason for pausing the user
+   *                 example: "User requested to pause notifications"
    *     responses:
    *       200:
    *         description: User paused successfully
@@ -806,7 +810,7 @@ export class WPPConnectWhatsAppController {
   async pauseUser(req: Request, res: Response): Promise<void> {
     try {
       const { clientId } = req.params;
-      const { phoneNumber, pausedTill } = req.body;
+      const { phoneNumber, pausedTill, pauseReason } = req.body;
 
       if (!clientId || !phoneNumber || !pausedTill) {
         res.status(400).json({
@@ -828,7 +832,8 @@ export class WPPConnectWhatsAppController {
       const pauseRecord = await this.userPauseService.pauseUser(
         clientId,
         phoneNumber,
-        pausedTillDate
+        pausedTillDate,
+        pauseReason
       );
 
       res.json({
@@ -839,7 +844,8 @@ export class WPPConnectWhatsAppController {
           phoneNumber: pauseRecord.phoneNumber,
           paused: pauseRecord.paused,
           paused_at: pauseRecord.paused_at,
-          paused_till: pauseRecord.paused_till
+          paused_till: pauseRecord.paused_till,
+          pause_reason: pauseRecord.pause_reason
         }
       });
     } catch (error) {
@@ -955,6 +961,7 @@ export class WPPConnectWhatsAppController {
             paused: pauseRecord.paused,
             paused_at: pauseRecord.paused_at,
             paused_till: pauseRecord.paused_till,
+            pause_reason: pauseRecord.pause_reason,
             is_active: isActive
           }
         });
@@ -1011,7 +1018,8 @@ export class WPPConnectWhatsAppController {
           phoneNumber: p.phoneNumber,
           paused_at: p.paused_at,
           paused_till: p.paused_till,
-          paused: p.paused
+          paused: p.paused,
+          pause_reason: p.pause_reason
         })),
         total: pausedUsers.length
       });
