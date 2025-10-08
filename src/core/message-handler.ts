@@ -143,14 +143,15 @@ export class WPPConnectMessageHandler {
   } {
     try {
       // Look for JSON blocks in code blocks or plain JSON
-      const jsonBlockRegex = /```(?:json)?\s*(\{[\s\S]*?"sendText_args"\s*:\s*true[\s\S]*?\})\s*```/;
-      const plainJsonRegex = /(\{[\s\S]*?"sendText_args"\s*:\s*true[\s\S]*?\})/;
+      // Extract content between ``` json and ```
+      const jsonBlockRegex = /```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/;
       
-      let match = text.match(jsonBlockRegex) || text.match(plainJsonRegex);
+      let match = text.match(jsonBlockRegex);
       
       if (match && match[1]) {
         try {
-          const jsonStr = match[1];
+          const jsonStr = match[1].trim();
+          console.log(`🔍 Attempting to parse JSON:`, jsonStr.substring(0, 100) + '...');
           const parsed = JSON.parse(jsonStr);
           
           if (parsed.sendText_args === true && parsed.sendText_data) {
