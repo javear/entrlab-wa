@@ -138,14 +138,14 @@ export class WPPConnectMessageHandler {
   private async sendReadReceipt(clientId: string, senderNumber: string, maxRetries: number = 3): Promise<boolean> {
     const chatId = `${senderNumber}@c.us`;
     
-    console.log(`📖 Attempting to send read receipt for ${senderNumber} (client: ${clientId})`);
+    console.log(`📖 Sending read receipt for sender ${senderNumber} (client: ${clientId})`);
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const client = this.whatsappService.getClient(clientId);
         
         if (!client || !client.isReady || !client.client) {
-          console.log(`⚠️  Client not ready for read receipt (attempt ${attempt}/${maxRetries}) - ready: ${client?.isReady}, hasClient: ${!!client?.client}`);
+          console.log(`⚠️  Client not ready (attempt ${attempt}/${maxRetries}) - ready: ${client?.isReady}, hasClient: ${!!client?.client}`);
           if (attempt < maxRetries) {
             await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
             continue;
@@ -153,8 +153,9 @@ export class WPPConnectMessageHandler {
           return false;
         }
         
+        // Mark all messages from this sender as read
         await client.client.sendSeen(chatId);
-        console.log(`✅ Read receipt sent successfully for ${senderNumber}`);
+        console.log(`✅ Read receipt sent for sender ${senderNumber}`);
         return true;
         
       } catch (error) {
