@@ -941,7 +941,26 @@ export class WPPConnectMessageHandler {
         // Format the response for WhatsApp
         const formattedResponse = this.convertLLMToWhatsApp(aiagent.text);
         
-        // Parse response for media URLs and text parts
+        // Check if response contains sendText template BEFORE parsing into parts
+        const templateCheck = this.parseSendTextTemplate(formattedResponse);
+        
+        if (templateCheck.hasTemplate && templateCheck.templateData) {
+          // Send the message with template buttons directly
+          console.log(`🔘 Detected sendText template, sending with buttons`);
+          
+          const client = this.whatsappService.getClient(clientId);
+          if (client && client.client) {
+            await client.client.sendText(
+              formattedNumber || '',
+              templateCheck.cleanText,
+              templateCheck.templateData
+            );
+            console.log(`✅ Sent text with interactive buttons`);
+          }
+          return; // Done - no need to parse into parts
+        }
+        
+        // Parse response for media URLs and text parts (regular messages)
         const outgoingParts = this.parseResponseForMedia(formattedResponse);
         
         // Get client for sending
@@ -1073,21 +1092,8 @@ export class WPPConnectMessageHandler {
             try {
               const textContent = String(part.value);
               
-              // Check for sendText template (buttons, etc.)
-              const templateParsed = this.parseSendTextTemplate(textContent);
-              
-              if (templateParsed.hasTemplate && templateParsed.templateData) {
-                // Send text with template buttons
-                console.log(`🔘 Sending text with template buttons to ${formattedNumber}`);
-                await client.client.sendText(
-                  formattedNumber || '',
-                  templateParsed.cleanText,
-                  templateParsed.templateData
-                );
-                console.log(`✅ Sent text with interactive buttons`);
-              }
               // Check if text contains #sticker: pattern
-              else if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
+              if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
                 const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
                 if (stickerMatch && stickerMatch[1]) {
                   const stickerUrl = stickerMatch[1];
