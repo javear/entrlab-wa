@@ -103,7 +103,8 @@ export class WPPConnectWhatsAppController {
           isReady: client.isReady,
           hasQrCode: !!client.qrCode,
           phoneNumber: client.phoneNumber,
-          lastActivity: client.lastActivity
+          lastActivity: client.lastActivity,
+          ai_agent_code: client.ai_agent_code || null
         }))
       });
     } catch (error) {
@@ -165,7 +166,8 @@ export class WPPConnectWhatsAppController {
           isReady: client.isReady,
           hasQrCode: !!client.qrCode,
           phoneNumber: client.phoneNumber,
-          lastActivity: client.lastActivity
+          lastActivity: client.lastActivity,
+          ai_agent_code: client.ai_agent_code || null
         }
       });
     } catch (error) {
