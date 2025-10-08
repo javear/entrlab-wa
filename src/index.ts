@@ -12,8 +12,10 @@ import { Environment } from './types';
 // Load environment variables
 dotenv.config();
 
-// PID file path
-const PID_FILE = path.join(process.cwd(), '.wppconnect.pid');
+// PID file path - use Railway volume if available, otherwise current directory
+const PID_FILE = process.env.RAILWAY_VOLUME_PATH 
+  ? path.join(process.env.RAILWAY_VOLUME_PATH, '.wppconnect.pid')
+  : path.join(process.cwd(), '.wppconnect.pid');
 
 // Define environment interface
 const env: Environment = {
@@ -32,50 +34,41 @@ const env: Environment = {
 };
 
 /**
- * Check if another instance is running and gracefully shut it down
+ * Check if another instance is running and clean up stale PID file
+ * In Railway/Docker, the old process is already gone when container restarts
  */
-async function checkAndShutdownExistingInstance(): Promise<void> {
+async function checkAndCleanupPidFile(): Promise<void> {
   if (fs.existsSync(PID_FILE)) {
     try {
       const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim());
-      console.log(`⚠️  Found existing instance with PID: ${oldPid}`);
       
       // Check if process is actually running
       try {
         process.kill(oldPid, 0); // Signal 0 checks if process exists
-        console.log(`📤 Sending graceful shutdown signal (SIGTERM) to PID ${oldPid}...`);
         
-        // Send SIGTERM for graceful shutdown
-        process.kill(oldPid, 'SIGTERM');
-        
-        // Wait for graceful shutdown (15 seconds)
-        console.log('⏳ Waiting for existing instance to shut down gracefully (15 seconds)...');
-        await new Promise(resolve => setTimeout(resolve, 15000));
-        
-        // Check if still running
-        try {
-          process.kill(oldPid, 0);
-          console.log(`⚠️  Instance still running after 15s, force killing PID ${oldPid}...`);
-          process.kill(oldPid, 'SIGKILL');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch {
-          console.log(`✅ Existing instance shut down gracefully`);
-        }
-        
-        // Clean up PID file
-        if (fs.existsSync(PID_FILE)) {
+        // Process exists - this shouldn't happen in Railway/Docker
+        // but handle it just in case
+        if (oldPid === process.pid) {
+          console.log(`⚠️  PID file contains current process ID, removing stale file`);
           fs.unlinkSync(PID_FILE);
+        } else {
+          console.log(`⚠️  Found running process with PID: ${oldPid}, sending SIGTERM...`);
+          process.kill(oldPid, 'SIGTERM');
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          
+          // Try to remove PID file
+          if (fs.existsSync(PID_FILE)) {
+            fs.unlinkSync(PID_FILE);
+          }
         }
       } catch (err) {
-        // Process doesn't exist, just remove stale PID file
-        console.log(`ℹ️  PID ${oldPid} not running, removing stale PID file`);
-        if (fs.existsSync(PID_FILE)) {
-          fs.unlinkSync(PID_FILE);
-                }
-            }
-        } catch (error) {
-      console.error('⚠️  Error checking existing instance:', error);
-      // Remove corrupted PID file if it exists
+        // Process doesn't exist - normal case in Railway/Docker restart
+        console.log(`ℹ️  Cleaning up stale PID file (old PID: ${oldPid})`);
+        fs.unlinkSync(PID_FILE);
+      }
+    } catch (error) {
+      console.error('⚠️  Error reading PID file:', error);
+      // Remove corrupted PID file
       if (fs.existsSync(PID_FILE)) {
         fs.unlinkSync(PID_FILE);
       }
@@ -107,10 +100,10 @@ function cleanupPidFile(): void {
 
 async function startWPPConnectApplication(): Promise<void> {
   try {
-    console.log('🔍 Checking for existing server instances...');
+    console.log('🔍 Checking for stale PID files...');
     
-    // Check for existing instance and shut it down gracefully FIRST
-    await checkAndShutdownExistingInstance();
+    // Clean up any stale PID file from previous instance
+    await checkAndCleanupPidFile();
     
     console.log('🚀 Starting WPPConnect WhatsApp Bot Application...');
     console.log('🔧 Environment variables:');
