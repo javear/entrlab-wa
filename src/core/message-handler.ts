@@ -1238,6 +1238,29 @@ export class WPPConnectMessageHandler {
         isEnterprise: false
       };
 
+      // Get bot/agent WhatsApp information
+      let agentPhone = 'unknown';
+      let agentName = 'WhatsApp Bot';
+      try {
+        const client = this.whatsappService.getClient(clientId);
+        if (client && client.phoneNumber) {
+          agentPhone = client.phoneNumber;
+        }
+        // Try to get bot's own profile name
+        if (client && client.client) {
+          try {
+            const hostDevice = await client.client.getHostDevice();
+            if (hostDevice && hostDevice.phone) {
+              agentPhone = hostDevice.phone.device_manufacturer || agentPhone;
+            }
+          } catch (error) {
+            // Silent fail - use default
+          }
+        }
+      } catch (error) {
+        // Silent fail - use defaults
+      }
+
       // Generate JWT token with proper payload structure including contact metadata
       const payload = {
         iss: 'whatsapp-bot',
@@ -1250,6 +1273,9 @@ export class WPPConnectMessageHandler {
         agent_metadata: {
           agent_code: agentCode,
           status: "active",
+          agent_phone: agentPhone,
+          agent_name: agentName,
+          client_id: clientId
         },
         app_metadata: {
           provider: 'wa',
