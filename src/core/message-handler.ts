@@ -867,16 +867,15 @@ export class WPPConnectMessageHandler {
       // Inline code: use WhatsApp monospace formatting
       formattedContent = formattedContent.replace(/__INLINECODE_(\d+)__/g, (_m, i) => '`' + (inlineCodes[Number(i)] ?? '') + '`');
       
-      // Code blocks: format content for WhatsApp
+      // Code blocks: format content for WhatsApp using monospace (```)
       formattedContent = formattedContent.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => {
         const codeContent = codeBlocks[Number(i)] ?? '';
         // Remove language identifier if present (e.g., ```javascript\n...)
         const cleanCode = codeContent.replace(/^[a-z]+\n/i, '');
         
-        // For multi-line code blocks, just send as plain text (no backticks)
-        // WhatsApp doesn't support multi-line monospace formatting well
-        // Single backticks per line look messy
-        return '\n' + cleanCode.trim() + '\n';
+        // Use WhatsApp monospace formatting: wrap entire block in triple backticks
+        // Reference: https://faq.whatsapp.com/539178204879377/?cms_platform=web
+        return '\n```\n' + cleanCode.trim() + '\n```\n';
       });
 
       return formattedContent;
@@ -1160,6 +1159,14 @@ export class WPPConnectMessageHandler {
     // Pattern: url (url) -> url
     text = text.replace(/(https?:\/\/[^\s]+)\s+\(\1\)/g, '$1');
     
+    // Protect code blocks from being split
+    const codeBlockTokens: string[] = [];
+    text = text.replace(/```[\s\S]*?```/g, (match) => {
+      const token = `__PROTECTED_CODE_${codeBlockTokens.length}__`;
+      codeBlockTokens.push(match);
+      return token;
+    });
+    
     // First, extract sticker patterns: #sticker: url or #sticker url
     const stickerRegex = /#sticker:?\s*(https?:\/\/[^\s\)]+)/gi;
     const extractedMediaList: { url: string; caption?: string; isSticker?: boolean }[] = [];
@@ -1297,7 +1304,19 @@ export class WPPConnectMessageHandler {
       outgoingParts.push({ kind: 'text', value: text });
     }
     
-    return outgoingParts;
+    // Restore protected code blocks
+    const restoredParts = outgoingParts.map(part => {
+      if (part.kind === 'text') {
+        let restoredValue = part.value;
+        restoredValue = restoredValue.replace(/__PROTECTED_CODE_(\d+)__/g, (_m, i) => {
+          return codeBlockTokens[Number(i)] || '';
+        });
+        return { ...part, value: restoredValue };
+      }
+      return part;
+    });
+    
+    return restoredParts;
   }
 
   private splitMessageIntoParts(message: string): string[] {
