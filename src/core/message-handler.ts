@@ -950,14 +950,20 @@ export class WPPConnectMessageHandler {
           
           const client = this.whatsappService.getClient(clientId);
           if (client && client.client) {
-            await client.client.sendText(
-              formattedNumber || '',
-              templateCheck.cleanText,
-              templateCheck.templateData
-            );
-            console.log(`✅ Sent text with interactive buttons`);
+            try {
+              await client.client.sendText(
+                formattedNumber || '',
+                templateCheck.cleanText,
+                templateCheck.templateData
+              );
+              console.log(`✅ Sent text with interactive buttons`);
+              return; // Done - template sent successfully
+            } catch (templateError: any) {
+              console.log(`⚠️  Template send failed: ${templateError?.message || templateError}`);
+              console.log(`📝 Falling back to regular formatted message...`);
+              // Don't return - continue to send as regular message below
+            }
           }
-          return; // Done - no need to parse into parts
         }
         
         // Parse response for media URLs and text parts (regular messages)
