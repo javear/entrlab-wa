@@ -941,8 +941,12 @@ export class WPPConnectMessageHandler {
         console.log(`🔍 Checking for sendText template in original response...`);
         const templateCheck = this.parseSendTextTemplate(aiagent.text);
         
-        // Format the response for WhatsApp
-        const formattedResponse = this.convertLLMToWhatsApp(aiagent.text);
+        // Determine which text to format for WhatsApp
+        // If template detected, use cleanText (without JSON), otherwise use original
+        const textToFormat = templateCheck.hasTemplate ? templateCheck.cleanText : aiagent.text;
+        
+        // Format the response for WhatsApp (this will NOT include the JSON template)
+        const formattedResponse = this.convertLLMToWhatsApp(textToFormat);
         
         if (templateCheck.hasTemplate && templateCheck.templateData) {
           // Send the message with template buttons directly
@@ -951,9 +955,10 @@ export class WPPConnectMessageHandler {
           const client = this.whatsappService.getClient(clientId);
           if (client && client.client) {
             try {
+              // Use formatted clean text (with WhatsApp formatting applied)
               await client.client.sendText(
                 formattedNumber || '',
-                templateCheck.cleanText,
+                formattedResponse,
                 templateCheck.templateData
               );
               console.log(`✅ Sent text with interactive buttons`);
