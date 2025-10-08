@@ -7,6 +7,7 @@ import path from 'path';
 import crypto from 'crypto';
 import FormData from 'form-data';
 import { MEMORY_CONFIG, getMemoryUsage, suggestGC } from '../config/memory-config';
+import { UserPauseService } from '../services/user-pause.service';
 
 // ============================================
 // WPPConnect Message Handler
@@ -18,6 +19,7 @@ export class WPPConnectMessageHandler {
   private readReceiptSent: { [senderNumber: string]: boolean } = {};
   private clientIdByUser: { [senderNumber: string]: string } = {};
   private contactInfo: { [senderNumber: string]: any } = {}; // Store contact metadata
+  private userPauseService: UserPauseService;
   private env: Environment;
   private tempDir: string;
   private readonly MAX_QUEUE_SIZE = MEMORY_CONFIG.MAX_QUEUE_SIZE;
@@ -29,6 +31,7 @@ export class WPPConnectMessageHandler {
   ) {
     this.env = env;
     this.tempDir = path.join(process.cwd(), 'temp');
+    this.userPauseService = new UserPauseService();
     
     // Ensure temp directory exists
     if (!fs.existsSync(this.tempDir)) {
@@ -324,6 +327,13 @@ export class WPPConnectMessageHandler {
       const contactInfo = this.extractContactInfo(message);
       this.contactInfo[senderNumber] = contactInfo;
       console.log(`👤 Contact: ${contactInfo.name} (${senderNumber})`);
+      
+      // Check if user is paused
+      const isPaused = await this.userPauseService.isUserPaused(clientId, senderNumber);
+      if (isPaused) {
+        console.log(`⏸️  User ${senderNumber} is paused - skipping message`);
+        return; // Skip without read/reply
+      }
 
       // Check if we're in production mode
       const isProduction = this.env.NODE_ENV === 'production';

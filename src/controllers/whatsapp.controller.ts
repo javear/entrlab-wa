@@ -2,17 +2,22 @@ import { Request, Response } from 'express';
 import { WPPConnectWhatsAppService } from '../services/whatsapp.service';
 import { WPPConnectMessageHandler } from '../core/message-handler';
 import { Environment } from '../types';
+import { UserPauseService } from '../services/user-pause.service';
 
 // ============================================
 // WPPConnect WhatsApp Controller
 // ============================================
 
 export class WPPConnectWhatsAppController {
+  private userPauseService: UserPauseService;
+
   constructor(
     private whatsappService: WPPConnectWhatsAppService,
     private messageHandler: WPPConnectMessageHandler,
     private env: Environment
-  ) {}
+  ) {
+    this.userPauseService = new UserPauseService();
+  }
 
   /**
    * @swagger
@@ -758,6 +763,263 @@ export class WPPConnectWhatsAppController {
       res.status(500).json({
         success: false,
         message: 'Failed to get WPPConnect agent assignments',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/pause:
+   *   post:
+   *     summary: Pause a user from receiving automated responses
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required:
+   *               - phoneNumber
+   *               - pausedTill
+   *             properties:
+   *               phoneNumber:
+   *                 type: string
+   *                 description: User's phone number (without @c.us)
+   *                 example: "6282121547121"
+   *               pausedTill:
+   *                 type: string
+   *                 format: date-time
+   *                 description: ISO date string for when pause expires
+   *                 example: "2025-10-09T12:00:00.000Z"
+   *     responses:
+   *       200:
+   *         description: User paused successfully
+   */
+  async pauseUser(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      const { phoneNumber, pausedTill } = req.body;
+
+      if (!clientId || !phoneNumber || !pausedTill) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId, phoneNumber, and pausedTill are required'
+        });
+        return;
+      }
+
+      const pausedTillDate = new Date(pausedTill);
+      if (isNaN(pausedTillDate.getTime())) {
+        res.status(400).json({
+          success: false,
+          message: 'Invalid pausedTill date format'
+        });
+        return;
+      }
+
+      const pauseRecord = await this.userPauseService.pauseUser(
+        clientId,
+        phoneNumber,
+        pausedTillDate
+      );
+
+      res.json({
+        success: true,
+        message: `User ${phoneNumber} paused on client ${clientId}`,
+        pause: {
+          clientId: pauseRecord.clientId,
+          phoneNumber: pauseRecord.phoneNumber,
+          paused: pauseRecord.paused,
+          paused_at: pauseRecord.paused_at,
+          paused_till: pauseRecord.paused_till
+        }
+      });
+    } catch (error) {
+      console.error('❌ Error pausing user:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to pause user',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/pause/{phoneNumber}:
+   *   delete:
+   *     summary: Unpause a user to resume automated responses
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *       - in: path
+   *         name: phoneNumber
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: User unpaused successfully
+   */
+  async unpauseUser(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId, phoneNumber } = req.params;
+
+      if (!clientId || !phoneNumber) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId and phoneNumber are required'
+        });
+        return;
+      }
+
+      const unpaused = await this.userPauseService.unpauseUser(clientId, phoneNumber);
+
+      if (unpaused) {
+        res.json({
+          success: true,
+          message: `User ${phoneNumber} unpaused on client ${clientId}`
+        });
+      } else {
+        res.status(404).json({
+          success: false,
+          message: `No pause record found for ${phoneNumber} on client ${clientId}`
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error unpausing user:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to unpause user',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/pause/{phoneNumber}:
+   *   get:
+   *     summary: Get pause status for a user
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *       - in: path
+   *         name: phoneNumber
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: Pause status retrieved
+   */
+  async getPauseStatus(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId, phoneNumber } = req.params;
+
+      if (!clientId || !phoneNumber) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId and phoneNumber are required'
+        });
+        return;
+      }
+
+      const pauseRecord = await this.userPauseService.getPauseStatus(clientId, phoneNumber);
+
+      if (pauseRecord) {
+        const now = new Date();
+        const isActive = pauseRecord.paused && now <= pauseRecord.paused_till;
+
+        res.json({
+          success: true,
+          pause: {
+            clientId: pauseRecord.clientId,
+            phoneNumber: pauseRecord.phoneNumber,
+            paused: pauseRecord.paused,
+            paused_at: pauseRecord.paused_at,
+            paused_till: pauseRecord.paused_till,
+            is_active: isActive
+          }
+        });
+      } else {
+        res.json({
+          success: true,
+          pause: null,
+          message: 'User is not paused'
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error getting pause status:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get pause status',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/whatsapp/clients/{clientId}/pauses:
+   *   get:
+   *     summary: Get all paused users for a client
+   *     tags: [WPPConnect WhatsApp]
+   *     parameters:
+   *       - in: path
+   *         name: clientId
+   *         required: true
+   *         schema:
+   *           type: string
+   *     responses:
+   *       200:
+   *         description: List of paused users
+   */
+  async getPausedUsers(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      const pausedUsers = await this.userPauseService.getPausedUsers(clientId);
+
+      res.json({
+        success: true,
+        paused_users: pausedUsers.map(p => ({
+          phoneNumber: p.phoneNumber,
+          paused_at: p.paused_at,
+          paused_till: p.paused_till,
+          paused: p.paused
+        })),
+        total: pausedUsers.length
+      });
+    } catch (error) {
+      console.error('❌ Error getting paused users:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get paused users',
         error: error instanceof Error ? error.message : 'Unknown error'
       });
     }

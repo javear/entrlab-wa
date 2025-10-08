@@ -22,6 +22,12 @@ export function createWhatsAppRoutes(whatsappController: WPPConnectWhatsAppContr
     router.delete('/clients/:clientId/agent', (req, res) => whatsappController.removeClientAgent(req, res));
     router.get('/clients/:clientId/agent', (req, res) => whatsappController.getClientAgent(req, res));
     
+    // User Pause Management routes
+    router.post('/clients/:clientId/pause', (req, res) => whatsappController.pauseUser(req, res));
+    router.delete('/clients/:clientId/pause/:phoneNumber', (req, res) => whatsappController.unpauseUser(req, res));
+    router.get('/clients/:clientId/pause/:phoneNumber', (req, res) => whatsappController.getPauseStatus(req, res));
+    router.get('/clients/:clientId/pauses', (req, res) => whatsappController.getPausedUsers(req, res));
+    
     router.get('/clients/:clientId', (req, res) => whatsappController.getClientStatus(req, res));
 
     // QR Code Management Routes (WPPConnect handles QR differently)
