@@ -142,23 +142,22 @@ export class WPPConnectMessageHandler {
     templateData?: any;
   } {
     try {
-      // Look for JSON blocks in code blocks or plain JSON
-      // Extract content between ``` json and ```
-      const jsonBlockRegex = /```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/;
-      
-      let match = text.match(jsonBlockRegex);
+      // Extract JSON from code blocks in ORIGINAL AI response (before WhatsApp formatting)
+      // Pattern: ```json ... ``` or ``` ... ```
+      const codeBlockRegex = /```(?:json)?\s*\n([\s\S]*?)\n```/;
+      const match = text.match(codeBlockRegex);
       
       if (match && match[1]) {
         try {
           const jsonStr = match[1].trim();
-          console.log(`🔍 Attempting to parse JSON:`, jsonStr.substring(0, 100) + '...');
+          console.log(`🔍 Found code block, attempting to parse JSON...`);
           const parsed = JSON.parse(jsonStr);
           
           if (parsed.sendText_args === true && parsed.sendText_data) {
             console.log(`🎯 Detected sendText template in AI response`);
             console.log(`📋 Template data:`, JSON.stringify(parsed.sendText_data, null, 2));
             
-            // Remove the JSON block from text
+            // Remove the entire code block from text
             const cleanText = text.replace(match[0], '').trim();
             
             return {
@@ -938,14 +937,12 @@ export class WPPConnectMessageHandler {
       }
       
       try {
+        // Check for sendText template in ORIGINAL response (before WhatsApp formatting)
+        console.log(`🔍 Checking for sendText template in original response...`);
+        const templateCheck = this.parseSendTextTemplate(aiagent.text);
+        
         // Format the response for WhatsApp
         const formattedResponse = this.convertLLMToWhatsApp(aiagent.text);
-        
-        console.log(`🔍 Checking for sendText template in formatted response...`);
-        console.log(`📝 First 200 chars:`, formattedResponse.substring(0, 200));
-        
-        // Check if response contains sendText template BEFORE parsing into parts
-        const templateCheck = this.parseSendTextTemplate(formattedResponse);
         
         if (templateCheck.hasTemplate && templateCheck.templateData) {
           // Send the message with template buttons directly
