@@ -108,7 +108,6 @@ export class WPPConnectMessageHandler {
   private extractContactInfo(message: any): {
     name: string;
     pushname: string;
-    formattedName: string;
     isBusiness: boolean;
     isEnterprise: boolean;
     verifiedName?: string;
@@ -117,9 +116,8 @@ export class WPPConnectMessageHandler {
       const sender = message.sender || {};
       
       return {
-        name: sender.name || sender.pushname || sender.formattedName || 'WhatsApp User',
+        name: sender.name || sender.pushname || 'WhatsApp User',
         pushname: sender.pushname || sender.name || 'WhatsApp User',
-        formattedName: sender.formattedName || sender.name || sender.pushname || 'WhatsApp User',
         isBusiness: sender.isBusiness || false,
         isEnterprise: sender.isEnterprise || false,
         verifiedName: sender.verifiedName || undefined
@@ -128,7 +126,6 @@ export class WPPConnectMessageHandler {
       return {
         name: 'WhatsApp User',
         pushname: 'WhatsApp User',
-        formattedName: 'WhatsApp User',
         isBusiness: false,
         isEnterprise: false
       };
@@ -1237,7 +1234,6 @@ export class WPPConnectMessageHandler {
       const userContact = this.contactInfo[phoneNumber || ''] || {
         name: userName,
         pushname: userName,
-        formattedName: userName,
         isBusiness: false,
         isEnterprise: false
       };
@@ -1267,7 +1263,6 @@ export class WPPConnectMessageHandler {
           // User profile information from WhatsApp
           full_name: userContact.name || userName || 'WhatsApp User',
           pushname: userContact.pushname || userName || 'WhatsApp User',
-          formatted_name: userContact.formattedName || userName || 'WhatsApp User',
           
           // Business account information
           is_business: userContact.isBusiness || false,
