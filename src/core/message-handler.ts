@@ -549,14 +549,6 @@ export class WPPConnectMessageHandler {
   }
 
   private startProcessing(senderNumber: string, delay: number): void {
-    if (this.processingUsers[senderNumber]) {
-      return; // Already processing
-    }
-
-    console.log(`🚀 Starting initial processing for ${senderNumber}`);
-    this.processingUsers[senderNumber] = 1;
-
-    // Send read receipt immediately (unless already sent), then start typing after 1 second
     const userClientId = this.clientIdByUser[senderNumber];
     
     if (!userClientId) {
@@ -564,8 +556,31 @@ export class WPPConnectMessageHandler {
       return;
     }
 
+    // If already processing, clear the existing timer and reset it
+    if (this.processingUsers[senderNumber]) {
+      console.log(`⏰ Resetting timer for ${senderNumber} - new message arrived`);
+      
+      // Clear existing processing timer
+      const existingTimer = (this.processingUsers as any)[`${senderNumber}_timer`];
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+      
+      // Set new timer
+      const newTimer = setTimeout(() => {
+        this.processQueuedMessages(senderNumber);
+      }, delay);
+      
+      (this.processingUsers as any)[`${senderNumber}_timer`] = newTimer;
+      console.log(`⏰ Timer reset for ${senderNumber} (${delay}ms from now)`);
+      return;
+    }
+
+    console.log(`🚀 Starting initial processing for ${senderNumber}`);
+    this.processingUsers[senderNumber] = 1;
+
     // Send read receipt immediately if not already sent
-    const preDelayMs = 300; // 300ms before typing (reduced for faster response)
+    const preDelayMs = 300; // 300ms before typing
     const readTypingTimer = setTimeout(async () => {
       try {
         // Send read receipt only once
@@ -588,11 +603,13 @@ export class WPPConnectMessageHandler {
 
     (this.processingUsers as any)[`${senderNumber}_readTypingTimer`] = readTypingTimer;
 
-    // Set initial timer
-    console.log(`⏰ Initial timer set for ${senderNumber} (${delay}ms)`);
-    setTimeout(() => {
+    // Set initial processing timer
+    const processingTimer = setTimeout(() => {
       this.processQueuedMessages(senderNumber);
     }, delay);
+    
+    (this.processingUsers as any)[`${senderNumber}_timer`] = processingTimer;
+    console.log(`⏰ Initial timer set for ${senderNumber} (${delay}ms)`);
   }
 
   private async processQueuedMessages(senderNumber: string): Promise<void> {
