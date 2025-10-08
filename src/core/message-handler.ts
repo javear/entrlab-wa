@@ -153,8 +153,29 @@ export class WPPConnectMessageHandler {
           return false;
         }
         
+        // Ensure chat is loaded before marking as read
+        try {
+          await client.client.openChat(chatId);
+          console.log(`📂 Opened chat for ${senderNumber}`);
+        } catch (openError) {
+          console.log(`⚠️  Could not open chat, proceeding anyway`);
+        }
+        
+        // Small delay to ensure chat is loaded
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
         // Mark all messages from this sender as read
         await client.client.sendSeen(chatId);
+        console.log(`✅ sendSeen() executed for ${chatId}`);
+        
+        // Close chat to return to previous state
+        try {
+          await client.client.closeChat();
+          console.log(`📂 Closed chat`);
+        } catch (closeError) {
+          // Silent fail
+        }
+        
         console.log(`✅ Read receipt sent for sender ${senderNumber}`);
         return true;
         
