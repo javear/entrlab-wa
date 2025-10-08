@@ -138,11 +138,14 @@ export class WPPConnectMessageHandler {
   private async sendReadReceipt(clientId: string, senderNumber: string, maxRetries: number = 3): Promise<boolean> {
     const chatId = `${senderNumber}@c.us`;
     
+    console.log(`📖 Attempting to send read receipt for ${senderNumber} (client: ${clientId})`);
+    
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const client = this.whatsappService.getClient(clientId);
         
         if (!client || !client.isReady || !client.client) {
+          console.log(`⚠️  Client not ready for read receipt (attempt ${attempt}/${maxRetries}) - ready: ${client?.isReady}, hasClient: ${!!client?.client}`);
           if (attempt < maxRetries) {
             await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
             continue;
@@ -151,10 +154,11 @@ export class WPPConnectMessageHandler {
         }
         
         await client.client.sendSeen(chatId);
+        console.log(`✅ Read receipt sent successfully for ${senderNumber}`);
         return true;
         
       } catch (error) {
-        // Retry with backoff
+        console.log(`⚠️  Read receipt attempt ${attempt}/${maxRetries} failed:`, error);
         
         if (attempt < maxRetries) {
           await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
@@ -172,22 +176,28 @@ export class WPPConnectMessageHandler {
   private async sendTypingIndicator(clientId: string, senderNumber: string, start: boolean = true): Promise<boolean> {
     const chatId = `${senderNumber}@c.us`;
     
+    console.log(`⌨️  ${start ? 'Starting' : 'Stopping'} typing indicator for ${senderNumber} (client: ${clientId})`);
+    
     try {
       const client = this.whatsappService.getClient(clientId);
       
       if (!client || !client.isReady || !client.client) {
+        console.log(`⚠️  Client not ready for typing indicator - ready: ${client?.isReady}, hasClient: ${!!client?.client}`);
         return false;
       }
       
       if (start) {
         await client.client.startTyping(chatId);
+        console.log(`✅ Typing indicator started for ${senderNumber}`);
       } else {
         await client.client.stopTyping(chatId);
+        console.log(`✅ Typing indicator stopped for ${senderNumber}`);
       }
       
       return true;
       
     } catch (error) {
+      console.log(`⚠️  Typing indicator error:`, error);
       return false;
     }
   }
@@ -579,21 +589,31 @@ export class WPPConnectMessageHandler {
       return;
     }
 
+    console.log(`🚀 Starting processing for ${senderNumber}`);
     this.processingUsers[senderNumber] = 1;
 
     // Send read receipt immediately if not already sent
     const preDelayMs = 300; // 300ms before typing
+    console.log(`⏰ Setting read/typing timer for ${senderNumber} (${preDelayMs}ms)`);
+    
     const readTypingTimer = setTimeout(async () => {
       try {
+        console.log(`📖 Read/typing timer fired for ${senderNumber}`);
+        
         // Send read receipt only once
         if (!this.readReceiptSent[senderNumber]) {
+          console.log(`📖 Sending read receipt for ${senderNumber}...`);
           const readSent = await this.sendReadReceipt(userClientId, senderNumber);
           if (readSent) {
             this.readReceiptSent[senderNumber] = true;
+            console.log(`✅ Read receipt marked as sent for ${senderNumber}`);
           }
+        } else {
+          console.log(`ℹ️  Read receipt already sent for ${senderNumber}, skipping`);
         }
         
         // Start typing indicator
+        console.log(`⌨️  Starting typing for ${senderNumber}...`);
         await this.sendTypingIndicator(userClientId, senderNumber, true);
         
       } catch (error) {
