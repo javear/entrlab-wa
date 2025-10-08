@@ -15,6 +15,8 @@ import { MEMORY_CONFIG, getMemoryUsage, suggestGC } from '../config/memory-confi
 export class WPPConnectMessageHandler {
   private messageQueue: { [senderNumber: string]: Array<{ message: any; enhancedText?: string; mediaUrls?: string[]; timestamp: number }> } = {};
   private processingUsers: { [senderNumber: string]: number } = {};
+  private readReceiptSent: { [senderNumber: string]: boolean } = {};
+  private clientIdByUser: { [senderNumber: string]: string } = {};
   private env: Environment;
   private tempDir: string;
   private readonly MAX_QUEUE_SIZE = MEMORY_CONFIG.MAX_QUEUE_SIZE;
@@ -99,6 +101,73 @@ export class WPPConnectMessageHandler {
     }
   }
 
+  /**
+   * Send read receipt with retry mechanism
+   */
+  private async sendReadReceipt(clientId: string, senderNumber: string, maxRetries: number = 3): Promise<boolean> {
+    const chatId = `${senderNumber}@c.us`;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const client = this.whatsappService.getClient(clientId);
+        
+        if (!client || !client.isReady || !client.client) {
+          console.log(`⚠️  Client ${clientId} not ready for read receipt (attempt ${attempt}/${maxRetries})`);
+          
+          if (attempt < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
+            continue;
+          }
+          return false;
+        }
+        
+        await client.client.sendSeen(chatId);
+        console.log(`✅ Read receipt sent for ${senderNumber} (attempt ${attempt})`);
+        return true;
+        
+      } catch (error) {
+        console.log(`⚠️  Read receipt attempt ${attempt}/${maxRetries} failed:`, error);
+        
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 500 * attempt)); // Exponential backoff
+        }
+      }
+    }
+    
+    console.error(`❌ Failed to send read receipt for ${senderNumber} after ${maxRetries} attempts`);
+    return false;
+  }
+
+  /**
+   * Send typing indicator with retry mechanism
+   */
+  private async sendTypingIndicator(clientId: string, senderNumber: string, start: boolean = true): Promise<boolean> {
+    const chatId = `${senderNumber}@c.us`;
+    
+    try {
+      const client = this.whatsappService.getClient(clientId);
+      
+      if (!client || !client.isReady || !client.client) {
+        console.log(`⚠️  Client ${clientId} not ready for typing indicator`);
+        return false;
+      }
+      
+      if (start) {
+        await client.client.startTyping(chatId);
+        console.log(`✅ Typing indicator started for ${senderNumber}`);
+      } else {
+        await client.client.stopTyping(chatId);
+        console.log(`✅ Typing indicator stopped for ${senderNumber}`);
+      }
+      
+      return true;
+      
+    } catch (error) {
+      console.log(`⚠️  Typing indicator ${start ? 'start' : 'stop'} failed:`, error);
+      return false;
+    }
+  }
+
   private cleanupMessageQueue(): void {
     const now = Date.now();
     let totalCleaned = 0;
@@ -140,6 +209,12 @@ export class WPPConnectMessageHandler {
 
       const senderNumber = message.from.replace('@c.us', '');
       console.log(`📨 Sender number: ${senderNumber}`);
+      
+      // Store client ID for this user (for consistent read receipts)
+      if (!this.clientIdByUser[senderNumber]) {
+        this.clientIdByUser[senderNumber] = clientId;
+        console.log(`🔗 Associated ${senderNumber} with client ${clientId}`);
+      }
 
       // Check if we're in production mode
       const isProduction = this.env.NODE_ENV === 'production';
@@ -201,21 +276,13 @@ export class WPPConnectMessageHandler {
         console.log(`📨 Message is text-only (type: ${message.type})`);
       }
 
-      // If user is already being processed (typing started), mark this message as read immediately
+      // If user is already being processed, mark this message as read immediately
       if (this.processingUsers[senderNumber]) {
         console.log(`📖 User ${senderNumber} is already being processed, marking as read immediately`);
-        try {
-          const clients = this.whatsappService.getAllClients();
-          const client = clients.find(c => c.isReady);
-          
-          if (client && client.client) {
-            const chatId = `${senderNumber}@c.us`;
-            await client.client.sendSeen(chatId);
-            console.log(`✅ Marked additional message as read for ${senderNumber}`);
-          }
-        } catch (error) {
-          console.log('⚠️ Could not mark additional message as read:', error);
-        }
+        
+        // Use the stored client ID for consistent read receipts
+        const userClientId = this.clientIdByUser[senderNumber] || clientId;
+        await this.sendReadReceipt(userClientId, senderNumber);
       }
 
       // Add to message queue
@@ -489,21 +556,33 @@ export class WPPConnectMessageHandler {
     console.log(`🚀 Starting initial processing for ${senderNumber}`);
     this.processingUsers[senderNumber] = 1;
 
-    // Send read receipt and start typing indicator
-    const preDelayMs = 1000; // 1 second before typing
+    // Send read receipt immediately (unless already sent), then start typing after 1 second
+    const userClientId = this.clientIdByUser[senderNumber];
+    
+    if (!userClientId) {
+      console.error(`❌ No client ID found for ${senderNumber}`);
+      return;
+    }
+
+    // Send read receipt immediately if not already sent
+    const preDelayMs = 300; // 300ms before typing (reduced for faster response)
     const readTypingTimer = setTimeout(async () => {
       try {
-        const clients = this.whatsappService.getAllClients();
-        const client = clients.find(c => c.isReady);
-        
-        if (client && client.client) {
-          const chatId = `${senderNumber}@c.us`;
-          await client.client.sendSeen(chatId);
-          await client.client.startTyping(chatId);
-          console.log(`✅ Sent read receipt and typing indicator for ${senderNumber}`);
+        // Send read receipt only once
+        if (!this.readReceiptSent[senderNumber]) {
+          const readSent = await this.sendReadReceipt(userClientId, senderNumber);
+          if (readSent) {
+            this.readReceiptSent[senderNumber] = true;
+          }
+        } else {
+          console.log(`📖 Read receipt already sent for ${senderNumber}, skipping`);
         }
+        
+        // Start typing indicator
+        await this.sendTypingIndicator(userClientId, senderNumber, true);
+        
       } catch (error) {
-        console.log('⚠️ Could not send read/typing indicators:', error);
+        console.log('⚠️ Error in read/typing sequence:', error);
       }
     }, preDelayMs);
 
@@ -551,14 +630,9 @@ export class WPPConnectMessageHandler {
       await this.sendMessage(client.clientId, senderNumber, combinedMessages, null, false, null);
 
       // Stop typing indicator
-      try {
-        if (client && client.client) {
-          const chatId = `${senderNumber}@c.us`;
-          await client.client.stopTyping(chatId);
-          console.log(`✅ Stopped typing indicator for ${senderNumber}`);
-        }
-      } catch (error) {
-        console.log('⚠️ Could not stop typing indicator:', error);
+      const userClientId = this.clientIdByUser[senderNumber];
+      if (userClientId) {
+        await this.sendTypingIndicator(userClientId, senderNumber, false);
       }
 
       // Clean up
@@ -571,10 +645,20 @@ export class WPPConnectMessageHandler {
   }
 
   private cleanupProcessingState(senderNumber: string): void {
+    // Clean up timers
+    const readTypingTimer = (this.processingUsers as any)[`${senderNumber}_readTypingTimer`];
+    if (readTypingTimer) {
+      clearTimeout(readTypingTimer);
+    }
+    
+    // Clean up all state
     delete this.messageQueue[senderNumber];
     delete this.processingUsers[senderNumber];
     delete (this.processingUsers as any)[`${senderNumber}_timer`];
     delete (this.processingUsers as any)[`${senderNumber}_readTypingTimer`];
+    delete this.readReceiptSent[senderNumber];
+    
+    // Keep clientIdByUser for future messages from same user
     console.log(`🧹 Cleaned up processing state for ${senderNumber}`);
   }
 
