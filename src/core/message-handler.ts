@@ -1555,12 +1555,12 @@ export class WPPConnectMessageHandler {
       console.log(`🔐 JWT Payload before signing:`, JSON.stringify(payload, null, 2));
       const authToken = jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
 
-      // Format the phone number for threadId and resourceId
+      // threadId = agentCode, resourceId = phoneNumber
       const formattedPhoneNumber = phoneNumber || 'unknown';
 
       const requestBody = {
         messages: [message],
-        threadId: formattedPhoneNumber,
+        threadId: agentCode,
         resourceId: formattedPhoneNumber
       };
 
