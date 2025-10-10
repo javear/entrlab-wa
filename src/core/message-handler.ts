@@ -14,16 +14,21 @@ import { UserPauseService } from '../services/user-pause.service';
 // ============================================
 
 export class WPPConnectMessageHandler {
-  private messageQueue: { [senderNumber: string]: Array<{ message: any; enhancedText?: string; mediaUrls?: string[]; timestamp: number }> } = {};
-  private processingUsers: { [senderNumber: string]: number } = {};
-  private readReceiptSent: { [senderNumber: string]: boolean } = {};
-  private clientIdByUser: { [senderNumber: string]: string } = {};
-  private contactInfo: { [senderNumber: string]: any } = {}; // Store contact metadata
+  // All maps now keyed by "clientId:senderNumber" for proper isolation
+  private messageQueue: { [key: string]: Array<{ message: any; enhancedText?: string; mediaUrls?: string[]; timestamp: number }> } = {};
+  private processingUsers: { [key: string]: number } = {};
+  private readReceiptSent: { [key: string]: boolean } = {};
+  private contactInfo: { [key: string]: any } = {}; // Store contact metadata
   private userPauseService: UserPauseService;
   private env: Environment;
   private tempDir: string;
   private readonly MAX_QUEUE_SIZE = MEMORY_CONFIG.MAX_QUEUE_SIZE;
   private readonly MAX_QUEUE_AGE = MEMORY_CONFIG.MAX_QUEUE_AGE;
+
+  // Helper to create unique key per client+user
+  private getUserKey(clientId: string, senderNumber: string): string {
+    return `${clientId}:${senderNumber}`;
+  }
 
   constructor(
     private whatsappService: WPPConnectWhatsAppService,
@@ -284,7 +289,7 @@ export class WPPConnectMessageHandler {
     const now = Date.now();
     let totalCleaned = 0;
 
-    for (const [senderNumber, messages] of Object.entries(this.messageQueue)) {
+    for (const [userKey, messages] of Object.entries(this.messageQueue)) {
       // Remove old messages
       const validMessages = messages.filter(msg => {
         const age = now - msg.timestamp;
@@ -298,13 +303,13 @@ export class WPPConnectMessageHandler {
 
       const cleaned = messages.length - validMessages.length;
       if (cleaned > 0) {
-        this.messageQueue[senderNumber] = validMessages;
+        this.messageQueue[userKey] = validMessages;
         totalCleaned += cleaned;
       }
 
       // Remove empty queues
       if (validMessages.length === 0) {
-        delete this.messageQueue[senderNumber];
+        delete this.messageQueue[userKey];
       }
     }
 
@@ -316,22 +321,18 @@ export class WPPConnectMessageHandler {
   public async handleIncomingMessage(clientId: string, message: any): Promise<void> {
     try {
       const senderNumber = message.from.replace('@c.us', '');
-      console.log(`📨 Message from ${senderNumber} [${message.type}]`);
-      
-      // Store client ID for this user (for consistent read receipts)
-      if (!this.clientIdByUser[senderNumber]) {
-        this.clientIdByUser[senderNumber] = clientId;
-      }
+      const userKey = this.getUserKey(clientId, senderNumber);
+      console.log(`📨 [${clientId}] Message from ${senderNumber} [${message.type}]`);
       
       // Extract and store contact information
       const contactInfo = this.extractContactInfo(message);
-      this.contactInfo[senderNumber] = contactInfo;
+      this.contactInfo[userKey] = contactInfo;
       console.log(`👤 Contact: ${contactInfo.name} (${senderNumber})`);
       
       // Check if user is paused
       const isPaused = await this.userPauseService.isUserPaused(clientId, senderNumber);
       if (isPaused) {
-        console.log(`⏸️  User ${senderNumber} is paused - skipping message`);
+        console.log(`⏸️  [${clientId}] User ${senderNumber} is paused - skipping message`);
         return; // Skip without read/reply
       }
 
@@ -368,11 +369,60 @@ export class WPPConnectMessageHandler {
         }
       }
 
+      // Handle location messages
+      if (message.type === 'location') {
+        const latitude = message.lat;
+        const longitude = message.lng;
+        const locationName = message.loc; // Location name/address (if available)
+        
+        console.log(`📍 Location received - Lat: ${latitude}, Lng: ${longitude}, Name: ${locationName || 'N/A'}`);
+        
+        let locationText = `Location attached: Latitude=${latitude}, Longitude=${longitude}`;
+        if (locationName) {
+          locationText += `, Location name: ${locationName}`;
+        }
+        
+        // Prepend location info to the message
+        enhancedMessage = enhancedMessage ? `${locationText}\n${enhancedMessage}` : locationText;
+      }
+
+      // Handle live location messages
+      if (message.type === 'livelocation') {
+        const latitude = message.lat;
+        const longitude = message.lng;
+        const shareDuration = message.shareDuration; // Duration in seconds
+        const locationName = message.loc; // Location name/address (if available)
+        
+        console.log(`📍🔴 Live location received - Lat: ${latitude}, Lng: ${longitude}, Duration: ${shareDuration}s, Name: ${locationName || 'N/A'}`);
+        
+        // Convert duration to human-readable format
+        let durationText = '';
+        if (shareDuration) {
+          const minutes = Math.floor(shareDuration / 60);
+          const hours = Math.floor(minutes / 60);
+          if (hours > 0) {
+            durationText = ` (sharing for ${hours} hour${hours > 1 ? 's' : ''})`;
+          } else if (minutes > 0) {
+            durationText = ` (sharing for ${minutes} minute${minutes > 1 ? 's' : ''})`;
+          } else {
+            durationText = ` (sharing for ${shareDuration} seconds)`;
+          }
+        }
+        
+        let locationText = `Live Location attached: Latitude=${latitude}, Longitude=${longitude}${durationText}`;
+        if (locationName) {
+          locationText += `, Location name: ${locationName}`;
+        }
+        
+        // Prepend location info to the message
+        enhancedMessage = enhancedMessage ? `${locationText}\n${enhancedMessage}` : locationText;
+      }
+
       // Handle media attachments (WPPConnect format)
       let mediaUrls: string[] = [];
       if (isMediaMsg) {
         try {
-          mediaUrls = await this.handleMediaMessage(message);
+          mediaUrls = await this.handleMediaMessage(clientId, message);
           if (mediaUrls.length > 0) {
             console.log(`📎 Media processed: ${mediaUrls.length} file(s)`);
           }
@@ -382,17 +432,16 @@ export class WPPConnectMessageHandler {
       }
 
       // If user is already being processed, mark this message as read immediately
-      if (this.processingUsers[senderNumber]) {
-        const userClientId = this.clientIdByUser[senderNumber] || clientId;
-        await this.sendReadReceipt(userClientId, senderNumber);
+      if (this.processingUsers[userKey]) {
+        await this.sendReadReceipt(clientId, senderNumber);
       }
 
       // Add to message queue
-      this.addToQueue(senderNumber, message, enhancedMessage, mediaUrls);
+      this.addToQueue(clientId, senderNumber, message, enhancedMessage, mediaUrls);
 
       // Start processing with delay
       const delay = 10000; // 10 seconds
-      this.startProcessing(senderNumber, delay);
+      this.startProcessing(clientId, senderNumber, delay);
 
     } catch (error) {
       console.error(`❌ Error handling incoming message:`, error);
@@ -506,20 +555,19 @@ export class WPPConnectMessageHandler {
     }
   }
 
-  private async handleMediaMessage(message: any): Promise<string[]> {
+  private async handleMediaMessage(clientId: string, message: any): Promise<string[]> {
     const mediaUrls: string[] = [];
     
     try {
-      console.log('📎 Processing media attachment...');
+      console.log(`📎 [${clientId}] Processing media attachment...`);
       console.log('📎 Message type:', message.type);
       console.log('📎 Message ID:', message.id);
       
-      // Get client to use downloadMedia method
-      const clients = this.whatsappService.getAllClients();
-      const client = clients.find(c => c.isReady);
+      // Get the specific client that received this message
+      const client = this.whatsappService.getClient(clientId);
       
-      if (!client || !client.client) {
-        console.log('⚠️ No ready client available for media download');
+      if (!client || !client.isReady || !client.client) {
+        console.log(`⚠️ Client ${clientId} not ready for media download`);
         return mediaUrls;
       }
 
@@ -636,12 +684,13 @@ export class WPPConnectMessageHandler {
     }
   }
 
-  private addToQueue(senderNumber: string, message: any, enhancedMessage: string, mediaUrls: string[]): void {
-    if (!this.messageQueue[senderNumber]) {
-      this.messageQueue[senderNumber] = [];
+  private addToQueue(clientId: string, senderNumber: string, message: any, enhancedMessage: string, mediaUrls: string[]): void {
+    const userKey = this.getUserKey(clientId, senderNumber);
+    if (!this.messageQueue[userKey]) {
+      this.messageQueue[userKey] = [];
     }
 
-    this.messageQueue[senderNumber].push({
+    this.messageQueue[userKey].push({
       message,
       enhancedText: enhancedMessage,
       mediaUrls,
@@ -649,33 +698,28 @@ export class WPPConnectMessageHandler {
     });
   }
 
-  private startProcessing(senderNumber: string, delay: number): void {
-    const userClientId = this.clientIdByUser[senderNumber];
-    
-    if (!userClientId) {
-      console.error(`❌ No client ID found for ${senderNumber}`);
-      return;
-    }
+  private startProcessing(clientId: string, senderNumber: string, delay: number): void {
+    const userKey = this.getUserKey(clientId, senderNumber);
 
     // If already processing, clear the existing timer and reset it
-    if (this.processingUsers[senderNumber]) {
+    if (this.processingUsers[userKey]) {
       // Clear existing processing timer
-      const existingTimer = (this.processingUsers as any)[`${senderNumber}_timer`];
+      const existingTimer = (this.processingUsers as any)[`${userKey}_timer`];
       if (existingTimer) {
         clearTimeout(existingTimer);
       }
       
       // Set new timer
       const newTimer = setTimeout(() => {
-        this.processQueuedMessages(senderNumber);
+        this.processQueuedMessages(clientId, senderNumber);
       }, delay);
       
-      (this.processingUsers as any)[`${senderNumber}_timer`] = newTimer;
+      (this.processingUsers as any)[`${userKey}_timer`] = newTimer;
       return;
     }
 
-    console.log(`🚀 Starting processing for ${senderNumber}`);
-    this.processingUsers[senderNumber] = 1;
+    console.log(`🚀 [${clientId}] Starting processing for ${senderNumber}`);
+    this.processingUsers[userKey] = 1;
 
     // Send read receipt immediately if not already sent
     const preDelayMs = 300; // 300ms before typing
@@ -686,11 +730,11 @@ export class WPPConnectMessageHandler {
         console.log(`📖 Read/typing timer fired for ${senderNumber}`);
         
         // Send read receipt only once
-        if (!this.readReceiptSent[senderNumber]) {
+        if (!this.readReceiptSent[userKey]) {
           console.log(`📖 Sending read receipt for ${senderNumber}...`);
-          const readSent = await this.sendReadReceipt(userClientId, senderNumber);
+          const readSent = await this.sendReadReceipt(clientId, senderNumber);
           if (readSent) {
-            this.readReceiptSent[senderNumber] = true;
+            this.readReceiptSent[userKey] = true;
             console.log(`✅ Read receipt marked as sent for ${senderNumber}`);
           }
         } else {
@@ -699,33 +743,34 @@ export class WPPConnectMessageHandler {
         
         // Start typing indicator
         console.log(`⌨️  Starting typing for ${senderNumber}...`);
-        await this.sendTypingIndicator(userClientId, senderNumber, true);
+        await this.sendTypingIndicator(clientId, senderNumber, true);
         
       } catch (error) {
         console.log('⚠️ Error in read/typing sequence:', error);
       }
     }, preDelayMs);
 
-    (this.processingUsers as any)[`${senderNumber}_readTypingTimer`] = readTypingTimer;
+    (this.processingUsers as any)[`${userKey}_readTypingTimer`] = readTypingTimer;
 
     // Set initial processing timer
     const processingTimer = setTimeout(() => {
-      this.processQueuedMessages(senderNumber);
+      this.processQueuedMessages(clientId, senderNumber);
     }, delay);
     
-    (this.processingUsers as any)[`${senderNumber}_timer`] = processingTimer;
+    (this.processingUsers as any)[`${userKey}_timer`] = processingTimer;
   }
 
-  private async processQueuedMessages(senderNumber: string): Promise<void> {
+  private async processQueuedMessages(clientId: string, senderNumber: string): Promise<void> {
+    const userKey = this.getUserKey(clientId, senderNumber);
     try {
-      const messages = this.messageQueue[senderNumber] || [];
+      const messages = this.messageQueue[userKey] || [];
       if (messages.length === 0) {
         console.log(`⚠️ No messages in queue for ${senderNumber}`);
-        this.cleanupProcessingState(senderNumber);
+        this.cleanupProcessingState(clientId, senderNumber);
         return;
       }
 
-      console.log(`🤖 Processing ${messages.length} message(s) from ${senderNumber}`);
+      console.log(`🤖 [${clientId}] Processing ${messages.length} message(s) from ${senderNumber}`);
 
       // Combine all messages and media URLs
       const combinedMessages = messages.map(item => {
@@ -736,49 +781,38 @@ export class WPPConnectMessageHandler {
         return messageText;
       }).join(' ');
 
-      // Get client info
-      const clients = this.whatsappService.getAllClients();
-      const client = clients.find(c => c.isReady);
-      
-      if (!client) {
-        console.log('⚠️ No ready WPPConnect client available');
-        this.cleanupProcessingState(senderNumber);
-        return;
-      }
-
-      // Send to AI and respond
-      await this.sendMessage(client.clientId, senderNumber, combinedMessages, null, false, null);
+      // Send to AI and respond (using the specific client)
+      await this.sendMessage(clientId, senderNumber, combinedMessages, null, false, null);
 
       // Stop typing indicator
-      const userClientId = this.clientIdByUser[senderNumber];
-      if (userClientId) {
-        await this.sendTypingIndicator(userClientId, senderNumber, false);
-      }
+      await this.sendTypingIndicator(clientId, senderNumber, false);
 
       // Clean up
-      this.cleanupProcessingState(senderNumber);
+      this.cleanupProcessingState(clientId, senderNumber);
 
     } catch (error) {
       console.error(`❌ Error processing messages for ${senderNumber}:`, error);
-      this.cleanupProcessingState(senderNumber);
+      this.cleanupProcessingState(clientId, senderNumber);
     }
   }
 
-  private cleanupProcessingState(senderNumber: string): void {
+  private cleanupProcessingState(clientId: string, senderNumber: string): void {
+    const userKey = this.getUserKey(clientId, senderNumber);
+    
     // Clean up timers
-    const readTypingTimer = (this.processingUsers as any)[`${senderNumber}_readTypingTimer`];
+    const readTypingTimer = (this.processingUsers as any)[`${userKey}_readTypingTimer`];
     if (readTypingTimer) {
       clearTimeout(readTypingTimer);
     }
     
     // Clean up all state
-    delete this.messageQueue[senderNumber];
-    delete this.processingUsers[senderNumber];
-    delete (this.processingUsers as any)[`${senderNumber}_timer`];
-    delete (this.processingUsers as any)[`${senderNumber}_readTypingTimer`];
-    delete this.readReceiptSent[senderNumber];
+    delete this.messageQueue[userKey];
+    delete this.processingUsers[userKey];
+    delete (this.processingUsers as any)[`${userKey}_timer`];
+    delete (this.processingUsers as any)[`${userKey}_readTypingTimer`];
+    delete this.readReceiptSent[userKey];
     
-    // Keep clientIdByUser for future messages from same user
+    // Keep contactInfo for future messages from same user
   }
 
   private convertLLMToWhatsApp(content: string, preserveStructure: boolean = true): string {
@@ -916,7 +950,8 @@ export class WPPConnectMessageHandler {
 
       // Get user contact information from stored metadata
       const phoneNumber = number.replace('@c.us', '');
-      const storedContact = this.contactInfo[phoneNumber] || {
+      const userKey = this.getUserKey(clientId, phoneNumber);
+      const storedContact = this.contactInfo[userKey] || {
         name: 'WhatsApp User',
         pushname: 'WhatsApp User',
         formattedName: 'WhatsApp User',
@@ -1003,8 +1038,37 @@ export class WPPConnectMessageHandler {
               const mediaUrl = String(part.value);
               console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
               
+              // Check if it's a location (starts with #loc: or #loc-)
+              if (mediaUrl.startsWith('#loc:') || mediaUrl.startsWith('#loc-')) {
+                const locationData = mediaUrl.replace(/^#loc[:-]/, '').trim();
+                console.log(`📍 Detected location data: ${locationData}`);
+                
+                // Parse latitude and longitude (format: lat;lng or lat,lng)
+                const coords = locationData.split(/[;,]/);
+                if (coords.length >= 2 && coords[0] && coords[1]) {
+                  const latitude = coords[0].trim();
+                  const longitude = coords[1].trim();
+                  const title = coords[2]?.trim() || 'Location'; // Optional title
+                  
+                  console.log(`📍 Sending location - Lat: ${latitude}, Lng: ${longitude}, Title: ${title}`);
+                  
+                  try {
+                    await client.client.sendLocation(
+                      formattedNumber || '',
+                      latitude,
+                      longitude,
+                      title
+                    );
+                    console.log(`✅ Sent location: ${latitude}, ${longitude}`);
+                  } catch (locError: any) {
+                    console.error(`❌ Failed to send location:`, locError);
+                  }
+                } else {
+                  console.error(`❌ Invalid location format: ${locationData} (expected: lat;lng or lat,lng)`);
+                }
+              }
               // Check if it's a sticker (starts with #sticker:)
-              if (mediaUrl.startsWith('#sticker:')) {
+              else if (mediaUrl.startsWith('#sticker:')) {
                 const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
                 const urlLower = stickerUrl.toLowerCase();
                 
@@ -1165,9 +1229,15 @@ export class WPPConnectMessageHandler {
   private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string }> {
     const outgoingParts: Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string }> = [];
     
-    // Pre-process text to remove duplicate URLs in parentheses
+    // Pre-process text to remove duplicate URLs and wrapped URLs in parentheses/brackets
     // Pattern: url (url) -> url
     text = text.replace(/(https?:\/\/[^\s]+)\s+\(\1\)/g, '$1');
+    
+    // Remove parentheses/brackets wrapping URLs (for media files)
+    // Pattern: (https://example.com/image.png) -> https://example.com/image.png
+    // Pattern: [https://example.com/file.pdf] -> https://example.com/file.pdf
+    text = text.replace(/\(\s*(https?:\/\/[^\s\)]+\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\)]*)?)\s*\)/gi, '$1');
+    text = text.replace(/\[\s*(https?:\/\/[^\s\]]+\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\]]*)?)\s*\]/gi, '$1');
     
     // Protect code blocks from being split
     const codeBlockTokens: string[] = [];
@@ -1177,9 +1247,19 @@ export class WPPConnectMessageHandler {
       return token;
     });
     
-    // First, extract sticker patterns: #sticker: url or #sticker url
-    const stickerRegex = /#sticker:?\s*(https?:\/\/[^\s\)]+)/gi;
+    // First, extract location patterns: #loc: or #loc-
+    // Format: #loc:-6.347;106.770;Title or #loc-6.347,106.770,Title
+    const locationRegex = /#loc[:-]([0-9.-]+[;,][0-9.-]+(?:[;,][^#\n]+)?)/gi;
     const extractedMediaList: { url: string; caption?: string; isSticker?: boolean }[] = [];
+    text = text.replace(locationRegex, (match: string) => {
+      const idx = extractedMediaList.length;
+      // Store the full #loc: pattern as the "url" - will be parsed later
+      extractedMediaList.push({ url: match.trim() });
+      return `[[MEDIA_${idx}]]`;
+    });
+    
+    // Then, extract sticker patterns: #sticker: url or #sticker url
+    const stickerRegex = /#sticker:?\s*(https?:\/\/[^\s\)]+)/gi;
     text = text.replace(stickerRegex, (_m: string, url: string) => {
       const idx = extractedMediaList.length;
       const cleanedUrl = this.cleanupUrl(String(url));
@@ -1210,8 +1290,17 @@ export class WPPConnectMessageHandler {
       return `[[MEDIA_${idx}]]`;
     });
     
+    // Clean up leftover brackets/parentheses around MEDIA tokens
+    // Pattern: (URL) or [URL] becomes just URL when URL is replaced with [[MEDIA_N]]
+    // Result: ([[MEDIA_0]]) or [[[MEDIA_0]]] -> [[MEDIA_0]]
+    let cleanedText = withMediaTokens
+      .replace(/\(\s*(\[\[MEDIA_\d+\]\])\s*\)/g, '$1')  // (url) -> url
+      .replace(/\[\s*(\[\[MEDIA_\d+\]\])\s*\]/g, '$1')  // [url] -> url
+      .replace(/\(\s*(\[\[MEDIA_\d+\]\])\s*\)/g, '$1')  // Extra pass for nested
+      .replace(/\[\s*(\[\[MEDIA_\d+\]\])\s*\]/g, '$1'); // Extra pass for nested
+    
     // Split by double newlines to create separate chat bubbles (matching main branch)
-    const rawBlocks = withMediaTokens.split('\n\n').map(b => b.trim()).filter(Boolean);
+    const rawBlocks = cleanedText.split('\n\n').map(b => b.trim()).filter(Boolean);
     
     // Build regex to match media URLs by extension
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
@@ -1386,7 +1475,8 @@ export class WPPConnectMessageHandler {
       }
 
       // Get stored contact information for this user
-      const userContact = this.contactInfo[phoneNumber || ''] || {
+      const userKey = this.getUserKey(clientId, phoneNumber);
+      const userContact = this.contactInfo[userKey] || {
         name: userName,
         pushname: userName,
         isBusiness: false,

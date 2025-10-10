@@ -186,6 +186,69 @@ export class WPPConnectClientManager {
         }
       });
 
+      // Set up reaction handler with correct TypeScript types
+      // Reference: https://wppconnect.io/wppconnect/classes/Whatsapp.html#onreactionmessage
+      // Reaction type: { id, msgId, reactionText, read, orphan, orphanReason, timestamp }
+      try {
+        client.onReactionMessage(async (reaction: any) => {
+          console.log(`👍 REACTION EVENT FIRED for ${clientId}:`, JSON.stringify(reaction, null, 2));
+          
+          try {
+            const emoji = reaction.reactionText || '👍';
+            
+            // Skip if reaction is removed (empty reactionText)
+            if (!emoji || emoji === '') {
+              console.log(`🗑️  Reaction removed (ID: ${reaction.id})`);
+              return;
+            }
+            
+            // Extract the reactor's ID from reaction.id.remote
+            // reaction.id.remote contains the user who sent the reaction (e.g., "6282121547121@c.us")
+            const reactorId = reaction.id?.remote || reaction.id?._serialized;
+            
+            if (!reactorId) {
+              console.log(`⚠️  Could not identify who sent the reaction, skipping`);
+              console.log(`🔍 Reaction structure:`, JSON.stringify(reaction, null, 2).substring(0, 200));
+              return;
+            }
+            
+            console.log(`📝 Reaction: ${emoji} by ${reactorId}`);
+            
+            // Get the message that was reacted to
+            const originalMessage = await client.getMessageById(reaction.msgId);
+            
+            if (originalMessage) {
+              console.log(`📝 Original message: ${originalMessage.body?.substring(0, 50) || '[media]'}`);
+              
+              // Create synthetic message for message handler
+              const reactionMessage = {
+                from: reactorId, // Use the reactor's ID, not the original message sender
+                body: `reacted ${emoji} to this message: ${originalMessage.body || '[media]'}`,
+                type: 'reaction',
+                timestamp: reaction.timestamp || Date.now(),
+                quotedMsg: originalMessage,
+                hasQuotedMsg: true,
+                sender: originalMessage.sender // Preserve original sender info
+              };
+              
+              // Queue with other messages
+              for (const handler of this.messageHandlers) {
+                try {
+                  await handler(clientId, reactionMessage);
+                } catch (error) {
+                  console.error(`❌ Error in reaction handler:`, error);
+                }
+              }
+            }
+          } catch (err) {
+            console.error(`❌ Error processing reaction:`, err);
+          }
+        });
+        console.log(`✅ onReactionMessage handler registered for ${clientId}`);
+      } catch (error) {
+        console.log(`⚠️  onReactionMessage not available:`, error);
+      }
+
       // Set up ready handler
       client.onStateChange(async (state) => {
         if (state === 'CONNECTED') {
