@@ -58,11 +58,27 @@ export class AutoRestartService {
             // Call the restart callback (graceful shutdown)
             await this.restartCallback();
             
-            console.log('🔄 Graceful shutdown completed. Exiting for restart...');
+            console.log('🔄 Graceful shutdown completed. Process will exit for restart.');
             
-            // Exit cleanly - Railway/Docker will restart the container
-            // The PID file cleanup is already handled in the graceful shutdown
-            process.exit(0);
+            // Give Railway/system a moment to detect the shutdown
+            setTimeout(() => {
+                console.log('🔄 Exiting process to trigger restart...');
+                
+                // Try different restart methods for Railway/Docker/local
+                const restartMethod = this.env.AUTO_RESTART_METHOD || 'exit';
+                
+                if (restartMethod === 'kill') {
+                    console.log('🔄 Using process.kill() method...');
+                    process.kill(process.pid, 'SIGTERM');
+                } else if (restartMethod === 'crash') {
+                    console.log('🔄 Using crash method...');
+                    throw new Error('Auto-restart triggered - forcing crash');
+                } else {
+                    console.log('🔄 Using process.exit(1) method...');
+                    // Exit with non-zero code to trigger Railway restart
+                    process.exit(1);
+                }
+            }, 1000);
             
         } catch (error) {
             console.error('❌ Error during auto-restart:', error);
