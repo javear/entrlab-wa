@@ -220,10 +220,26 @@ export class WhatsAppSessionBackup {
 
       console.log(`📦 [${clientId}] Found WhatsApp backup from ${backupFile.uploadDate}`);
 
-      // Create fresh session directory structure
+      // SAFETY: Only restore if session doesn't exist or is clearly broken
+      // Do NOT delete existing active sessions
       if (fs.existsSync(sessionPath)) {
+        // Check if this is an active session (has recent file modifications)
+        const defaultProfilePath = path.join(sessionPath, 'Default');
+        if (fs.existsSync(defaultProfilePath)) {
+          const stats = fs.statSync(defaultProfilePath);
+          const ageMinutes = (Date.now() - stats.mtimeMs) / 1000 / 60;
+          
+          if (ageMinutes < 10) {
+            console.log(`⚠️  [${clientId}] Session folder was modified ${Math.round(ageMinutes)} minutes ago - might be active!`);
+            console.log(`⚠️  [${clientId}] Skipping restore to prevent destroying active session`);
+            return false;
+          }
+        }
+        
+        console.log(`🗑️  [${clientId}] Removing old session folder for fresh restore`);
         fs.rmSync(sessionPath, { recursive: true, force: true });
       }
+      
       fs.mkdirSync(sessionPath, { recursive: true });
       fs.mkdirSync(defaultPath, { recursive: true });
 

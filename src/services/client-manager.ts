@@ -144,7 +144,9 @@ export class WPPConnectClientManager {
         },
         
         // Auto-close settings
-        autoClose: 180000, // 3 minutes to allow testing
+        // Set to 0 to disable, or high value to keep sessions alive
+        // 3 minutes was too short and causing disconnections
+        autoClose: 0, // Disabled - keep sessions alive (prevents unexpected disconnections)
         
         // Additional options
         disableWelcome: true,
@@ -493,6 +495,12 @@ export class WPPConnectClientManager {
           console.log(`📋 WPPConnect client ${clientId} notLogged - QR code available: ${!!clientInfo.qrCode}`);
           break;
         case 'autocloseCalled':
+          // Auto-close is normal idle behavior - don't delete the client!
+          // Just mark as idle so it can be reactivated on next message
+          console.log(`💤 Client ${clientId} auto-closed due to inactivity - keeping session for reactivation`);
+          clientInfo.status = 'disconnected';
+          clientInfo.isReady = false;
+          break; // Don't delete - keep the client and session
         case 'qrReadFail':
           // Clear authentication failures - delete from MongoDB
           console.log(`🗑️  Removing client ${clientId} - Authentication failed (${status})`);
@@ -718,15 +726,32 @@ export class WPPConnectClientManager {
     this.sessionBackupInterval = setInterval(async () => {
       console.log('🔄 Starting periodic session backup to MongoDB...');
       let backedUp = 0;
+      let failed = 0;
       
       for (const [clientId, clientInfo] of this.clients.entries()) {
-        // WPPConnect TokenStore handles persistence - no manual backup needed
-        if (clientInfo.isReady && clientInfo.status === 'ready') {
-          backedUp++;
+        // Only backup ready/authenticated clients
+        if (clientInfo.isReady && clientInfo.status === 'ready' && this.sessionBackup) {
+          try {
+            const backupSuccess = await this.sessionBackup.backupWhatsAppSession(clientId);
+            
+            if (backupSuccess) {
+              backedUp++;
+              
+              // Cleanup old backups after successful backup
+              await new Promise(resolve => setTimeout(resolve, 2000)); // GridFS indexing delay
+              await this.sessionBackup.cleanupOldWhatsAppBackups(clientId, 2);
+            } else {
+              failed++;
+              console.warn(`⚠️  [${clientId}] Periodic backup failed`);
+            }
+          } catch (error) {
+            failed++;
+            console.error(`❌ [${clientId}] Periodic backup error:`, error);
+          }
         }
       }
       
-      console.log(`🔄 Periodic session backup completed: ${backedUp} sessions backed up`);
+      console.log(`🔄 Periodic session backup completed: ${backedUp} backed up, ${failed} failed`);
     }, backupIntervalMs);
 
     console.log(`💾 Periodic session backup started (every 30 minutes)`);
