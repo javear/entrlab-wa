@@ -317,6 +317,7 @@ export class WhatsAppSessionBackup {
 
   /**
    * Delete old WhatsApp backups (keep only latest)
+   * SAFETY: Always keeps at least 1 backup to prevent total session loss
    */
   async cleanupOldWhatsAppBackups(clientId: string, keepCount: number = 2): Promise<void> {
     try {
@@ -327,15 +328,30 @@ export class WhatsAppSessionBackup {
         .sort({ uploadDate: -1 })
         .toArray();
 
-      if (files.length > keepCount) {
-        const toDelete = files.slice(keepCount);
+      // SAFETY: Always keep at least 1 backup
+      const safeKeepCount = Math.max(keepCount, 1);
+      
+      if (files.length > safeKeepCount) {
+        const toDelete = files.slice(safeKeepCount);
+        
+        console.log(`🗑️  [${clientId}] Found ${files.length} backups, keeping ${safeKeepCount}, deleting ${toDelete.length}`);
+        
         for (const file of toDelete) {
-          await this.gridFS.delete(file._id);
+          try {
+            await this.gridFS.delete(file._id);
+            console.log(`🗑️  [${clientId}] Deleted backup from ${file.uploadDate}`);
+          } catch (deleteError) {
+            console.error(`❌ Failed to delete backup ${file._id}:`, deleteError);
+            // Continue with other deletions even if one fails
+          }
         }
-        console.log(`🗑️  [${clientId}] Deleted ${toDelete.length} old WhatsApp backup(s)`);
+        
+        console.log(`✅ [${clientId}] Cleanup completed: ${toDelete.length} old backup(s) removed`);
         
         // Suggest GC after cleanup
         suggestGC();
+      } else {
+        console.log(`📋 [${clientId}] Backup count (${files.length}) within limit (${safeKeepCount}), no cleanup needed`);
       }
     } catch (error) {
       console.error(`❌ Error cleaning up WhatsApp backups for ${clientId}:`, error);

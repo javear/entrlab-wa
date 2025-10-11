@@ -262,8 +262,17 @@ export class WPPConnectClientManager {
             setImmediate(async () => {
               try {
                 await new Promise(resolve => setTimeout(resolve, 10000)); // Wait for session to stabilize
-                await this.sessionBackup!.backupWhatsAppSession(clientId);
-                await this.sessionBackup!.cleanupOldWhatsAppBackups(clientId, 2);
+                
+                const backupSuccess = await this.sessionBackup!.backupWhatsAppSession(clientId);
+                
+                // Only cleanup old backups if new backup succeeded
+                if (backupSuccess) {
+                  // Wait a moment to ensure GridFS has indexed the new file
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+                  await this.sessionBackup!.cleanupOldWhatsAppBackups(clientId, 2);
+                } else {
+                  console.warn(`⚠️  [${clientId}] Backup failed, skipping cleanup to preserve existing backups`);
+                }
               } catch (error) {
                 console.error(`❌ [${clientId}] Session backup failed:`, error);
               }
