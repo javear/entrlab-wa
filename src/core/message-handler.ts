@@ -1571,7 +1571,7 @@ export class WPPConnectMessageHandler {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authToken}`
         },
-        timeout: 30000
+        timeout: parseInt(this.env.AI_REQUEST_TIMEOUT || '240000', 10) // 4 minutes default, configurable
       });
 
       console.log(`🤖 Response Status: ${response.status} ${response.status >= 200 && response.status < 300 ? '✅' : '❌'}`);
