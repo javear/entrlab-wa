@@ -1325,23 +1325,41 @@ export class WPPConnectMessageHandler {
       .replace(/\(\s*(\[\[MEDIA_\d+\]\])\s*\)/g, '$1')  // Extra pass for nested
       .replace(/\[\s*(\[\[MEDIA_\d+\]\])\s*\]/g, '$1'); // Extra pass for nested
     
+    // Extract quoted message pattern BEFORE splitting into blocks
+    // Pattern: #quotedMsg:messageId or #quotedMsgID:messageId (at the start or on its own line)
+    let globalQuotedMsgId: string | undefined = undefined;
+    const quotedMsgMatch = cleanedText.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
+    if (quotedMsgMatch && quotedMsgMatch[1]) {
+      globalQuotedMsgId = quotedMsgMatch[1].trim();
+      // Remove the quoted message pattern from the entire text
+      cleanedText = cleanedText.replace(/^#quoted(?:Msg|MsgID):?\s*[^\s\n]+\s*\n*/i, '').trim();
+      console.log(`💬 Detected quoted message ID: ${globalQuotedMsgId}`);
+    }
+    
     // Split by double newlines to create separate chat bubbles (matching main branch)
     const rawBlocks = cleanedText.split('\n\n').map(b => b.trim()).filter(Boolean);
     
     // Build regex to match media URLs by extension
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
     
+    // Track if we've used the globalQuotedMsgId (only apply to first block)
+    let quotedMsgIdUsed = false;
+    
     // Process each block separately
     for (let block of rawBlocks) {
-      // Check for quoted message pattern at the start of the block
-      // Pattern: #quotedMsg:messageId or #quotedMsgID:messageId
+      // Check for quoted message pattern at the start of this block (inline format)
       let quotedMsgId: string | undefined = undefined;
-      const quotedMsgMatch = block.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
-      if (quotedMsgMatch && quotedMsgMatch[1]) {
-        quotedMsgId = quotedMsgMatch[1].trim();
+      const blockQuotedMatch = block.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
+      if (blockQuotedMatch && blockQuotedMatch[1]) {
+        quotedMsgId = blockQuotedMatch[1].trim();
         // Remove the quoted message pattern from the block
         block = block.replace(/^#quoted(?:Msg|MsgID):?\s*[^\s\n]+\s*/i, '').trim();
-        console.log(`💬 Detected quoted message ID: ${quotedMsgId}`);
+        console.log(`💬 Detected quoted message ID (inline): ${quotedMsgId}`);
+      }
+      // Otherwise, use the global quoted message ID for the first block only
+      else if (!quotedMsgIdUsed && globalQuotedMsgId) {
+        quotedMsgId = globalQuotedMsgId;
+        quotedMsgIdUsed = true;
       }
       // Combined regex to match:
       // 1) [[MEDIA_n]] tokens from markdown images
