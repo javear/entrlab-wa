@@ -1415,8 +1415,9 @@ export class WPPConnectMessageHandler {
       console.log(`💬 Detected quoted message ID: ${globalQuotedMsgId}`);
     }
     
-    // Split by double newlines to create separate chat bubbles (matching main branch)
-    const rawBlocks = cleanedText.split('\n\n').map(b => b.trim()).filter(Boolean);
+    // Split by single newlines to create separate chat bubbles
+    // Each line becomes a separate WhatsApp message bubble
+    const rawBlocks = cleanedText.split('\n').map(b => b.trim()).filter(Boolean);
     
     // Build regex to match media URLs by extension
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
