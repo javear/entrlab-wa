@@ -1202,12 +1202,18 @@ export class WPPConnectMessageHandler {
                   // Remove the sticker part from the text and send the remaining text
                   const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
                   if (remainingText) {
-                    // Send with quotedMsg if available
+                    // Send with quotedMsg if available, with fallback
                     if (quotedMsgId) {
                       console.log(`💬 Sending text with quoted message ID: ${quotedMsgId}`);
-                      await client.client.sendText(formattedNumber || '', remainingText, {
-                        quotedMsg: quotedMsgId
-                      });
+                      try {
+                        await client.client.sendText(formattedNumber || '', remainingText, {
+                          quotedMsg: quotedMsgId
+                        });
+                      } catch (quotedErr: any) {
+                        console.log(`⚠️  Failed to send with quotedMsg: ${quotedErr?.message || quotedErr}`);
+                        console.log(`🔄 Retrying without quotedMsg...`);
+                        await client.client.sendText(formattedNumber || '', remainingText);
+                      }
                     } else {
                       await client.client.sendText(formattedNumber || '', remainingText);
                     }
@@ -1215,12 +1221,18 @@ export class WPPConnectMessageHandler {
                   }
                 }
               } else {
-                // Regular text - send with quotedMsg if available
+                // Regular text - send with quotedMsg if available, with fallback
                 if (quotedMsgId) {
                   console.log(`💬 Sending text with quoted message ID: ${quotedMsgId}`);
-                  await client.client.sendText(formattedNumber || '', textContent, {
-                    quotedMsg: quotedMsgId
-                  });
+                  try {
+                    await client.client.sendText(formattedNumber || '', textContent, {
+                      quotedMsg: quotedMsgId
+                    });
+                  } catch (quotedErr: any) {
+                    console.log(`⚠️  Failed to send with quotedMsg: ${quotedErr?.message || quotedErr}`);
+                    console.log(`🔄 Retrying without quotedMsg...`);
+                    await client.client.sendText(formattedNumber || '', textContent);
+                  }
                 } else {
                   await client.client.sendText(formattedNumber || '', textContent);
                 }
