@@ -1183,6 +1183,7 @@ export class WPPConnectMessageHandler {
             // Send text part - check for special patterns
             try {
               const textContent = String(part.value);
+              const quotedMsgId = part.quotedMsgId;
               
               // Check if text contains #sticker: pattern
               if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
@@ -1201,13 +1202,28 @@ export class WPPConnectMessageHandler {
                   // Remove the sticker part from the text and send the remaining text
                   const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
                   if (remainingText) {
-                    await client.client.sendText(formattedNumber || '', remainingText);
+                    // Send with quotedMsg if available
+                    if (quotedMsgId) {
+                      console.log(`💬 Sending text with quoted message ID: ${quotedMsgId}`);
+                      await client.client.sendText(formattedNumber || '', remainingText, {
+                        quotedMsg: quotedMsgId
+                      });
+                    } else {
+                      await client.client.sendText(formattedNumber || '', remainingText);
+                    }
                     console.log(`✅ Sent remaining text: ${remainingText}`);
                   }
                 }
               } else {
-                // Regular text
-                await client.client.sendText(formattedNumber || '', textContent);
+                // Regular text - send with quotedMsg if available
+                if (quotedMsgId) {
+                  console.log(`💬 Sending text with quoted message ID: ${quotedMsgId}`);
+                  await client.client.sendText(formattedNumber || '', textContent, {
+                    quotedMsg: quotedMsgId
+                  });
+                } else {
+                  await client.client.sendText(formattedNumber || '', textContent);
+                }
               }
             } catch (textErr: any) {
               console.log('⚠️ Error sending text part:', textErr?.message || textErr);
@@ -1236,8 +1252,8 @@ export class WPPConnectMessageHandler {
     }
   }
 
-  private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string }> {
-    const outgoingParts: Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string }> = [];
+  private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string, quotedMsgId?: string }> {
+    const outgoingParts: Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string, quotedMsgId?: string }> = [];
     
     // Pre-process text to remove duplicate URLs and wrapped URLs in parentheses/brackets
     // Pattern: url (url) -> url
@@ -1316,7 +1332,17 @@ export class WPPConnectMessageHandler {
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
     
     // Process each block separately
-    for (const block of rawBlocks) {
+    for (let block of rawBlocks) {
+      // Check for quoted message pattern at the start of the block
+      // Pattern: #quotedMsg:messageId or #quotedMsgID:messageId
+      let quotedMsgId: string | undefined = undefined;
+      const quotedMsgMatch = block.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
+      if (quotedMsgMatch && quotedMsgMatch[1]) {
+        quotedMsgId = quotedMsgMatch[1].trim();
+        // Remove the quoted message pattern from the block
+        block = block.replace(/^#quoted(?:Msg|MsgID):?\s*[^\s\n]+\s*/i, '').trim();
+        console.log(`💬 Detected quoted message ID: ${quotedMsgId}`);
+      }
       // Combined regex to match:
       // 1) [[MEDIA_n]] tokens from markdown images
       // 2) @media URLs
@@ -1336,7 +1362,9 @@ export class WPPConnectMessageHandler {
         // Add text before the media URL
         const textBefore = block.slice(lastIndex, match.index).trim();
         if (textBefore) {
-          outgoingParts.push({ kind: 'text', value: textBefore });
+          const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: textBefore };
+          if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
+          outgoingParts.push(textPart);
         }
         
         if (match[1]) {
@@ -1346,21 +1374,26 @@ export class WPPConnectMessageHandler {
           if (meta && meta.url) {
             // If it's a sticker, prefix with #sticker:
             const mediaUrl = meta.isSticker ? `#sticker:${meta.url}` : meta.url;
-            const mediaPart: { kind: 'media'; value: string; caption?: string } = { kind: 'media', value: mediaUrl };
+            const mediaPart: { kind: 'media'; value: string; caption?: string; quotedMsgId?: string } = { kind: 'media', value: mediaUrl };
             if (meta.caption) {
               mediaPart.caption = meta.caption;
             }
+            if (quotedMsgId) mediaPart.quotedMsgId = quotedMsgId;
             outgoingParts.push(mediaPart);
           } else {
             // Fallback: keep the token textually if something went wrong
-            outgoingParts.push({ kind: 'text', value: match[0] });
+            const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: match[0] };
+            if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
+            outgoingParts.push(textPart);
           }
         } else {
           // Either @media url (group 3) or bare media url (group 4)
           const mediaUrl = (match[3] || match[4]) ?? '';
           if (mediaUrl) {
             const cleanedUrl = this.cleanupUrl(mediaUrl);
-            outgoingParts.push({ kind: 'media', value: cleanedUrl });
+            const mediaPart: { kind: 'media'; value: string; quotedMsgId?: string } = { kind: 'media', value: cleanedUrl };
+            if (quotedMsgId) mediaPart.quotedMsgId = quotedMsgId;
+            outgoingParts.push(mediaPart);
           }
         }
         
@@ -1371,7 +1404,9 @@ export class WPPConnectMessageHandler {
       if (foundMedia) {
         const textAfter = block.slice(lastIndex).trim();
         if (textAfter) {
-          outgoingParts.push({ kind: 'text', value: textAfter });
+          const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: textAfter };
+          if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
+          outgoingParts.push(textPart);
         }
       } else {
         // If no media found in this block, check for link previews (non-media URLs)
@@ -1388,21 +1423,27 @@ export class WPPConnectMessageHandler {
           if (!isMediaUrl && textBeforeUrl) {
             // This is a link preview: text + URL
             console.log(`🔗 Detected link preview: "${textBeforeUrl}" -> ${url}`);
-            outgoingParts.push({ 
+            const linkPart: { kind: 'link'; value: string; caption: string; quotedMsgId?: string } = { 
               kind: 'link', 
               value: url, 
               caption: textBeforeUrl 
-            });
+            };
+            if (quotedMsgId) linkPart.quotedMsgId = quotedMsgId;
+            outgoingParts.push(linkPart);
           } else {
             // Just add as text
             if (block.trim()) {
-              outgoingParts.push({ kind: 'text', value: block });
+              const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: block };
+              if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
+              outgoingParts.push(textPart);
             }
           }
         } else {
           // No URL found, add as regular text
           if (block.trim()) {
-            outgoingParts.push({ kind: 'text', value: block });
+            const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: block };
+            if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
+            outgoingParts.push(textPart);
           }
         }
       }
