@@ -1129,33 +1129,46 @@ export class WPPConnectMessageHandler {
                 const stickerStartTime = Date.now();
                 console.log(`⏱️  [STICKER START] Beginning sticker processing at ${new Date().toISOString()}`);
                 
+                // Add timeout wrapper for sticker sending (30 second timeout)
+                const stickerTimeout = new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('Sticker sending timeout after 30s')), 30000)
+                );
+                
                 if (isAnimated) {
                   console.log(`🎭 Sending as animated sticker (GIF/WEBP): ${stickerUrl}`);
                   try {
-                    await client.client.sendImageAsStickerGif(
-                      formattedNumber || '',
-                      stickerUrl
-                    );
+                    await Promise.race([
+                      client.client.sendImageAsStickerGif(
+                        formattedNumber || '',
+                        stickerUrl
+                      ),
+                      stickerTimeout
+                    ]);
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.log(`✅ Sent animated sticker from ${stickerUrl} (took ${stickerDuration}s)`);
                   } catch (stickerErr: any) {
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.error(`❌ Failed to send animated sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
-                    throw stickerErr;
+                    console.log(`⚠️  Skipping sticker, will send text fallback if available`);
+                    // Don't throw - continue with other parts
                   }
                 } else {
                   console.log(`🎭 Sending as static sticker: ${stickerUrl}`);
                   try {
-                    await client.client.sendImageAsSticker(
-                      formattedNumber || '',
-                      stickerUrl
-                    );
+                    await Promise.race([
+                      client.client.sendImageAsSticker(
+                        formattedNumber || '',
+                        stickerUrl
+                      ),
+                      stickerTimeout
+                    ]);
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.log(`✅ Sent static sticker from ${stickerUrl} (took ${stickerDuration}s)`);
                   } catch (stickerErr: any) {
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.error(`❌ Failed to send static sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
-                    throw stickerErr;
+                    console.log(`⚠️  Skipping sticker, will send text fallback if available`);
+                    // Don't throw - continue with other parts
                   }
                 }
               } else {
