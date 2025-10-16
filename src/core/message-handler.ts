@@ -816,7 +816,13 @@ export class WPPConnectMessageHandler {
       console.log(`📝 Combined message with metadata (${messages.length} messages):\n${combinedMessages.substring(0, 500)}${combinedMessages.length > 500 ? '...' : ''}`);
 
       // Send to AI and respond (using the specific client)
+      const sendStartTime = Date.now();
+      console.log(`⏱️  [SEND START] Beginning message send at ${new Date().toISOString()}`);
+      
       await this.sendMessage(clientId, senderNumber, combinedMessages, null, false, null);
+      
+      const sendDuration = ((Date.now() - sendStartTime) / 1000).toFixed(2);
+      console.log(`⏱️  [SEND END] Total send duration: ${sendDuration}s`);
 
       // Stop typing indicator
       await this.sendTypingIndicator(clientId, senderNumber, false);
@@ -1120,20 +1126,37 @@ export class WPPConnectMessageHandler {
                 const isAnimated = urlLower.match(/\.(gif|webp)(\?.*)?$/i);
                 console.log(`🔍 isAnimated match result: ${isAnimated ? 'YES - ' + isAnimated[0] : 'NO'}`);
                 
+                const stickerStartTime = Date.now();
+                console.log(`⏱️  [STICKER START] Beginning sticker processing at ${new Date().toISOString()}`);
+                
                 if (isAnimated) {
                   console.log(`🎭 Sending as animated sticker (GIF/WEBP): ${stickerUrl}`);
-                  await client.client.sendImageAsStickerGif(
-                    formattedNumber || '',
-                    stickerUrl
-                  );
-                  console.log(`✅ Sent animated sticker from ${stickerUrl}`);
+                  try {
+                    await client.client.sendImageAsStickerGif(
+                      formattedNumber || '',
+                      stickerUrl
+                    );
+                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
+                    console.log(`✅ Sent animated sticker from ${stickerUrl} (took ${stickerDuration}s)`);
+                  } catch (stickerErr: any) {
+                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
+                    console.error(`❌ Failed to send animated sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
+                    throw stickerErr;
+                  }
                 } else {
                   console.log(`🎭 Sending as static sticker: ${stickerUrl}`);
-                  await client.client.sendImageAsSticker(
-                    formattedNumber || '',
-                    stickerUrl
-                  );
-                  console.log(`✅ Sent static sticker from ${stickerUrl}`);
+                  try {
+                    await client.client.sendImageAsSticker(
+                      formattedNumber || '',
+                      stickerUrl
+                    );
+                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
+                    console.log(`✅ Sent static sticker from ${stickerUrl} (took ${stickerDuration}s)`);
+                  } catch (stickerErr: any) {
+                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
+                    console.error(`❌ Failed to send static sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
+                    throw stickerErr;
+                  }
                 }
               } else {
                 // Determine media type from URL extension or content
