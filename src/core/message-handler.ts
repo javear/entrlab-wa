@@ -772,14 +772,24 @@ export class WPPConnectMessageHandler {
 
       console.log(`🤖 [${clientId}] Processing ${messages.length} message(s) from ${senderNumber}`);
 
-      // Combine all messages and media URLs
+      // Combine all messages with metadata and media URLs
       const combinedMessages = messages.map(item => {
+        // Extract message metadata
+        const messageId = item.message?.id || 'unknown';
+        const messageTimestamp = item.message?.timestamp || item.timestamp;
+        
+        // Format: [#messageid:xxx#messagedatetime:xxx] message text
+        const metadataPrefix = `[#messageid:${messageId}#messagedatetime:${messageTimestamp}]`;
+        
         let messageText = item.enhancedText !== undefined ? item.enhancedText : '';
         if (item.mediaUrls && item.mediaUrls.length > 0) {
           messageText += `\nMedia attached:\n- @[${item.mediaUrls.join(']\n- @[')}]`;
         }
-        return messageText;
-      }).join(' ');
+        
+        return `${metadataPrefix} ${messageText}`;
+      }).join('\n');
+
+      console.log(`📝 Combined message with metadata (${messages.length} messages):\n${combinedMessages.substring(0, 500)}${combinedMessages.length > 500 ? '...' : ''}`);
 
       // Send to AI and respond (using the specific client)
       await this.sendMessage(clientId, senderNumber, combinedMessages, null, false, null);
