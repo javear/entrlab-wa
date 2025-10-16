@@ -440,7 +440,7 @@ export class WPPConnectMessageHandler {
       this.addToQueue(clientId, senderNumber, message, enhancedMessage, mediaUrls);
 
       // Start processing with delay
-      const delay = 25000; // 25 seconds
+      const delay = 16000; // 25 seconds
       this.startProcessing(clientId, senderNumber, delay);
 
     } catch (error) {
@@ -762,8 +762,18 @@ export class WPPConnectMessageHandler {
 
   private async processQueuedMessages(clientId: string, senderNumber: string): Promise<void> {
     const userKey = this.getUserKey(clientId, senderNumber);
+    
+    // Guard: Check if this user is actually in processing state
+    if (!this.processingUsers[userKey]) {
+      console.log(`⚠️ Processing already completed for ${senderNumber}, skipping`);
+      return;
+    }
+    
     try {
+      // Read and immediately clear the queue to prevent duplicate processing
       const messages = this.messageQueue[userKey] || [];
+      this.messageQueue[userKey] = []; // Clear immediately after reading
+      
       if (messages.length === 0) {
         console.log(`⚠️ No messages in queue for ${senderNumber}`);
         this.cleanupProcessingState(clientId, senderNumber);
@@ -823,7 +833,12 @@ export class WPPConnectMessageHandler {
   private cleanupProcessingState(clientId: string, senderNumber: string): void {
     const userKey = this.getUserKey(clientId, senderNumber);
     
-    // Clean up timers
+    // Clean up all timers first to prevent any pending executions
+    const processingTimer = (this.processingUsers as any)[`${userKey}_timer`];
+    if (processingTimer) {
+      clearTimeout(processingTimer);
+    }
+    
     const readTypingTimer = (this.processingUsers as any)[`${userKey}_readTypingTimer`];
     if (readTypingTimer) {
       clearTimeout(readTypingTimer);
@@ -835,6 +850,8 @@ export class WPPConnectMessageHandler {
     delete (this.processingUsers as any)[`${userKey}_timer`];
     delete (this.processingUsers as any)[`${userKey}_readTypingTimer`];
     delete this.readReceiptSent[userKey];
+    
+    console.log(`🧹 [${clientId}] Cleaned up processing state for ${senderNumber}`);
     
     // Keep contactInfo for future messages from same user
   }
