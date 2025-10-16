@@ -778,8 +778,22 @@ export class WPPConnectMessageHandler {
         const messageId = item.message?.id || 'unknown';
         const messageTimestamp = item.message?.timestamp || item.timestamp;
         
-        // Format: [#messageid:xxx#messagedatetime:xxx] message text
-        const metadataPrefix = `[#messageid:${messageId}#messagedatetime:${messageTimestamp}]`;
+        // Format timestamp: Thursday, 2025-04-17T17:43:35+07:00 (GMT+7)
+        let formattedTimestamp = 'unknown';
+        if (messageTimestamp) {
+          try {
+            const date = new Date(messageTimestamp * 1000); // Convert Unix timestamp to milliseconds
+            const dayOfWeek = date.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'Asia/Jakarta' });
+            const isoDateTime = date.toLocaleString('sv-SE', { timeZone: 'Asia/Jakarta' }).replace(' ', 'T');
+            formattedTimestamp = `${dayOfWeek}, ${isoDateTime}+07:00 (GMT+7)`;
+          } catch (error) {
+            console.log(`⚠️ Error formatting timestamp: ${error}`);
+            formattedTimestamp = String(messageTimestamp);
+          }
+        }
+        
+        // Format: [#messageid:xxx#message-timestamp:xxx] message text
+        const metadataPrefix = `[#messageid:${messageId}#message-timestamp:${formattedTimestamp}]`;
         
         let messageText = item.enhancedText !== undefined ? item.enhancedText : '';
         if (item.mediaUrls && item.mediaUrls.length > 0) {
