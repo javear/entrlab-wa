@@ -1342,8 +1342,8 @@ export class WPPConnectMessageHandler {
     // Build regex to match media URLs by extension
     const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
     
-    // Track if we've used the globalQuotedMsgId (only apply to first block)
-    let quotedMsgIdUsed = false;
+    // Track pending quotedMsgId that needs to be applied to the next non-empty part
+    let pendingQuotedMsgId: string | undefined = globalQuotedMsgId;
     
     // Process each block separately
     for (let block of rawBlocks) {
@@ -1351,15 +1351,16 @@ export class WPPConnectMessageHandler {
       let quotedMsgId: string | undefined = undefined;
       const blockQuotedMatch = block.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
       if (blockQuotedMatch && blockQuotedMatch[1]) {
-        quotedMsgId = blockQuotedMatch[1].trim();
+        pendingQuotedMsgId = blockQuotedMatch[1].trim();
         // Remove the quoted message pattern from the block
         block = block.replace(/^#quoted(?:Msg|MsgID):?\s*[^\s\n]+\s*/i, '').trim();
-        console.log(`💬 Detected quoted message ID (inline): ${quotedMsgId}`);
+        console.log(`💬 Detected quoted message ID (inline): ${pendingQuotedMsgId}`);
       }
-      // Otherwise, use the global quoted message ID for the first block only
-      else if (!quotedMsgIdUsed && globalQuotedMsgId) {
-        quotedMsgId = globalQuotedMsgId;
-        quotedMsgIdUsed = true;
+      
+      // Use pending quotedMsgId for the first non-empty content
+      if (pendingQuotedMsgId && block.trim()) {
+        quotedMsgId = pendingQuotedMsgId;
+        pendingQuotedMsgId = undefined; // Clear after using
       }
       // Combined regex to match:
       // 1) [[MEDIA_n]] tokens from markdown images
