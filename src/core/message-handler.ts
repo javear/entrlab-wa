@@ -362,7 +362,14 @@ export class WPPConnectMessageHandler {
         try {
           const quoted = message.quotedMsg || (message.hasQuotedMsg ? await message.getQuotedMessage() : null);
           if (quoted && quoted.body) {
-            enhancedMessage = `Replying to this message: "${quoted.body}"\n${enhancedMessage}`;
+            // Check if this is a reaction message (contains "reacted" in the body)
+            const isReaction = enhancedMessage.includes('reacted') && enhancedMessage.includes('to this message');
+            
+            if (!isReaction) {
+              // Only add "Replying to" prefix for actual replies, not reactions
+              enhancedMessage = `Replying to this message: "${quoted.body}"\n${enhancedMessage}`;
+            }
+            // For reactions, the message already contains "reacted ❤️ to this message: ..."
           }
         } catch (error) {
           // Continue with original message if quoted message retrieval fails
