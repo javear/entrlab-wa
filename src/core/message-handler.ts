@@ -846,6 +846,15 @@ export class WPPConnectMessageHandler {
   private cleanupProcessingState(clientId: string, senderNumber: string): void {
     const userKey = this.getUserKey(clientId, senderNumber);
     
+    // Check if new messages arrived during processing
+    const hasNewMessages = this.messageQueue[userKey] && this.messageQueue[userKey].length > 0;
+    
+    if (hasNewMessages) {
+      // Don't cleanup! Let the existing timer handle the new messages
+      console.log(`📬 [${clientId}] New messages arrived for ${senderNumber} during processing - keeping state active`);
+      return;
+    }
+    
     // Clean up all timers first to prevent any pending executions
     const processingTimer = (this.processingUsers as any)[`${userKey}_timer`];
     if (processingTimer) {
