@@ -665,22 +665,39 @@ export class WPPConnectClientManager {
     try {
       const sessions = await this.sessionBackup.listWhatsAppBackups('*');
       console.log(`📋 Found ${sessions.length} existing WhatsApp sessions`);
+      
+      // Log all session names for debugging
+      if (sessions.length > 0) {
+        console.log(`📋 Sessions to restore: ${sessions.map(s => s.filename.replace('_whatsapp_session.zip', '')).join(', ')}`);
+      }
 
       for (const session of sessions) {
         const clientId = session.filename.replace('_whatsapp_session.zip', '');
         
         try {
+          console.log(`🔄 [${clientId}] Starting session restoration...`);
+          
           // Check if client already exists
           if (this.clients.has(clientId)) {
+            console.log(`⏩ [${clientId}] Client already exists, skipping`);
             continue;
           }
 
           // Restore the WhatsApp session first, then create client
+          console.log(`📥 [${clientId}] Restoring WhatsApp session from MongoDB...`);
           const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
+          
           if (restored) {
+            console.log(`✅ [${clientId}] Session restored, waiting 5s before creating client...`);
             await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            console.log(`🚀 [${clientId}] Creating WPPConnect client...`);
             await this.createClient(clientId, true); // Skip restore since we already did it
+            
+            console.log(`✅ [${clientId}] Client created, waiting 3s before next...`);
             await new Promise(resolve => setTimeout(resolve, 3000));
+          } else {
+            console.warn(`⚠️  [${clientId}] Session restore returned false - skipping client creation`);
           }
         } catch (error) {
           console.error(`❌ Failed to restore session for client ${clientId}:`, error);
