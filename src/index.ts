@@ -105,6 +105,18 @@ async function startWPPConnectApplication(): Promise<void> {
     // Clean up any stale PID file from previous instance
     await checkAndCleanupPidFile();
     
+    // Clean up /tokens folder to force fresh session restore from MongoDB
+    const tokensPath = path.join(process.cwd(), 'tokens');
+    if (fs.existsSync(tokensPath)) {
+      console.log('🧹 Cleaning up old /tokens folder for fresh session restore...');
+      try {
+        fs.rmSync(tokensPath, { recursive: true, force: true });
+        console.log('✅ /tokens folder removed - sessions will restore from MongoDB');
+      } catch (error) {
+        console.warn('⚠️  Could not remove /tokens folder:', error);
+      }
+    }
+    
     console.log('🚀 Starting WPPConnect WhatsApp Bot Application...');
     console.log('🔧 Environment variables:');
     console.log(`  - NODE_ENV: ${env.NODE_ENV}`);
