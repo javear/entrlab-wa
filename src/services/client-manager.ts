@@ -618,6 +618,17 @@ export class WPPConnectClientManager {
       console.log(`✅ Message sent via WPPConnect client ${clientId}:`, result);
       return true;
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const isInvalidNumber = errorMessage.includes('invalid wid') || 
+                              errorMessage.includes('InvalidWidError') ||
+                              errorMessage.includes('wid error');
+      
+      if (isInvalidNumber) {
+        console.warn(`⚠️  [${clientId}] Invalid WhatsApp number: ${number}`);
+        // Don't throw for invalid numbers, just log and re-throw for controller to handle
+        throw new Error(`Invalid WhatsApp number: ${number}`);
+      }
+      
       console.error(`❌ Error sending message via WPPConnect client ${clientId}:`, error);
       throw error;
     }

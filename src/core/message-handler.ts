@@ -1237,9 +1237,27 @@ export class WPPConnectMessageHandler {
               }
               
             } catch (mediaErr: any) {
-              console.log(`⚠️ Failed to send media ${String(part.value)}:`, mediaErr?.message || mediaErr);
+              const errorMsg = mediaErr?.message || mediaErr;
+              const isInvalidNumber = String(errorMsg).includes('invalid wid') || 
+                                      String(errorMsg).includes('InvalidWidError') ||
+                                      String(errorMsg).includes('wid error');
+              
+              if (isInvalidNumber) {
+                console.warn(`⚠️  Invalid WhatsApp number detected for ${number} - stopping message send`);
+                return; // Stop processing this message entirely
+              }
+              
+              console.log(`⚠️ Failed to send media ${String(part.value)}:`, errorMsg);
               // Fallback: send URL as text
-              await client.client.sendText(formattedNumber || '', String(part.value));
+              try {
+                await client.client.sendText(formattedNumber || '', String(part.value));
+              } catch (fallbackErr: any) {
+                const fallbackMsg = fallbackErr?.message || fallbackErr;
+                if (String(fallbackMsg).includes('invalid wid')) {
+                  console.warn(`⚠️  Invalid WhatsApp number - skipping fallback`);
+                  return;
+                }
+              }
             }
           } else if (part.kind === 'link') {
             // Send link preview
@@ -1321,7 +1339,17 @@ export class WPPConnectMessageHandler {
                 }
               }
             } catch (textErr: any) {
-              console.log('⚠️ Error sending text part:', textErr?.message || textErr);
+              const errorMsg = textErr?.message || textErr;
+              const isInvalidNumber = String(errorMsg).includes('invalid wid') || 
+                                      String(errorMsg).includes('InvalidWidError') ||
+                                      String(errorMsg).includes('wid error');
+              
+              if (isInvalidNumber) {
+                console.warn(`⚠️  Invalid WhatsApp number detected for ${number} - stopping message send`);
+                return; // Stop processing this message entirely
+              }
+              
+              console.log('⚠️ Error sending text part:', errorMsg);
             }
           }
 

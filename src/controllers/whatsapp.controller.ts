@@ -393,10 +393,27 @@ export class WPPConnectWhatsAppController {
       });
     } catch (error) {
       console.error('❌ Error sending message via WPPConnect:', error);
+      
+      // Check if it's an invalid WhatsApp number error
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const isInvalidNumber = errorMessage.includes('invalid wid') || 
+                              errorMessage.includes('InvalidWidError') ||
+                              errorMessage.includes('wid error');
+      
+      if (isInvalidNumber) {
+        res.status(400).json({
+          success: false,
+          message: 'Invalid WhatsApp number',
+          error: 'The provided number is not a valid WhatsApp account'
+        });
+        return;
+      }
+      
+      // Other errors
       res.status(500).json({
         success: false,
         message: 'Failed to send message',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: errorMessage
       });
     }
   }
