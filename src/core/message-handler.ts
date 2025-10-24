@@ -1657,11 +1657,7 @@ export class WPPConnectMessageHandler {
       console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}`);
 
       // Get AI endpoint URL
-      let url = this.env.FW_ENDPOINT || 'http://localhost:3000/api/agents/generalAssistanceAgent/generate/vnext';
-      // Ensure URL has protocol
-      if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        url = 'https://' + url;
-      }
+      const url = this.env.FW_ENDPOINT || 'http://localhost:3000/api/agents/generalAssistanceAgent/generate/vnext';
 
       const jwtSecret = this.env.JWT_SECRET;
       if (!jwtSecret) {
