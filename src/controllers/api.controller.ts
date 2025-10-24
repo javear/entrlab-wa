@@ -374,7 +374,11 @@ export class ApiController {
                 });
             }
 
-            const url = this.env.FW_ENDPOINT || 'http://localhost:3000/api/agents/generalAssistanceAgent/generate/vnext';
+            let url = this.env.FW_ENDPOINT || 'http://localhost:3000/api/agents/generalAssistanceAgent/generate/vnext';
+            // Ensure URL has protocol
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                url = 'https://' + url;
+            }
             const jwtSecret = this.env.JWT_SECRET || 'default-secret';
             const agentCode = clientInfo.ai_agent_code; // Use client's agent code
 
