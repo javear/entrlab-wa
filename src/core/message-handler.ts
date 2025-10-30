@@ -1703,18 +1703,20 @@ export class WPPConnectMessageHandler {
         aud: 'authenticated',
         iat: Math.floor(Date.now() / 1000),
         exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour expiration
-        phone: phoneNumber || 'unknown',
+        identifier: phoneNumber || 'unknown',
         role: 'authenticated',
         agent_metadata: {
           agent_code: agentCode,
           status: "active",
           agent_phone: agentPhone,
-          agent_name: agentName,
-          client_id: clientId
+          agent_name: agentName
         },
-        app_metadata: {
-          provider: 'wa',
-          providers: ['wa']
+        client_metadata: {
+          client_id: clientId,
+          client_name: 'WhatsApp Bot',
+          app_metadata: {
+            provider: 'wa'
+          },
         },
         user_metadata: {
           // Phone information
