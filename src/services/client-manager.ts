@@ -178,7 +178,13 @@ export class WPPConnectClientManager {
 
       // Set up message handler
       client.onMessage(async (message) => {
-        console.log(`📨 Message received on WPPConnect client ${clientId}:`, message.body);
+        console.log(`📨 [${clientId}] Message received:`, message.body);
+        console.log(`📨 [${clientId}] Message handlers registered: ${this.messageHandlers.length}`);
+        
+        if (this.messageHandlers.length === 0) {
+          console.warn(`⚠️ [${clientId}] No message handlers registered!`);
+        }
+        
         for (const handler of this.messageHandlers) {
           try {
             await handler(clientId, message);
@@ -480,10 +486,69 @@ export class WPPConnectClientManager {
         case 'isLogged':
         case 'qrReadSuccess':
         case 'inChat':
-          // Client is authenticated and ready
-          clientInfo.status = 'ready';
-          clientInfo.isReady = true;
-          console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
+          // Client is authenticated - but need to wait for WAPI to be fully loaded
+          clientInfo.status = 'authenticated';
+          console.log(`🔐 WPPConnect client ${clientId} authenticated (${status}) - verifying WAPI...`);
+          
+          // Wait for WAPI to be fully loaded before marking as ready
+          setTimeout(async () => {
+            try {
+              const currentClient = this.clients.get(clientId);
+              if (!currentClient || !currentClient.client) {
+                console.warn(`⚠️ Client ${clientId} no longer exists`);
+                return;
+              }
+
+              // Verify WAPI is ready by checking if we can access basic functions
+              const isWapiReady = await currentClient.client.page.evaluate(() => {
+                // @ts-ignore - WAPI is injected in browser context
+                return typeof WAPI !== 'undefined' && 
+                       // @ts-ignore
+                       typeof WAPI.getMessageById === 'function';
+              }).catch((err) => {
+                console.warn(`⚠️ WAPI check failed for ${clientId}:`, err.message);
+                return false;
+              });
+              
+              if (isWapiReady) {
+                currentClient.status = 'ready';
+                currentClient.isReady = true;
+                console.log(`✅ WPPConnect client ${clientId} WAPI verified - now ready`);
+              } else {
+                console.warn(`⚠️ WPPConnect client ${clientId} WAPI not ready after authentication, retrying...`);
+                // Retry after another delay
+                setTimeout(async () => {
+                  const retryClient = this.clients.get(clientId);
+                  if (!retryClient || !retryClient.client) return;
+
+                  const retryCheck = await retryClient.client.page.evaluate(() => {
+                    // @ts-ignore - WAPI is injected in browser context
+                    return typeof WAPI !== 'undefined';
+                  }).catch(() => false);
+                  
+                  if (retryCheck) {
+                    retryClient.status = 'ready';
+                    retryClient.isReady = true;
+                    console.log(`✅ WPPConnect client ${clientId} WAPI verified on retry - now ready`);
+                  } else {
+                    console.error(`❌ WPPConnect client ${clientId} WAPI never became ready`);
+                    // Mark as ready anyway to avoid blocking, but log the issue
+                    retryClient.status = 'ready';
+                    retryClient.isReady = true;
+                    console.log(`⚠️ Marking ${clientId} as ready despite WAPI issues`);
+                  }
+                }, 5000);
+              }
+            } catch (error) {
+              console.error(`❌ Error verifying WAPI for ${clientId}:`, error);
+              // Mark as ready anyway to avoid blocking
+              const fallbackClient = this.clients.get(clientId);
+              if (fallbackClient) {
+                fallbackClient.status = 'ready';
+                fallbackClient.isReady = true;
+              }
+            }
+          }, 3000); // Wait 3 seconds after authentication
           
           // WPPConnect automatically handles session saving via tokenStore
           console.log(`✅ WPPConnect automatically manages session persistence via tokenStore`);

@@ -230,12 +230,8 @@ export class WPPConnectMessageHandler {
         console.log(`✅ sendSeen() executed for ${chatId}`);
         
         // Close chat to return to previous state
-        try {
-          await client.client.closeChat();
-          console.log(`📂 Closed chat`);
-        } catch (closeError) {
-          // Silent fail
-        }
+        // Note: closeChat method not available in WPPConnect v1.30.0
+        // The chat will remain open, which is fine for most use cases
         
         console.log(`✅ Read receipt sent for sender ${senderNumber}`);
         return true;
