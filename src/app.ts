@@ -391,18 +391,7 @@ export class WPPConnectWhatsAppBotApp {
       // Stop memory monitor
       this.memoryMonitor.stop();
       
-      // Disconnect all WPPConnect clients
-      const clients = this.whatsappService.getAllClients();
-      for (const client of clients) {
-        try {
-          await this.whatsappService.disconnectClient(client.clientId);
-          console.log(`✅ WPPConnect client ${client.clientId} disconnected successfully`);
-        } catch (error) {
-          console.error(`❌ Error disconnecting WPPConnect client ${client.clientId}:`, error);
-        }
-      }
-      
-      // Cleanup WhatsApp service
+      // Cleanup WhatsApp service (this will disconnect all clients and clean up resources)
       await this.whatsappService.cleanup();
       console.log('✅ WPPConnect WhatsApp service cleanup completed');
       

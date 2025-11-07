@@ -105,7 +105,13 @@ async function startWPPConnectApplication(): Promise<void> {
     // Clean up any stale PID file from previous instance
     await checkAndCleanupPidFile();
     
-    // Clean up /tokens folder to force fresh session restore from MongoDB
+    // NOTE: We don't delete the entire /tokens folder anymore because:
+    // 1. The restore process already handles cleaning individual client folders before restoring
+    // 2. Complete deletion can cause timing issues with session restoration
+    // 3. Keeping existing folders allows faster reconnection for already-restored sessions
+    // 
+    // If you need to force a complete clean state, you can uncomment the following code:
+    /*
     const tokensPath = path.join(process.cwd(), 'tokens');
     if (fs.existsSync(tokensPath)) {
       console.log('🧹 Cleaning up old /tokens folder for fresh session restore...');
@@ -116,6 +122,8 @@ async function startWPPConnectApplication(): Promise<void> {
         console.warn('⚠️  Could not remove /tokens folder:', error);
       }
     }
+    */
+    console.log('ℹ️  /tokens folder will be managed per-client during session restoration');
     
     console.log('🚀 Starting WPPConnect WhatsApp Bot Application...');
     console.log('🔧 Environment variables:');

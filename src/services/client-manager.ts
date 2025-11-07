@@ -79,7 +79,33 @@ export class WPPConnectClientManager {
 
     // Try to restore session from MongoDB backup first (unless skipped)
     if (!skipRestore) {
-      await this.sessionBackup!.restoreWhatsAppSession(clientId);
+      console.log(`📥 [${clientId}] Restoring session from MongoDB...`);
+      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
+      if (!restored) {
+        console.warn(`⚠️  [${clientId}] Session restoration returned false - may need QR code scan`);
+      } else {
+        console.log(`✅ [${clientId}] Session restored, creating client immediately...`);
+      }
+    } else {
+      // If restoration was already done externally, give it a moment to stabilize
+      console.log(`⏱️  [${clientId}] Session already restored externally, waiting 3s for filesystem to stabilize...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+
+    // Verify session files exist before creating client
+    const sessionPath = path.join(process.cwd(), 'tokens', clientId);
+    const defaultPath = path.join(sessionPath, 'Default');
+    const indexedDBPath = path.join(defaultPath, 'IndexedDB');
+    
+    if (fs.existsSync(sessionPath)) {
+      console.log(`✅ [${clientId}] Session folder exists at: ${sessionPath}`);
+      if (fs.existsSync(indexedDBPath)) {
+        console.log(`✅ [${clientId}] IndexedDB folder exists - session data ready`);
+      } else {
+        console.warn(`⚠️  [${clientId}] IndexedDB folder missing - client may require QR scan`);
+      }
+    } else {
+      console.warn(`⚠️  [${clientId}] Session folder does not exist - client will require QR scan`);
     }
 
     // Add placeholder client info immediately so it's queryable
@@ -131,7 +157,21 @@ export class WPPConnectClientManager {
         
         // Callbacks
         statusFind: (statusSession, session) => {
-          console.log(`📊 [${session}] Status: ${statusSession}`);
+          console.log(`📊 [${session}] WPPConnect Status: ${statusSession}`);
+          
+          // Log detailed status information
+          if (statusSession === 'notLogged') {
+            console.log(`🔓 [${session}] Not logged in - will require QR code scan`);
+          } else if (statusSession === 'isLogged') {
+            console.log(`✅ [${session}] Already logged in - session authenticated`);
+          } else if (statusSession === 'qrReadSuccess') {
+            console.log(`✅ [${session}] QR code scanned successfully`);
+          } else if (statusSession === 'inChat') {
+            console.log(`✅ [${session}] Session is active and in chat`);
+          } else {
+            console.log(`ℹ️  [${session}] Status: ${statusSession}`);
+          }
+          
           this.updateClientStatus(clientId, statusSession);
           
           // WPPConnect TokenStore handles session persistence automatically
@@ -144,13 +184,16 @@ export class WPPConnectClientManager {
         },
         
         // Auto-close settings
-        // Set to 0 to disable, or high value to keep sessions alive
-        // 3 minutes was too short and causing disconnections
-        autoClose: 0, // Disabled - keep sessions alive (prevents unexpected disconnections)
+        // WPPConnect doesn't accept 0 to disable, so use a very high value instead
+        // Setting to 24 hours (86400000 ms) to effectively disable auto-close
+        autoClose: 86400000, // 24 hours - effectively disabled to prevent unexpected disconnections
         
         // Additional options
         disableWelcome: true,
-        updatesLog: true
+        updatesLog: true,
+        
+        // Disable auto-close completely by setting waitForLogin to false
+        waitForLogin: false // Don't wait for login, proceed immediately
       });
 
       console.log(`✅ WPPConnect client created: ${clientId}`);
@@ -178,13 +221,7 @@ export class WPPConnectClientManager {
 
       // Set up message handler
       client.onMessage(async (message) => {
-        console.log(`📨 [${clientId}] Message received:`, message.body);
-        console.log(`📨 [${clientId}] Message handlers registered: ${this.messageHandlers.length}`);
-        
-        if (this.messageHandlers.length === 0) {
-          console.warn(`⚠️ [${clientId}] No message handlers registered!`);
-        }
-        
+        console.log(`📨 Message received on WPPConnect client ${clientId}:`, message.body);
         for (const handler of this.messageHandlers) {
           try {
             await handler(clientId, message);
@@ -464,7 +501,8 @@ export class WPPConnectClientManager {
                             errorMessage.includes('SIGINT') ||
                             errorMessage.includes('profile appears to be in use') ||
                             errorMessage.includes('locked the profile') ||
-                            errorMessage.includes('browser is already running');
+                            errorMessage.includes('browser is already running') ||
+                            errorMessage.includes('Auto Close Called'); // Preserve session on auto-close
       
       if (this.sessionBackup && isAuthFailure && !isBrowserIssue) {
         // Session cleanup handled by WhatsApp session backup service
@@ -486,69 +524,10 @@ export class WPPConnectClientManager {
         case 'isLogged':
         case 'qrReadSuccess':
         case 'inChat':
-          // Client is authenticated - but need to wait for WAPI to be fully loaded
-          clientInfo.status = 'authenticated';
-          console.log(`🔐 WPPConnect client ${clientId} authenticated (${status}) - verifying WAPI...`);
-          
-          // Wait for WAPI to be fully loaded before marking as ready
-          setTimeout(async () => {
-            try {
-              const currentClient = this.clients.get(clientId);
-              if (!currentClient || !currentClient.client) {
-                console.warn(`⚠️ Client ${clientId} no longer exists`);
-                return;
-              }
-
-              // Verify WAPI is ready by checking if we can access basic functions
-              const isWapiReady = await currentClient.client.page.evaluate(() => {
-                // @ts-ignore - WAPI is injected in browser context
-                return typeof WAPI !== 'undefined' && 
-                       // @ts-ignore
-                       typeof WAPI.getMessageById === 'function';
-              }).catch((err) => {
-                console.warn(`⚠️ WAPI check failed for ${clientId}:`, err.message);
-                return false;
-              });
-              
-              if (isWapiReady) {
-                currentClient.status = 'ready';
-                currentClient.isReady = true;
-                console.log(`✅ WPPConnect client ${clientId} WAPI verified - now ready`);
-              } else {
-                console.warn(`⚠️ WPPConnect client ${clientId} WAPI not ready after authentication, retrying...`);
-                // Retry after another delay
-                setTimeout(async () => {
-                  const retryClient = this.clients.get(clientId);
-                  if (!retryClient || !retryClient.client) return;
-
-                  const retryCheck = await retryClient.client.page.evaluate(() => {
-                    // @ts-ignore - WAPI is injected in browser context
-                    return typeof WAPI !== 'undefined';
-                  }).catch(() => false);
-                  
-                  if (retryCheck) {
-                    retryClient.status = 'ready';
-                    retryClient.isReady = true;
-                    console.log(`✅ WPPConnect client ${clientId} WAPI verified on retry - now ready`);
-                  } else {
-                    console.error(`❌ WPPConnect client ${clientId} WAPI never became ready`);
-                    // Mark as ready anyway to avoid blocking, but log the issue
-                    retryClient.status = 'ready';
-                    retryClient.isReady = true;
-                    console.log(`⚠️ Marking ${clientId} as ready despite WAPI issues`);
-                  }
-                }, 5000);
-              }
-            } catch (error) {
-              console.error(`❌ Error verifying WAPI for ${clientId}:`, error);
-              // Mark as ready anyway to avoid blocking
-              const fallbackClient = this.clients.get(clientId);
-              if (fallbackClient) {
-                fallbackClient.status = 'ready';
-                fallbackClient.isReady = true;
-              }
-            }
-          }, 3000); // Wait 3 seconds after authentication
+          // Client is authenticated and ready
+          clientInfo.status = 'ready';
+          clientInfo.isReady = true;
+          console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
           
           // WPPConnect automatically handles session saving via tokenStore
           console.log(`✅ WPPConnect automatically manages session persistence via tokenStore`);
@@ -764,14 +743,29 @@ export class WPPConnectClientManager {
           const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
           
           if (restored) {
-            console.log(`✅ [${clientId}] Session restored, waiting 5s before creating client...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            console.log(`✅ [${clientId}] Session restored successfully`);
             
+            // Create client with skipRestore=true since we already restored
+            // The createClient method will handle the appropriate wait time
             console.log(`🚀 [${clientId}] Creating WPPConnect client...`);
-            await this.createClient(clientId, true); // Skip restore since we already did it
             
-            console.log(`✅ [${clientId}] Client created, waiting 3s before next...`);
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            try {
+              await this.createClient(clientId, true);
+              console.log(`✅ [${clientId}] Client created, waiting 2s before next session...`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            } catch (clientError: any) {
+              // Handle specific error types
+              if (clientError?.message?.includes('Auto Close Called')) {
+                console.warn(`⚠️  [${clientId}] Client auto-closed during initialization (likely due to memory pressure)`);
+                console.warn(`⚠️  [${clientId}] Session is saved and will reconnect on next cycle or manual trigger`);
+                // Remove the failed client from the map so it can be retried
+                this.clients.delete(clientId);
+              } else {
+                console.error(`❌ [${clientId}] Failed to create client:`, clientError);
+                // Remove failed client
+                this.clients.delete(clientId);
+              }
+            }
           } else {
             console.warn(`⚠️  [${clientId}] Session restore returned false - skipping client creation`);
           }
@@ -853,13 +847,31 @@ export class WPPConnectClientManager {
   private async performHealthCheck(): Promise<void> {
     for (const [clientId, clientInfo] of this.clients) {
       try {
-        if (clientInfo.isReady) {
-          // Test if client is still responsive
-          const isConnected = await clientInfo.client.isConnected();
-          if (!isConnected) {
-            console.log(`⚠️ WPPConnect client ${clientId} is not connected, marking as disconnected`);
-            clientInfo.status = 'disconnected';
-            clientInfo.isReady = false;
+        if (clientInfo.isReady && clientInfo.client) {
+          // Check if browser/page is still open before trying to communicate
+          try {
+            // Test if client is still responsive
+            const isConnected = await clientInfo.client.isConnected();
+            if (!isConnected) {
+              console.log(`⚠️ WPPConnect client ${clientId} is not connected, marking as disconnected`);
+              clientInfo.status = 'disconnected';
+              clientInfo.isReady = false;
+            }
+          } catch (checkError: any) {
+            // Handle specific errors where the browser/target is already closed
+            const errorMsg = checkError?.message || String(checkError);
+            if (errorMsg.includes('Target closed') || 
+                errorMsg.includes('Session closed') ||
+                errorMsg.includes('Protocol error')) {
+              console.log(`ℹ️  Client ${clientId} browser already closed, marking as disconnected`);
+              clientInfo.status = 'disconnected';
+              clientInfo.isReady = false;
+            } else {
+              // Log other errors but don't fail completely
+              console.warn(`⚠️ Health check error for ${clientId}: ${errorMsg.substring(0, 100)}`);
+              clientInfo.status = 'error';
+              clientInfo.isReady = false;
+            }
           }
         }
       } catch (error) {
@@ -924,28 +936,36 @@ export class WPPConnectClientManager {
   }
 
   public async cleanup(): Promise<void> {
-    console.log('🔄 Starting graceful shutdown...');
+    console.log('🔄 Starting WPPConnect client manager cleanup...');
     
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
+      console.log('✅ Health check interval cleared');
     }
     
     if (this.sessionBackupInterval) {
       clearInterval(this.sessionBackupInterval);
+      console.log('✅ Session backup interval cleared');
     }
 
     // Disconnect all clients
-    for (const [clientId, clientInfo] of this.clients) {
-      try {
-        if (clientInfo.client) {
-          await clientInfo.client.close();
+    const clientCount = this.clients.size;
+    if (clientCount > 0) {
+      console.log(`🔄 Disconnecting ${clientCount} WPPConnect client(s)...`);
+      for (const [clientId, clientInfo] of this.clients) {
+        try {
+          if (clientInfo.client) {
+            await clientInfo.client.close();
+            console.log(`✅ WPPConnect client ${clientId} disconnected`);
+          }
+        } catch (error) {
+          console.error(`❌ Error disconnecting client ${clientId}:`, error);
         }
-      } catch (error) {
-        console.error(`❌ Error disconnecting client ${clientId}:`, error);
       }
     }
 
     this.clients.clear();
+    console.log('✅ Client map cleared');
     
     // Clear retry attempts map
     this.retryAttempts.clear();
@@ -954,6 +974,8 @@ export class WPPConnectClientManager {
     if (MEMORY_CONFIG.GC_AFTER_CLIENT_CLOSE) {
       suggestGC();
     }
+    
+    console.log('✅ WPPConnect client manager cleanup completed');
   }
 
   /**

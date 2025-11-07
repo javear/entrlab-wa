@@ -230,8 +230,12 @@ export class WPPConnectMessageHandler {
         console.log(`✅ sendSeen() executed for ${chatId}`);
         
         // Close chat to return to previous state
-        // Note: closeChat method not available in WPPConnect v1.30.0
-        // The chat will remain open, which is fine for most use cases
+        try {
+          await client.client.closeChat();
+          console.log(`📂 Closed chat`);
+        } catch (closeError) {
+          // Silent fail
+        }
         
         console.log(`✅ Read receipt sent for sender ${senderNumber}`);
         return true;
@@ -1082,6 +1086,19 @@ export class WPPConnectMessageHandler {
           return;
         }
         
+        // Check memory before processing media-heavy operations
+        const memUsage = process.memoryUsage();
+        const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+        const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+        const memPercent = Math.round((heapUsedMB / heapTotalMB) * 100);
+        
+        if (memPercent > 95) {
+          console.warn(`⚠️  High memory usage (${memPercent}%) - may affect media processing`);
+        }
+        
+        // Track if ANY part was successfully sent
+        let anySent = false;
+        
         // Send each part with typing indicator
         for (let i = 0; i < outgoingParts.length; i++) {
           const part = outgoingParts[i];
@@ -1149,6 +1166,12 @@ export class WPPConnectMessageHandler {
                 if (isAnimated) {
                   console.log(`🎭 Sending as animated sticker (GIF/WEBP): ${stickerUrl}`);
                   try {
+                    // Check if memory is critically low before processing
+                    if (memPercent > 97) {
+                      console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker to prevent hang`);
+                      throw new Error(`Memory too low (${memPercent}%) for sticker processing`);
+                    }
+                    
                     await Promise.race([
                       client.client.sendImageAsStickerGif(
                         formattedNumber || '',
@@ -1158,6 +1181,7 @@ export class WPPConnectMessageHandler {
                     ]);
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.log(`✅ Sent animated sticker from ${stickerUrl} (took ${stickerDuration}s)`);
+                    anySent = true; // Mark successful send
                   } catch (stickerErr: any) {
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.error(`❌ Failed to send animated sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
@@ -1167,6 +1191,12 @@ export class WPPConnectMessageHandler {
                 } else {
                   console.log(`🎭 Sending as static sticker: ${stickerUrl}`);
                   try {
+                    // Check if memory is critically low before processing
+                    if (memPercent > 97) {
+                      console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker to prevent hang`);
+                      throw new Error(`Memory too low (${memPercent}%) for sticker processing`);
+                    }
+                    
                     await Promise.race([
                       client.client.sendImageAsSticker(
                         formattedNumber || '',
@@ -1176,6 +1206,7 @@ export class WPPConnectMessageHandler {
                     ]);
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.log(`✅ Sent static sticker from ${stickerUrl} (took ${stickerDuration}s)`);
+                    anySent = true; // Mark successful send
                   } catch (stickerErr: any) {
                     const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
                     console.error(`❌ Failed to send static sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
@@ -1333,6 +1364,7 @@ export class WPPConnectMessageHandler {
                 } else {
                   await client.client.sendText(formattedNumber || '', textContent);
                 }
+                anySent = true; // Mark successful send
               }
             } catch (textErr: any) {
               const errorMsg = textErr?.message || textErr;
@@ -1359,6 +1391,27 @@ export class WPPConnectMessageHandler {
             } catch {}
             
             await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
+        }
+        
+        // Fallback: If nothing was sent (likely due to memory issues), send text-only
+        if (!anySent && formattedResponse) {
+          console.warn(`⚠️  No parts were sent successfully - sending text-only fallback`);
+          try {
+            // Strip all media markers and send clean text
+            const cleanText = formattedResponse
+              .replace(/#sticker:?\s*https?:\/\/[^\s]+/gi, '')
+              .replace(/#loc[:-][^\s]+/gi, '')
+              .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g, '')
+              .trim();
+            
+            if (cleanText) {
+              await client.client.sendText(formattedNumber || '', cleanText);
+              console.log(`✅ Sent text-only fallback`);
+              anySent = true;
+            }
+          } catch (fallbackError) {
+            console.error(`❌ Even text-only fallback failed:`, fallbackError);
           }
         }
         
