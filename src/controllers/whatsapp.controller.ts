@@ -312,7 +312,17 @@ export class WPPConnectWhatsAppController {
    * @swagger
    * /api/whatsapp/clients/{clientId}/send:
    *   post:
-   *     summary: Send message via WPPConnect client
+   *     summary: Send message via WPPConnect client with full media support
+   *     description: |
+   *       Sends a message with support for:
+   *       - Text messages with WhatsApp formatting (bold, italic, etc.)
+   *       - Stickers: Use #sticker:https://example.com/image.png
+   *       - Images: Include image URLs (jpg, png, gif, webp, etc.)
+   *       - Videos: Include video URLs (mp4, webm, etc.)
+   *       - Files: Include file URLs (pdf, doc, etc.)
+   *       - Links: URLs are automatically sent as link previews
+   *       - Locations: Use #loc:latitude;longitude;title format
+   *       - Markdown images: Use ![alt](https://example.com/image.png)
    *     tags: [WPPConnect WhatsApp]
    *     parameters:
    *       - in: path
@@ -336,8 +346,8 @@ export class WPPConnectWhatsAppController {
    *                 example: "6281234567890"
    *               message:
    *                 type: string
-   *                 description: Message to send
-   *                 example: "Hello from WPPConnect!"
+   *                 description: Message to send (supports media markers like #sticker:, #loc:, markdown images, etc.)
+   *                 example: "Hello! #sticker:https://example.com/sticker.png Check out this image: https://example.com/image.jpg"
    *     responses:
    *       200:
    *         description: Message sent successfully
@@ -385,7 +395,8 @@ export class WPPConnectWhatsAppController {
         return;
       }
 
-      await this.whatsappService.sendMessage(clientId, number, message);
+      // Use message handler to send with full media support (stickers, images, links, etc.)
+      await this.messageHandler.sendMessageWithMedia(clientId, number, message);
       
       res.json({
         success: true,

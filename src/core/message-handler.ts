@@ -455,6 +455,227 @@ export class WPPConnectMessageHandler {
     }
   }
 
+  /**
+   * Public method to send a message with full media support (stickers, images, links, etc.)
+   * This is used by the /send API endpoint to send messages with the same rich media handling
+   * as the message handler uses for AI responses.
+   */
+  public async sendMessageWithMedia(clientId: string, number: string, message: string): Promise<void> {
+    // Format number
+    const formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
+    
+    try {
+      console.log(`📤 [${clientId}] Sending message with media support to ${number}`);
+      
+      // Get client
+      const client = this.whatsappService.getClient(clientId);
+      if (!client || !client.client) {
+        throw new Error(`Client ${clientId} not found or not ready`);
+      }
+
+      // Format message for WhatsApp (applies markdown, emoji, etc.)
+      const formattedResponse = this.convertLLMToWhatsApp(message);
+      
+      // Parse response for media URLs and text parts
+      const outgoingParts = this.parseResponseForMedia(formattedResponse);
+      
+      // Check memory before processing media-heavy operations
+      const memUsage = process.memoryUsage();
+      const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+      const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+      const memPercent = Math.round((heapUsedMB / heapTotalMB) * 100);
+      
+      if (memPercent > 95) {
+        console.warn(`⚠️  High memory usage (${memPercent}%) - may affect media processing`);
+      }
+      
+      // Track if ANY part was successfully sent
+      let anySent = false;
+      
+      // Send each part
+      for (let i = 0; i < outgoingParts.length; i++) {
+        const part = outgoingParts[i];
+        if (!part) continue;
+        
+        try {
+          // Show typing before each part
+          await client.client.startTyping(formattedNumber);
+        } catch {}
+        
+        if (part.kind === 'media') {
+          try {
+            const mediaUrl = String(part.value);
+            console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
+            
+            // Handle location
+            if (mediaUrl.startsWith('#loc:') || mediaUrl.startsWith('#loc-')) {
+              const locationData = mediaUrl.replace(/^#loc[:-]/, '').trim();
+              const coords = locationData.split(/[;,]/);
+              if (coords.length >= 2 && coords[0] && coords[1]) {
+                const latitude = coords[0].trim();
+                const longitude = coords[1].trim();
+                const title = coords[2]?.trim() || 'Location';
+                await client.client.sendLocation(formattedNumber, latitude, longitude, title);
+                console.log(`✅ Sent location: ${latitude}, ${longitude}`);
+                anySent = true;
+              }
+            }
+            // Handle sticker
+            else if (mediaUrl.startsWith('#sticker:')) {
+              const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
+              const urlLower = stickerUrl.toLowerCase();
+              const isAnimated = urlLower.match(/\.(gif|webp)(\?.*)?$/i);
+              
+              if (memPercent > 97) {
+                console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker`);
+                throw new Error(`Memory too low for sticker processing`);
+              }
+              
+              const stickerTimeout = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Sticker timeout')), 30000)
+              );
+              
+              if (isAnimated) {
+                await Promise.race([
+                  client.client.sendImageAsStickerGif(formattedNumber, stickerUrl),
+                  stickerTimeout
+                ]);
+                console.log(`✅ Sent animated sticker`);
+                anySent = true;
+              } else {
+                await Promise.race([
+                  client.client.sendImageAsSticker(formattedNumber, stickerUrl),
+                  stickerTimeout
+                ]);
+                console.log(`✅ Sent static sticker`);
+                anySent = true;
+              }
+            }
+            // Handle other media (images, videos, files)
+            else {
+              const urlLower = mediaUrl.toLowerCase();
+              // Check for image extensions (allowing query parameters)
+              if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i)) {
+                if (part.caption) {
+                  await client.client.sendImage(formattedNumber, mediaUrl, undefined, part.caption);
+                } else {
+                  await client.client.sendImage(formattedNumber, mediaUrl);
+                }
+                console.log(`✅ Sent image`);
+                anySent = true;
+              } else {
+                // Send as file (PDFs, documents, videos, audio, archives, etc.)
+                if (part.caption) {
+                  await client.client.sendFile(formattedNumber, mediaUrl, undefined, part.caption);
+                } else {
+                  await client.client.sendFile(formattedNumber, mediaUrl);
+                }
+                console.log(`✅ Sent file: ${mediaUrl}`);
+                anySent = true;
+              }
+            }
+          } catch (mediaErr: any) {
+            console.warn(`⚠️ Failed to send media: ${mediaErr?.message || mediaErr}`);
+            // Fallback: send URL as text
+            try {
+              await client.client.sendText(formattedNumber, String(part.value));
+              anySent = true;
+            } catch {}
+          }
+        } else if (part.kind === 'link') {
+          try {
+            await client.client.sendLinkPreview(formattedNumber, String(part.value), part.caption || '');
+            console.log(`✅ Sent link preview`);
+            anySent = true;
+          } catch (linkErr: any) {
+            console.warn(`⚠️ Failed to send link preview: ${linkErr?.message || linkErr}`);
+            // Fallback: send as text
+            try {
+              const fallbackText = part.caption ? `${part.caption} ${part.value}` : String(part.value);
+              await client.client.sendText(formattedNumber, fallbackText);
+              anySent = true;
+            } catch {}
+          }
+        } else {
+          // Send text part
+          try {
+            const textContent = String(part.value);
+            
+            // Check for sticker in text
+            if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
+              const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
+              if (stickerMatch && stickerMatch[1]) {
+                const stickerUrl = stickerMatch[1];
+                await client.client.sendImageAsSticker(formattedNumber, stickerUrl);
+                console.log(`✅ Sent sticker from text`);
+                
+                // Send remaining text
+                const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
+                if (remainingText) {
+                  await client.client.sendText(formattedNumber, remainingText);
+                  console.log(`✅ Sent remaining text`);
+                }
+                anySent = true;
+              }
+            } else {
+              await client.client.sendText(formattedNumber, textContent);
+              console.log(`✅ Sent text`);
+              anySent = true;
+            }
+          } catch (textErr: any) {
+            console.warn(`⚠️ Error sending text: ${textErr?.message || textErr}`);
+          }
+        }
+        
+        // Delay between parts
+        if (i < outgoingParts.length - 1) {
+          const delayMs = 1000 + Math.floor(Math.random() * 2000);
+          try {
+            await client.client.startTyping(formattedNumber);
+          } catch {}
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      }
+      
+      // Fallback: If nothing was sent, send text-only
+      if (!anySent && formattedResponse) {
+        console.warn(`⚠️  No parts were sent - sending text-only fallback`);
+        try {
+          const cleanText = formattedResponse
+            .replace(/#sticker:?\s*https?:\/\/[^\s]+/gi, '')
+            .replace(/#loc[:-][^\s]+/gi, '')
+            .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g, '')
+            .trim();
+          
+          if (cleanText) {
+            await client.client.sendText(formattedNumber, cleanText);
+            console.log(`✅ Sent text-only fallback`);
+          }
+        } catch (fallbackError) {
+          console.error(`❌ Text-only fallback failed:`, fallbackError);
+          throw fallbackError;
+        }
+      }
+      
+      console.log(`✅ [${clientId}] Message with media sent successfully to ${number}`);
+    } catch (error) {
+      console.error(`❌ Error sending message with media:`, error);
+      throw error;
+    } finally {
+      // Always stop typing indicator after sending (success or error)
+      try {
+        const client = this.whatsappService.getClient(clientId);
+        if (client && client.client) {
+          await client.client.stopTyping(formattedNumber);
+          console.log(`✅ Typing indicator stopped for ${number}`);
+        }
+      } catch (stopTypingError) {
+        // Silent fail - typing might already be stopped or not active
+        console.log(`ℹ️  Typing indicator stop attempted (may already be stopped)`);
+      }
+    }
+  }
+
   private isMediaMessage(message: any): boolean {
     if (!message || !message.type) return false;
     
@@ -1217,13 +1438,14 @@ export class WPPConnectMessageHandler {
               } else {
                 // Determine media type from URL extension or content
                 const urlLower = mediaUrl.toLowerCase();
-                let mimeType = 'application/octet-stream'; // default
+                let mimeType = 'application/octet-stream'; // default (includes PDFs, documents, archives)
                 
-                if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp)$/)) {
+                // Check extensions (allowing query parameters)
+                if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i)) {
                   mimeType = 'image/';
-                } else if (urlLower.match(/\.(mp4|avi|mov|wmv|flv|webm)$/)) {
+                } else if (urlLower.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv|m4v)(\?.*)?$/i)) {
                   mimeType = 'video/';
-                } else if (urlLower.match(/\.(mp3|wav|ogg|m4a|aac)$/)) {
+                } else if (urlLower.match(/\.(mp3|wav|ogg|m4a|aac)(\?.*)?$/i)) {
                   mimeType = 'audio/';
                 }
                 
@@ -1512,8 +1734,8 @@ export class WPPConnectMessageHandler {
     // Each line becomes a separate WhatsApp message bubble
     const rawBlocks = cleanedText.split('\n').map(b => b.trim()).filter(Boolean);
     
-    // Build regex to match media URLs by extension
-    const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)';
+    // Build regex to match media URLs by extension (images, videos, audio, documents, archives)
+    const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|tar|gz)';
     
     // Track pending quotedMsgId that needs to be applied to the next non-empty part
     let pendingQuotedMsgId: string | undefined = globalQuotedMsgId;
@@ -1609,8 +1831,8 @@ export class WPPConnectMessageHandler {
           const textBeforeUrl = linkMatch[1] ? linkMatch[1].trim() : '';
           const url = this.cleanupUrl(linkMatch[2]);
           
-          // Check if URL is NOT a media file (not image/video/audio)
-          const isMediaUrl = /\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac)(\?.*)?$/i.test(url);
+          // Check if URL is NOT a media file (not image/video/audio/documents/archives)
+          const isMediaUrl = /\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|tar|gz)(\?.*)?$/i.test(url);
           
           if (!isMediaUrl && textBeforeUrl) {
             // This is a link preview: text + URL
