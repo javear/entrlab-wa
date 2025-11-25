@@ -1,6 +1,7 @@
 import { create, Whatsapp } from '@wppconnect-team/wppconnect';
 import mongoose from 'mongoose';
 import { WhatsAppSessionBackup } from './whatsapp-session-backup';
+import { createMongoTokenStore } from './tokenstore';
 import fs from 'fs';
 import path from 'path';
 import { MEMORY_CONFIG, getMemoryUsage, suggestGC, needsMemoryWarning } from '../config/memory-config';
@@ -118,18 +119,73 @@ export class WPPConnectClientManager {
     };
     this.clients.set(clientId, placeholderClientInfo);
 
+    // Create message handler function BEFORE client creation
+    // This ensures we can register it immediately after client is created
+    const messageHandler = async (message: any) => {
+      // CRITICAL: Log EVERYTHING immediately - this proves the callback is being called
+      console.log(`\n🔔🔔🔔 [${clientId}] ========== MESSAGE EVENT RECEIVED ==========`);
+      console.log(`📥 Type: ${message.type || 'unknown'}`);
+      console.log(`📥 From: ${message.from || 'unknown'}`);
+      console.log(`📥 Body: ${message.body?.substring(0, 100) || '[no body]'}`);
+      console.log(`📥 Timestamp: ${message.timestamp || Date.now()}`);
+      console.log(`📥 Message Object Keys: ${Object.keys(message || {}).join(', ')}`);
+      
+      try {
+        const clientInfo = this.clients.get(clientId);
+        console.log(`🔍 [${clientId}] Client info check: exists=${!!clientInfo}, isReady=${clientInfo?.isReady}, status=${clientInfo?.status}`);
+        
+        if (!clientInfo) {
+          console.error(`❌ [${clientId}] CRITICAL: Client info not found in clients map!`);
+          return;
+        }
+        
+        if (!clientInfo.isReady) {
+          console.warn(`⏸️  [${clientId}] Client not ready yet (isReady: ${clientInfo.isReady}), storing message for later...`);
+          // Don't return - let it try to process anyway, just log
+        }
+        
+        console.log(`📨 [${clientId}] Proceeding with message processing...`);
+        console.log(`📨 Handler count: ${this.messageHandlers.length}`);
+        
+        if (this.messageHandlers.length === 0) {
+          console.error(`❌ [${clientId}] CRITICAL: No message handlers registered! Messages will be lost!`);
+          return;
+        }
+        
+        // Process messages
+        console.log(`🚀 [${clientId}] Calling message handlers...`);
+        for (let i = 0; i < this.messageHandlers.length; i++) {
+          const handler = this.messageHandlers[i];
+          if (!handler) {
+            console.warn(`⚠️  [${clientId}] Handler ${i + 1} is undefined, skipping`);
+            continue;
+          }
+          try {
+            console.log(`🔄 [${clientId}] Executing handler ${i + 1}/${this.messageHandlers.length}...`);
+            await handler(clientId, message);
+            console.log(`✅ [${clientId}] Handler ${i + 1} completed`);
+          } catch (error) {
+            console.error(`❌ [${clientId}] Error in message handler ${i + 1}:`, error);
+            console.error(`❌ [${clientId}] Error stack:`, error instanceof Error ? error.stack : 'No stack');
+          }
+        }
+        console.log(`✅ [${clientId}] ========== MESSAGE PROCESSING COMPLETE ==========\n`);
+      } catch (error) {
+        console.error(`❌ [${clientId}] CRITICAL ERROR in onMessage callback:`, error);
+        console.error(`❌ [${clientId}] Error stack:`, error instanceof Error ? error.stack : 'No stack');
+      }
+    };
+
     try {
-      // Create WPPConnect client with minimal TokenStore
-      // Session persistence handled by WhatsApp session backup/restore
+      // Create WPPConnect client with MongoDB TokenStore
+      // WPPConnect needs TokenStore to save/restore authentication tokens
+      // This works together with browser session files for complete session persistence
+      const mongoTokenStore = createMongoTokenStore();
       const client = await create({
         session: clientId,
-        // Use a simple TokenStore that doesn't interfere with WhatsApp backup
-        tokenStore: {
-          getToken: async () => undefined, // Don't restore from TokenStore
-          setToken: async () => true, // Don't save to TokenStore
-          removeToken: async () => true,
-          listTokens: async () => []
-        },
+        // Use MongoDB TokenStore to save/restore WPPConnect authentication tokens
+        // This is REQUIRED - without tokens, sessions will always become unpaired
+        tokenStore: mongoTokenStore,
         
         // Browser configuration
         headless: true,
@@ -164,10 +220,31 @@ export class WPPConnectClientManager {
             console.log(`🔓 [${session}] Not logged in - will require QR code scan`);
           } else if (statusSession === 'isLogged') {
             console.log(`✅ [${session}] Already logged in - session authenticated`);
+            // Mark as ready when logged in
+            const clientInfo = this.clients.get(clientId);
+            if (clientInfo) {
+              clientInfo.isReady = true;
+              clientInfo.status = 'ready';
+              console.log(`✅ [${clientId}] Client marked as ready (isLogged status)`);
+            }
           } else if (statusSession === 'qrReadSuccess') {
-            console.log(`✅ [${session}] QR code scanned successfully`);
+            console.log(`✅ [${session}] QR code scanned successfully - authentication in progress...`);
+            // Update status immediately when QR is scanned
+            const clientInfo = this.clients.get(clientId);
+            if (clientInfo) {
+              clientInfo.status = 'authenticated';
+              clientInfo.qrCode = undefined; // Clear QR code after successful scan
+              console.log(`✅ [${clientId}] Status updated to authenticated after QR scan`);
+            }
           } else if (statusSession === 'inChat') {
             console.log(`✅ [${session}] Session is active and in chat`);
+            // Mark as ready when in chat
+            const clientInfo = this.clients.get(clientId);
+            if (clientInfo) {
+              clientInfo.isReady = true;
+              clientInfo.status = 'ready';
+              console.log(`✅ [${clientId}] Client marked as ready (inChat status)`);
+            }
           } else {
             console.log(`ℹ️  [${session}] Status: ${statusSession}`);
           }
@@ -179,8 +256,19 @@ export class WPPConnectClientManager {
         },
         
         catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
-          console.log(`📱 QR Code generated for ${clientId} (attempt ${attempts}) - Access via /api/whatsapp/clients/${clientId}/qr-image`);
+          console.log(`📱 QR Code generated for ${clientId} (attempt ${attempts})`);
+          console.log(`📱 QR Code URL: ${urlCode || 'N/A'}`);
+          console.log(`📱 QR Code size: ${base64Qr?.length || 0} bytes`);
+          console.log(`📱 Access QR image via: GET /api/whatsapp/clients/${clientId}/qr-image`);
+          console.log(`⚠️  IMPORTANT: QR codes expire after ~20 seconds. Scan quickly!`);
+          console.log(`📱 Scan with WhatsApp: Settings > Linked Devices > Link a Device`);
           this.updateClientQR(clientId, base64Qr);
+          
+          // Log QR code data for debugging (first 100 chars of base64)
+          if (base64Qr) {
+            const preview = base64Qr.substring(0, 100);
+            console.log(`📱 QR Preview: ${preview}...`);
+          }
         },
         
         // Auto-close settings
@@ -192,11 +280,22 @@ export class WPPConnectClientManager {
         disableWelcome: true,
         updatesLog: true,
         
-        // Disable auto-close completely by setting waitForLogin to false
-        waitForLogin: false // Don't wait for login, proceed immediately
+        // Don't wait for login - proceed immediately (client is already authenticated from restored session)
+        waitForLogin: false
       });
 
       console.log(`✅ WPPConnect client created: ${clientId}`);
+      
+      // Store handler reference for potential retry
+      const clientInfoForStorage = this.clients.get(clientId);
+      if (clientInfoForStorage) {
+        (clientInfoForStorage as any)._messageHandler = messageHandler;
+        (clientInfoForStorage as any)._messageHandlerRegistered = false;
+      }
+      
+      // Register message handler - must wait until onMessage is exposed
+      // WPPConnect exposes onMessage after wapi.js injection, so we'll register in CONNECTED state
+      console.log(`📋 [${clientId}] Message handler function created (will register when wapi.js exposes onMessage)`);
 
       // Check for QR code manually (catchQR callback sometimes doesn't fire)
       setImmediate(async () => {
@@ -216,18 +315,6 @@ export class WPPConnectClientManager {
           }
         } catch (error) {
           console.error(`❌ [${clientId}] QR check error:`, error);
-        }
-      });
-
-      // Set up message handler
-      client.onMessage(async (message) => {
-        console.log(`📨 Message received on WPPConnect client ${clientId}:`, message.body);
-        for (const handler of this.messageHandlers) {
-          try {
-            await handler(clientId, message);
-          } catch (error) {
-            console.error(`❌ Error in message handler for ${clientId}:`, error);
-          }
         }
       });
 
@@ -296,12 +383,80 @@ export class WPPConnectClientManager {
 
       // Set up ready handler
       client.onStateChange(async (state) => {
+        console.log(`🔄 [${clientId}] onStateChange event: ${state}`);
+        
+        // Mark as ready when CONNECTED
         if (state === 'CONNECTED') {
           const clientInfo = this.clients.get(clientId);
           if (clientInfo) {
             clientInfo.status = 'ready';
             clientInfo.isReady = true;
             clientInfo.lastActivity = new Date();
+            
+            // ALWAYS re-register handlers when CONNECTED - even if registered earlier
+            // Handlers registered in UNPAIRED state may not work properly after connection
+            // Wait 3 seconds after CONNECTED to ensure everything is fully ready and stable
+            setTimeout(() => {
+              console.log(`📋 [${clientId}] Re-registering message handlers in CONNECTED state (ensures proper registration)...`);
+              
+              // Verify onMessage exists
+              if (typeof client.onMessage !== 'function') {
+                console.error(`❌ [${clientId}] CRITICAL: client.onMessage is not a function! Type: ${typeof client.onMessage}`);
+                const clientKeys = Object.keys(client).filter(k => k.toLowerCase().includes('message') || k.toLowerCase().includes('on'));
+                console.error(`❌ [${clientId}] Message-related properties: ${clientKeys.join(', ') || 'none found'}`);
+                return;
+              }
+              
+              const messageHandler = (clientInfo as any)._messageHandler;
+              if (!messageHandler) {
+                console.error(`❌ [${clientId}] CRITICAL: Message handler function not found in clientInfo!`);
+                return;
+              }
+              
+              try {
+                // Force re-registration - this ensures handlers work after full connection
+                console.log(`📝 [${clientId}] Registering client.onMessage() handler...`);
+                client.onMessage(messageHandler);
+                console.log(`✅ [${clientId}] client.onMessage() registered`);
+                
+                // Also register onAnyMessage as fallback
+                if (typeof client.onAnyMessage === 'function') {
+                  client.onAnyMessage(async (msg: any) => {
+                    console.log(`\n🔔🔔🔔 [${clientId}] ========== onAnyMessage CALLBACK EXECUTED ==========`);
+                    console.log(`📥 Type: ${msg.type || 'unknown'}, From: ${msg.from || 'unknown'}`);
+                    await messageHandler(msg);
+                  });
+                  console.log(`✅ [${clientId}] client.onAnyMessage() registered`);
+                } else {
+                  console.warn(`⚠️  [${clientId}] client.onAnyMessage is not available`);
+                }
+                
+                (clientInfo as any)._messageHandlerRegistered = true;
+                console.log(`✅ [${clientId}] ✅✅✅ MESSAGE HANDLERS REGISTERED IN CONNECTED STATE ✅✅✅`);
+                console.log(`🧪 [${clientId}] Ready to receive messages!`);
+                console.log(`🧪 [${clientId}] Send a test message NOW - you should see '🔔🔔🔔 MESSAGE EVENT RECEIVED' logs`);
+                console.log(`🧪 [${clientId}] If no logs appear, WPPConnect may not be receiving messages from WhatsApp`);
+                
+                // Test: Try to verify handler registration by checking if it's actually working
+                setTimeout(() => {
+                  console.log(`🧪 [${clientId}] Handler verification: onMessage type = ${typeof client.onMessage}`);
+                  console.log(`🧪 [${clientId}] If messages still don't work, check:`);
+                  console.log(`🧪    1. Phone is online and connected`);
+                  console.log(`🧪    2. WhatsApp Web shows as connected on phone`);
+                  console.log(`🧪    3. Browser session is synced with phone`);
+                }, 5000);
+              } catch (regError) {
+                console.error(`❌ [${clientId}] CRITICAL: Error registering handlers:`, regError);
+                console.error(`❌ [${clientId}] Error details:`, regError instanceof Error ? regError.stack : regError);
+              }
+            }, 3000); // Wait 3 seconds after CONNECTED
+            
+            const handlerCount = this.messageHandlers.length;
+            console.log(`✅ [${clientId}] Client connected and ready (state: ${state}) - handler registered: ${(clientInfo as any)._messageHandlerRegistered}, available handlers: ${handlerCount}`);
+            
+            if (handlerCount === 0) {
+              console.warn(`⚠️  [${clientId}] WARNING: Client is ready but no message handlers are registered! Messages will not be processed.`);
+            }
             
             // Backup WhatsApp session to MongoDB after successful connection
             setImmediate(async () => {
@@ -326,12 +481,37 @@ export class WPPConnectClientManager {
           this.updateClientPhoneNumber(clientId);
         }
         
-        // Handle disconnection states
+        // Handle disconnection states - register handlers when onMessage is exposed (even if unpaired)
+        // This ensures handlers are ready when QR is scanned and state becomes CONNECTED
         if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
           const clientInfo = this.clients.get(clientId);
           if (clientInfo) {
             clientInfo.status = 'disconnected';
             clientInfo.isReady = false;
+            
+            // Register handlers now (onMessage is exposed even in UNPAIRED state)
+            // This ensures handlers are ready when QR is scanned and state becomes CONNECTED
+            const alreadyRegistered = (clientInfo as any)._messageHandlerRegistered;
+            if (!alreadyRegistered && typeof client.onMessage === 'function') {
+              console.log(`📋 [${clientId}] Session is unpaired, but registering handlers now (will be active after QR scan)...`);
+              
+              setTimeout(() => {
+                const messageHandler = (clientInfo as any)._messageHandler;
+                if (messageHandler) {
+                  try {
+                    client.onMessage(messageHandler);
+                    client.onAnyMessage(async (msg: any) => {
+                      console.log(`\n🔔🔔🔔 [${clientId}] ========== onAnyMessage CALLBACK EXECUTED ==========`);
+                      await messageHandler(msg);
+                    });
+                    (clientInfo as any)._messageHandlerRegistered = true;
+                    console.log(`✅ [${clientId}] Handlers registered (waiting for QR scan to connect)`);
+                  } catch (regError) {
+                    console.error(`❌ [${clientId}] Error registering handlers in UNPAIRED state:`, regError);
+                  }
+                }
+              }, 2000);
+            }
           }
         }
         
@@ -572,6 +752,17 @@ export class WPPConnectClientManager {
           }
           break;
         case 'desconnectedMobile':
+          // Phone disconnected - this happens if QR scan fails or phone disconnects
+          console.log(`📱 [${clientId}] Phone disconnected (desconnectedMobile)`);
+          console.log(`📱 [${clientId}] This usually means:`);
+          console.log(`📱   1. QR code expired before scan (QR codes expire in ~20 seconds)`);
+          console.log(`📱   2. Scan failed or was rejected`);
+          console.log(`📱   3. Phone lost connection during authentication`);
+          console.log(`📱 [${clientId}] Client will need a fresh QR code - check status and get new QR`);
+          clientInfo.status = 'qr_required'; // Allow new QR generation
+          clientInfo.isReady = false;
+          clientInfo.qrCode = undefined; // Clear old QR so new one can be generated
+          break;
         case 'serverClose':
           clientInfo.status = 'disconnected';
           clientInfo.isReady = false;
@@ -710,6 +901,7 @@ export class WPPConnectClientManager {
 
   public addMessageHandler(handler: (clientId: string, message: any) => Promise<void>): void {
     this.messageHandlers.push(handler);
+    console.log(`✅ Message handler added to client manager (total: ${this.messageHandlers.length} handler(s))`);
   }
 
   public async restoreExistingSessions(): Promise<void> {

@@ -319,10 +319,15 @@ export class WPPConnectMessageHandler {
   }
 
   public async handleIncomingMessage(clientId: string, message: any): Promise<void> {
+    console.log(`\n🎯🎯🎯 [${clientId}] ========== handleIncomingMessage CALLED ==========`);
+    console.log(`🎯 Message type: ${message.type || 'unknown'}`);
+    console.log(`🎯 Message from: ${message.from || 'unknown'}`);
+    console.log(`🎯 Message body: ${message.body?.substring(0, 100) || '[no body]'}`);
+    
     try {
-      const senderNumber = message.from.replace('@c.us', '');
+      const senderNumber = message.from?.replace('@c.us', '') || 'unknown';
       const userKey = this.getUserKey(clientId, senderNumber);
-      console.log(`📨 [${clientId}] Message from ${senderNumber} [${message.type}]`);
+      console.log(`📨 [${clientId}] Processing message from ${senderNumber} [${message.type}]`);
       
       // Extract and store contact information
       const contactInfo = this.extractContactInfo(message);
@@ -342,6 +347,7 @@ export class WPPConnectMessageHandler {
 
       // In production, check if sender is allowed
       if (isProduction && allowedNumbers.length > 0 && !allowedNumbers.includes(senderNumber)) {
+        console.log(`🚫 [${clientId}] Message from ${senderNumber} blocked (not in ALLOWED_NUMBERS): ${allowedNumbers.join(', ')}`);
         return;
       }
 
@@ -524,7 +530,8 @@ export class WPPConnectMessageHandler {
             else if (mediaUrl.startsWith('#sticker:')) {
               const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
               const urlLower = stickerUrl.toLowerCase();
-              const isAnimated = urlLower.match(/\.(gif|webp)(\?.*)?$/i);
+              // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
+              const isAnimated = urlLower.match(/\.(gif|webp)(?=\?|#|$)/i);
               
               if (memPercent > 97) {
                 console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker`);
@@ -555,7 +562,8 @@ export class WPPConnectMessageHandler {
             else {
               const urlLower = mediaUrl.toLowerCase();
               // Check for image extensions (allowing query parameters)
-              if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i)) {
+              // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
+              if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(?=\?|#|$)/i)) {
                 if (part.caption) {
                   await client.client.sendImage(formattedNumber, mediaUrl, undefined, part.caption);
                 } else {
@@ -1373,7 +1381,8 @@ export class WPPConnectMessageHandler {
                 console.log(`🔍 URL lowercase: ${urlLower}`);
                 
                 // Check if it's an animated sticker (GIF or WEBP)
-                const isAnimated = urlLower.match(/\.(gif|webp)(\?.*)?$/i);
+                // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
+              const isAnimated = urlLower.match(/\.(gif|webp)(?=\?|#|$)/i);
                 console.log(`🔍 isAnimated match result: ${isAnimated ? 'YES - ' + isAnimated[0] : 'NO'}`);
                 
                 const stickerStartTime = Date.now();
@@ -1441,11 +1450,13 @@ export class WPPConnectMessageHandler {
                 let mimeType = 'application/octet-stream'; // default (includes PDFs, documents, archives)
                 
                 // Check extensions (allowing query parameters)
-                if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i)) {
+                // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
+                if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(?=\?|#|$)/i)) {
                   mimeType = 'image/';
-                } else if (urlLower.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv|m4v)(\?.*)?$/i)) {
+                // Support extensions in middle of URL
+                } else if (urlLower.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv|m4v)(?=\?|#|$)/i)) {
                   mimeType = 'video/';
-                } else if (urlLower.match(/\.(mp3|wav|ogg|m4a|aac)(\?.*)?$/i)) {
+                } else if (urlLower.match(/\.(mp3|wav|ogg|m4a|aac)(?=\?|#|$)/i)) {
                   mimeType = 'audio/';
                 }
                 
@@ -1656,8 +1667,10 @@ export class WPPConnectMessageHandler {
     // Remove parentheses/brackets wrapping URLs (for media files)
     // Pattern: (https://example.com/image.png) -> https://example.com/image.png
     // Pattern: [https://example.com/file.pdf] -> https://example.com/file.pdf
-    text = text.replace(/\(\s*(https?:\/\/[^\s\)]+\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\)]*)?)\s*\)/gi, '$1');
-    text = text.replace(/\[\s*(https?:\/\/[^\s\]]+\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\]]*)?)\s*\]/gi, '$1');
+    // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
+    // Use non-greedy matching to find extension before query params
+    text = text.replace(/\(\s*(https?:\/\/[^\s\)]*?\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\)]*)?)\s*\)/gi, '$1');
+    text = text.replace(/\[\s*(https?:\/\/[^\s\]]*?\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\]]*)?)\s*\]/gi, '$1');
     
     // Protect code blocks from being split
     const codeBlockTokens: string[] = [];
@@ -1696,7 +1709,8 @@ export class WPPConnectMessageHandler {
       const cleanedUrl = this.cleanupUrl(String(url));
       
       // Check if this is a GIF or WEBP - treat as animated sticker
-      const isAnimatedImage = /\.(gif|webp)(\?.*)?$/i.test(cleanedUrl);
+      // Support extensions in middle of URL (e.g., https://example.com/image.png?params)
+      const isAnimatedImage = /\.(gif|webp)(?=\?|#|$)/i.test(cleanedUrl);
       
       const mediaItem: { url: string; caption?: string; isSticker?: boolean } = { 
         url: cleanedUrl,
@@ -1832,7 +1846,8 @@ export class WPPConnectMessageHandler {
           const url = this.cleanupUrl(linkMatch[2]);
           
           // Check if URL is NOT a media file (not image/video/audio/documents/archives)
-          const isMediaUrl = /\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|tar|gz)(\?.*)?$/i.test(url);
+          // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
+          const isMediaUrl = /\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|tar|gz)(?=\?|#|$)/i.test(url);
           
           if (!isMediaUrl && textBeforeUrl) {
             // This is a link preview: text + URL

@@ -223,10 +223,28 @@ export class WPPConnectWhatsAppController {
         return;
       }
 
+      // If no QR code stored, try to fetch a fresh one from WPPConnect
+      if (!client.qrCode) {
+        console.log(`📱 [${clientId}] No stored QR code, attempting to fetch fresh QR from WPPConnect...`);
+        try {
+          const clientManager = (this.whatsappService as any).clientManager;
+          const clientInfo = clientManager?.clients?.get?.(clientId);
+          if (clientInfo?.client) {
+            const qrData = await clientInfo.client.getQrCode();
+            if (qrData?.base64Image) {
+              console.log(`✅ [${clientId}] Fresh QR code fetched successfully`);
+              client.qrCode = qrData.base64Image;
+            }
+          }
+        } catch (qrError: any) {
+          console.warn(`⚠️  [${clientId}] Could not fetch fresh QR code: ${qrError?.message || qrError}`);
+        }
+      }
+
       if (!client.qrCode) {
         res.status(404).json({
           success: false,
-          message: `No QR code available for this client (status: ${client.status})`
+          message: `No QR code available for this client (status: ${client.status}). QR codes expire after ~20 seconds. Try resetting the client or wait for a new QR to be generated.`
         });
         return;
       }
@@ -235,9 +253,14 @@ export class WPPConnectWhatsAppController {
       const base64Data = client.qrCode.replace(/^data:image\/png;base64,/, '');
       const imageBuffer = Buffer.from(base64Data, 'base64');
 
+      console.log(`📱 [${clientId}] Serving QR code image (${imageBuffer.length} bytes)`);
+
       res.set({
         'Content-Type': 'image/png',
-        'Content-Length': imageBuffer.length
+        'Content-Length': imageBuffer.length,
+        'Cache-Control': 'no-cache, no-store, must-revalidate', // Prevent caching of QR codes
+        'Pragma': 'no-cache',
+        'Expires': '0'
       });
       res.send(imageBuffer);
     } catch (error) {
