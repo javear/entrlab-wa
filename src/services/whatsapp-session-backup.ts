@@ -99,6 +99,11 @@ export class WhatsAppSessionBackup {
    * Backup only WhatsApp Web essential data
    */
   async backupWhatsAppSession(clientId: string): Promise<boolean> {
+    const BACKUP_TIMEOUT_MS = 300000; // 5 minutes max for backup
+    let archive: archiver.Archiver | null = null;
+    let uploadStream: any = null;
+    let backupStartedAt = Date.now();
+
     try {
       console.log(`📦 [${clientId}] Starting WhatsApp-specific session backup...`);
       
@@ -114,76 +119,147 @@ export class WhatsAppSessionBackup {
         return false;
       }
 
-      // Get only WhatsApp essential files
-      const essentialFiles = this.getWhatsAppEssentialFiles(sessionPath);
-      console.log(`📋 [${clientId}] WhatsApp essential files: ${essentialFiles.join(', ')}`);
-
-      if (essentialFiles.length === 0) {
-        console.warn(`⚠️  [${clientId}] No WhatsApp essential files found`);
+      // Check if session appears to be authenticated before backing up
+      const localStoragePath = path.join(defaultPath, 'Local Storage', 'leveldb');
+      const indexedDBPath = path.join(defaultPath, 'IndexedDB');
+      
+      if (!fs.existsSync(localStoragePath) && !fs.existsSync(indexedDBPath)) {
+        console.warn(`⚠️  [${clientId}] Session folder exists but appears empty/unauthenticated - skipping backup`);
         return false;
       }
 
-      // Create archive with WhatsApp data only - balanced compression
-      const archive = archiver('zip', { 
+      // COMPREHENSIVE BACKUP: Archive entire session directory (like advance_whatsapp branch)
+      // Only exclude problematic lock files that prevent restoration
+      // This ensures 100% session preservation including all cache and state files
+      console.log(`📦 [${clientId}] Starting COMPREHENSIVE session backup (entire directory)...`);
+      console.log(`📁 [${clientId}] Backing up from: ${sessionPath}`);
+
+      // Create archive with entire session - balanced compression
+      archive = archiver('zip', { 
         zlib: { level: MEMORY_CONFIG.BACKUP_COMPRESSION_LEVEL }, // Balanced compression
         highWaterMark: MEMORY_CONFIG.BACKUP_CHUNK_SIZE // Control memory usage
       });
 
-      const uploadStream = this.gridFS.openUploadStream(`${clientId}_whatsapp_session.zip`, {
+      // Track archive progress
+      let filesArchived = 0;
+      let archiveSize = 0;
+      if (archive) {
+        archive.on('entry', (entry) => {
+          filesArchived++;
+          if (filesArchived % 100 === 0 && archive) {
+            const currentSize = archive.pointer() || 0;
+            console.log(`📦 [${clientId}] Archiving... ${filesArchived} files processed, ${(currentSize / 1024 / 1024).toFixed(2)} MB`);
+          }
+        });
+
+        archive.on('error', (err) => {
+          console.error(`❌ [${clientId}] Archive error:`, err);
+          throw err;
+        });
+      }
+
+      uploadStream = this.gridFS.openUploadStream(`${clientId}_whatsapp_session.zip`, {
         metadata: {
           clientId,
           timestamp: new Date(),
-          type: 'whatsapp_specific',
-          fileCount: essentialFiles.length
+          type: 'whatsapp_specific'
         }
       });
 
       archive.pipe(uploadStream);
 
-      // Add WhatsApp-specific files
-      for (const file of essentialFiles) {
-        const filePath = file === 'Local State' 
-          ? path.join(sessionPath, file)
-          : path.join(defaultPath, file);
-          
-        if (fs.existsSync(filePath)) {
-          const stat = fs.statSync(filePath);
-          if (stat.isDirectory()) {
-            // Add WhatsApp data directories
-            archive.directory(filePath, file);
-          } else if (file === 'Local State') {
-            // Clean and add Local State
-            const cleanedContent = this.cleanLocalStateFile(filePath);
-            archive.append(cleanedContent, { name: file });
-          } else {
-            // Add regular files
-            archive.file(filePath, { name: file });
-          }
+      // Archive ENTIRE session directory, excluding ONLY problematic lock files
+      // This matches advance_whatsapp branch approach for complete session preservation
+      archive.directory(sessionPath, false, (entry) => {
+        // Only exclude files that are guaranteed to cause issues during restoration
+        const problematicFiles = [
+          'SingletonLock',
+          'lockfile',
+          'SingletonSocket',
+          'SingletonCookie',
+          'DevToolsActivePort',
+          'RunningChromeVersion',
+          'Last Version',
+          'ChromeFeatureState',
+          'Variations'
+        ];
+        
+        // Exclude only problematic lock files, include EVERYTHING else (cache, Service Worker, etc.)
+        const entryName = entry.name || entry.prefix || '';
+        if (problematicFiles.some(problem => entryName.includes(problem))) {
+          return false;
         }
-      }
-
-      await archive.finalize();
-
-      return new Promise((resolve, reject) => {
-        uploadStream.on('finish', () => {
-          console.log(`✅ [${clientId}] WhatsApp session backed up to MongoDB (${archive.pointer()} bytes)`);
-          
-          // Suggest garbage collection after large operation
-          if (MEMORY_CONFIG.GC_AFTER_LARGE_OPERATION) {
-            suggestGC();
-          }
-          
-          resolve(true);
-        });
-
-        uploadStream.on('error', (error) => {
-          console.error(`❌ [${clientId}] WhatsApp backup failed:`, error);
-          reject(error);
-        });
+        return entry;
       });
 
-    } catch (error) {
-      console.error(`❌ [${clientId}] WhatsApp session backup error:`, error);
+      console.log(`📦 [${clientId}] Finalizing archive...`);
+      await archive.finalize();
+      archiveSize = archive.pointer() || 0;
+      console.log(`📦 [${clientId}] Archive finalized: ${filesArchived} files, ${(archiveSize / 1024 / 1024).toFixed(2)} MB`);
+
+      // Wait for upload to complete with timeout
+      return await Promise.race([
+        new Promise<boolean>((resolve, reject) => {
+          uploadStream.on('finish', async () => {
+            const elapsed = ((Date.now() - backupStartedAt) / 1000).toFixed(1);
+            console.log(`✅ [${clientId}] WhatsApp session backed up to MongoDB in ${elapsed}s`);
+            console.log(`📦 [${clientId}] Backup size: ${(archiveSize / 1024 / 1024).toFixed(2)} MB, ${filesArchived} files`);
+            console.log(`📦 [${clientId}] GridFS file ID: ${uploadStream.id}`);
+            
+            // Verify backup was actually saved
+            try {
+              await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for GridFS to index
+              const verifyFiles = await this.gridFS.find({ 
+                filename: `${clientId}_whatsapp_session.zip`,
+                'metadata.clientId': clientId
+              }).sort({ uploadDate: -1 }).limit(1).toArray();
+              
+              if (verifyFiles.length > 0 && verifyFiles[0]?._id && uploadStream?.id && verifyFiles[0]._id.equals(uploadStream.id)) {
+                const fileSize = verifyFiles[0].length || 0;
+                console.log(`✅ [${clientId}] Backup verified in MongoDB (${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
+              } else {
+                console.warn(`⚠️  [${clientId}] Backup verification: file found but might be different`);
+              }
+            } catch (verifyError) {
+              console.warn(`⚠️  [${clientId}] Could not verify backup:`, verifyError);
+            }
+            
+            // Suggest garbage collection after large operation
+            if (MEMORY_CONFIG.GC_AFTER_LARGE_OPERATION) {
+              suggestGC();
+            }
+            
+            resolve(true);
+          });
+
+          uploadStream.on('error', (error: Error) => {
+            console.error(`❌ [${clientId}] GridFS upload error:`, error);
+            reject(error);
+          });
+        }),
+        new Promise<boolean>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error(`Backup timeout after ${BACKUP_TIMEOUT_MS / 1000} seconds`));
+          }, BACKUP_TIMEOUT_MS);
+        })
+      ]);
+
+    } catch (error: any) {
+      const elapsed = ((Date.now() - backupStartedAt) / 1000).toFixed(1);
+      console.error(`❌ [${clientId}] WhatsApp session backup error after ${elapsed}s:`, error);
+      
+      // Cleanup: abort archive if still in progress
+      if (archive) {
+        try {
+          // Try to abort if archive is still active
+          if (typeof (archive as any).abort === 'function') {
+            (archive as any).abort();
+          }
+        } catch (abortError) {
+          // Ignore abort errors
+        }
+      }
+      
       return false;
     }
   }
@@ -220,9 +296,29 @@ export class WhatsAppSessionBackup {
 
       console.log(`📦 [${clientId}] Found WhatsApp backup from ${backupFile.uploadDate}`);
 
-      // Remove existing session folder if it exists (should be cleaned on startup already)
+      // Check if existing session folder has valid authentication data
+      // Only delete if it's clearly corrupted or unpaired
+      let shouldDeleteExisting = false;
       if (fs.existsSync(sessionPath)) {
-        console.log(`🗑️  [${clientId}] Removing old session folder for fresh restore`);
+        const localStoragePath = path.join(defaultPath, 'Local Storage', 'leveldb');
+        const indexedDBPath = path.join(defaultPath, 'IndexedDB');
+        
+        // Check if session appears to be valid
+        const hasValidData = fs.existsSync(localStoragePath) && fs.existsSync(indexedDBPath);
+        
+        if (hasValidData) {
+          console.log(`⚠️  [${clientId}] Existing session folder found with valid data - preserving it`);
+          console.log(`⚠️  [${clientId}] If you want to restore from backup, delete the folder manually first`);
+          // Don't restore if valid session exists - it would delete the working session!
+          return false;
+        } else {
+          console.log(`🗑️  [${clientId}] Existing session folder appears corrupted/empty - removing for restore`);
+          shouldDeleteExisting = true;
+        }
+      }
+      
+      // Only delete if we determined the existing folder is corrupted
+      if (shouldDeleteExisting) {
         fs.rmSync(sessionPath, { recursive: true, force: true });
       }
       
@@ -243,19 +339,44 @@ export class WhatsAppSessionBackup {
         writeStream.on('error', reject);
       });
 
-      // Extract to temp directory first
+      // COMPREHENSIVE RESTORE: Extract entire session directory directly
+      // The ZIP contains the full session structure (tokens/{clientId}/...)
+      // Extract to a temp location first, then move to final location
       const tempExtractPath = path.join(process.cwd(), 'temp', `${clientId}_extract`);
+      
+      // Extract ZIP to temp location
       await extract(tempZipPath, { dir: tempExtractPath });
       
-      // Move files to correct locations
-      const extractedFiles = fs.readdirSync(tempExtractPath);
-      for (const file of extractedFiles) {
-        const sourcePath = path.join(tempExtractPath, file);
-        const targetPath = file === 'Local State' 
-          ? path.join(sessionPath, file) // Root level
-          : path.join(defaultPath, file); // Default level
-          
-        fs.renameSync(sourcePath, targetPath);
+      // The extracted files are in tempExtractPath/{clientId}/...
+      // Move everything from tempExtractPath/{clientId} to sessionPath
+      const extractedClientPath = path.join(tempExtractPath, clientId);
+      
+      if (fs.existsSync(extractedClientPath)) {
+        // If ZIP contains clientId folder, move its contents to sessionPath
+        const extractedContents = fs.readdirSync(extractedClientPath);
+        for (const item of extractedContents) {
+          const sourcePath = path.join(extractedClientPath, item);
+          const targetPath = path.join(sessionPath, item);
+          if (fs.statSync(sourcePath).isDirectory()) {
+            // Use cpSync for directories to preserve structure
+            fs.cpSync(sourcePath, targetPath, { recursive: true });
+          } else {
+            fs.copyFileSync(sourcePath, targetPath);
+          }
+        }
+      } else {
+        // If ZIP was archived with root=false, files are directly in tempExtractPath
+        // Move all contents from tempExtractPath to sessionPath
+        const extractedContents = fs.readdirSync(tempExtractPath);
+        for (const item of extractedContents) {
+          const sourcePath = path.join(tempExtractPath, item);
+          const targetPath = path.join(sessionPath, item);
+          if (fs.statSync(sourcePath).isDirectory()) {
+            fs.cpSync(sourcePath, targetPath, { recursive: true });
+          } else {
+            fs.copyFileSync(sourcePath, targetPath);
+          }
+        }
       }
 
       // Clean up temp files

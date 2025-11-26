@@ -78,35 +78,50 @@ export class WPPConnectClientManager {
       throw new Error('MongoDB connection is required. Please ensure MONGODB_URI is set and MongoDB is connected.');
     }
 
-    // Try to restore session from MongoDB backup first (unless skipped)
-    if (!skipRestore) {
-      console.log(`📥 [${clientId}] Restoring session from MongoDB...`);
-      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
-      if (!restored) {
-        console.warn(`⚠️  [${clientId}] Session restoration returned false - may need QR code scan`);
-      } else {
-        console.log(`✅ [${clientId}] Session restored, creating client immediately...`);
-      }
-    } else {
-      // If restoration was already done externally, give it a moment to stabilize
-      console.log(`⏱️  [${clientId}] Session already restored externally, waiting 3s for filesystem to stabilize...`);
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    }
-
-    // Verify session files exist before creating client
+    // CRITICAL: Check if local session folder exists with valid data FIRST
+    // MongoDB backup's purpose is to restore to tokens/{clientId} folder
+    // If folder already exists with valid data, use it directly - no restore needed!
     const sessionPath = path.join(process.cwd(), 'tokens', clientId);
     const defaultPath = path.join(sessionPath, 'Default');
     const indexedDBPath = path.join(defaultPath, 'IndexedDB');
+    const localStoragePath = path.join(defaultPath, 'Local Storage', 'leveldb');
     
-    if (fs.existsSync(sessionPath)) {
-      console.log(`✅ [${clientId}] Session folder exists at: ${sessionPath}`);
-      if (fs.existsSync(indexedDBPath)) {
-        console.log(`✅ [${clientId}] IndexedDB folder exists - session data ready`);
+    let hasLocalSession = false;
+    if (fs.existsSync(sessionPath) && fs.existsSync(defaultPath)) {
+      // Check if session folder has valid authentication data
+      const hasIndexedDB = fs.existsSync(indexedDBPath);
+      const hasLocalStorage = fs.existsSync(localStoragePath);
+      
+      if (hasIndexedDB || hasLocalStorage) {
+        hasLocalSession = true;
+        console.log(`✅ [${clientId}] Local session folder exists with valid data - using it directly`);
+        console.log(`📁 [${clientId}] Session folder: ${sessionPath}`);
+        if (hasIndexedDB) {
+          console.log(`✅ [${clientId}] IndexedDB found - session data ready`);
+        }
+        if (hasLocalStorage) {
+          console.log(`✅ [${clientId}] Local Storage found - session data ready`);
+        }
       } else {
-        console.warn(`⚠️  [${clientId}] IndexedDB folder missing - client may require QR scan`);
+        console.log(`⚠️  [${clientId}] Local session folder exists but appears empty/corrupted`);
       }
-    } else {
-      console.warn(`⚠️  [${clientId}] Session folder does not exist - client will require QR scan`);
+    }
+
+    // Only restore from MongoDB if:
+    // 1. Not skipping restore
+    // 2. No valid local session exists
+    if (!skipRestore && !hasLocalSession) {
+      console.log(`📥 [${clientId}] No valid local session found - restoring from MongoDB...`);
+      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
+      if (!restored) {
+        console.warn(`⚠️  [${clientId}] No MongoDB backup found - client will require QR code scan`);
+      } else {
+        console.log(`✅ [${clientId}] Session restored from MongoDB, creating client...`);
+      }
+    } else if (hasLocalSession) {
+      console.log(`✅ [${clientId}] Using existing local session folder (skip MongoDB restore)`);
+    } else if (skipRestore) {
+      console.log(`⏱️  [${clientId}] Skip restore flag set - using existing session if available`);
     }
 
     // Add placeholder client info immediately so it's queryable
@@ -196,10 +211,14 @@ export class WPPConnectClientManager {
         // folderNameToken is for browser profile path, not token files
         // Our custom tokenStore handles token persistence
         
-        // Browser options - let WPPConnect handle session persistence through tokenStore
+        // Browser options - CRITICAL: Tell WPPConnect where to find the session folder
+        // Without userDataDir, WPPConnect will create its own folder and ignore our restored session!
         puppeteerOptions: {
           executablePath: this.config.chromiumPath,
           args: this.config.puppeteerArgs,
+          // CRITICAL: Set userDataDir to use our restored session folder
+          // This ensures WPPConnect uses tokens/{clientId} instead of creating its own folder
+          userDataDir: sessionPath,
           // Increase timeout for browser launch (helpful for restored sessions)
           timeout: 60000,
           // Handle process errors gracefully
@@ -910,19 +929,48 @@ export class WPPConnectClientManager {
     }
 
     try {
-      const sessions = await this.sessionBackup.listWhatsAppBackups('*');
-      console.log(`📋 Found ${sessions.length} existing WhatsApp sessions`);
+      // First, check for local session folders in tokens/ directory
+      const tokensPath = path.join(process.cwd(), 'tokens');
+      const localSessionFolders: string[] = [];
       
-      // Log all session names for debugging
-      if (sessions.length > 0) {
-        console.log(`📋 Sessions to restore: ${sessions.map(s => s.filename.replace('_whatsapp_session.zip', '')).join(', ')}`);
+      if (fs.existsSync(tokensPath)) {
+        const entries = fs.readdirSync(tokensPath, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const clientId = entry.name;
+            const sessionPath = path.join(tokensPath, clientId);
+            const defaultPath = path.join(sessionPath, 'Default');
+            const indexedDBPath = path.join(defaultPath, 'IndexedDB');
+            const localStoragePath = path.join(defaultPath, 'Local Storage', 'leveldb');
+            
+            // Check if this folder has valid session data
+            if (fs.existsSync(defaultPath) && (fs.existsSync(indexedDBPath) || fs.existsSync(localStoragePath))) {
+              localSessionFolders.push(clientId);
+              console.log(`📁 [${clientId}] Found existing local session folder with valid data`);
+            }
+          }
+        }
+      }
+      
+      // Second, check for MongoDB backups
+      const sessions = await this.sessionBackup.listWhatsAppBackups('*');
+      console.log(`📋 Found ${sessions.length} MongoDB backups and ${localSessionFolders.length} local session folders`);
+      
+      // Combine both sources (local folders take priority - they're already there)
+      const allClientIds = new Set<string>();
+      localSessionFolders.forEach(id => allClientIds.add(id));
+      sessions.forEach(s => {
+        const clientId = s.filename.replace('_whatsapp_session.zip', '');
+        allClientIds.add(clientId);
+      });
+      
+      if (allClientIds.size > 0) {
+        console.log(`📋 Sessions to restore/create: ${Array.from(allClientIds).join(', ')}`);
       }
 
-      for (const session of sessions) {
-        const clientId = session.filename.replace('_whatsapp_session.zip', '');
-        
+      for (const clientId of allClientIds) {
         try {
-          console.log(`🔄 [${clientId}] Starting session restoration...`);
+          console.log(`🔄 [${clientId}] Starting session restoration/creation...`);
           
           // Check if client already exists
           if (this.clients.has(clientId)) {
@@ -930,39 +978,46 @@ export class WPPConnectClientManager {
             continue;
           }
 
-          // Restore the WhatsApp session first, then create client
-          console.log(`📥 [${clientId}] Restoring WhatsApp session from MongoDB...`);
-          const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
+          // If local folder exists, use it directly (skip MongoDB restore)
+          // Otherwise, restore from MongoDB backup
+          const hasLocalSession = localSessionFolders.includes(clientId);
           
-          if (restored) {
-            console.log(`✅ [${clientId}] Session restored successfully`);
+          if (hasLocalSession) {
+            console.log(`📁 [${clientId}] Using existing local session folder (no MongoDB restore needed)`);
+            // Create client directly - it will use the existing local session folder
+            // Skip restore since we already have the folder
+            await this.createClient(clientId, true);
+            console.log(`✅ [${clientId}] Client created from local session, waiting 2s before next session...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } else {
+            // Restore the WhatsApp session from MongoDB first, then create client
+            console.log(`📥 [${clientId}] Restoring WhatsApp session from MongoDB...`);
+            const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
             
-            // Create client with skipRestore=true since we already restored
-            // The createClient method will handle the appropriate wait time
-            console.log(`🚀 [${clientId}] Creating WPPConnect client...`);
-            
-            try {
+            if (restored) {
+              console.log(`✅ [${clientId}] Session restored successfully`);
+              
+              // Create client with skipRestore=true since we already restored
+              // The createClient method will handle the appropriate wait time
+              console.log(`🚀 [${clientId}] Creating WPPConnect client...`);
+              
               await this.createClient(clientId, true);
               console.log(`✅ [${clientId}] Client created, waiting 2s before next session...`);
               await new Promise(resolve => setTimeout(resolve, 2000));
-            } catch (clientError: any) {
-              // Handle specific error types
-              if (clientError?.message?.includes('Auto Close Called')) {
-                console.warn(`⚠️  [${clientId}] Client auto-closed during initialization (likely due to memory pressure)`);
-                console.warn(`⚠️  [${clientId}] Session is saved and will reconnect on next cycle or manual trigger`);
-                // Remove the failed client from the map so it can be retried
-                this.clients.delete(clientId);
-              } else {
-                console.error(`❌ [${clientId}] Failed to create client:`, clientError);
-                // Remove failed client
-                this.clients.delete(clientId);
-              }
+            } else {
+              console.warn(`⚠️  [${clientId}] No backup found in MongoDB and no local session - will need manual creation`);
             }
-          } else {
-            console.warn(`⚠️  [${clientId}] Session restore returned false - skipping client creation`);
           }
-        } catch (error) {
-          console.error(`❌ Failed to restore session for client ${clientId}:`, error);
+        } catch (error: any) {
+          // Handle specific error types
+          if (error?.message?.includes('Auto Close Called')) {
+            console.warn(`⚠️  [${clientId}] Client auto-closed during initialization (likely due to memory pressure)`);
+            console.warn(`⚠️  [${clientId}] Session is saved and will reconnect on next cycle or manual trigger`);
+          } else {
+            console.error(`❌ [${clientId}] Failed to restore/create session:`, error);
+          }
+          // Remove failed client so it can be retried
+          this.clients.delete(clientId);
         }
       }
 
