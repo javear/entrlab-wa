@@ -104,6 +104,10 @@ export class WPPConnectMessageHandler {
 
       if (cleanedCount > 0) {
         console.log(`🧹 Cleaned up ${cleanedCount} old temporary files`);
+        
+        // Force GC after cleaning temp files to free memory
+        const { suggestGC } = require('../config/memory-config');
+        suggestGC();
       }
     } catch (error) {
       console.error('❌ Error during temp file cleanup:', error);
@@ -315,24 +319,34 @@ export class WPPConnectMessageHandler {
 
     if (totalCleaned > 0) {
       console.log(`🧹 Cleaned up ${totalCleaned} old messages from queue`);
+      
+      // Force GC after cleaning large queues
+      if (totalCleaned > 10) {
+        const { suggestGC } = require('../config/memory-config');
+        suggestGC();
+      }
     }
   }
 
   public async handleIncomingMessage(clientId: string, message: any): Promise<void> {
-    console.log(`\n🎯🎯🎯 [${clientId}] ========== handleIncomingMessage CALLED ==========`);
-    console.log(`🎯 Message type: ${message.type || 'unknown'}`);
-    console.log(`🎯 Message from: ${message.from || 'unknown'}`);
-    console.log(`🎯 Message body: ${message.body?.substring(0, 100) || '[no body]'}`);
+    // CRITICAL: Ignore messages sent by the bot itself to prevent infinite loops
+    if (message.fromMe === true) {
+      return;
+    }
+    
+    // Also check if sender is the bot's own phone number
+    const senderNumber = message.from?.replace('@c.us', '') || 'unknown';
+    const client = this.whatsappService.getClient(clientId);
+    if (client && client.phoneNumber && senderNumber === client.phoneNumber.replace('@c.us', '')) {
+      return;
+    }
     
     try {
-      const senderNumber = message.from?.replace('@c.us', '') || 'unknown';
       const userKey = this.getUserKey(clientId, senderNumber);
-      console.log(`📨 [${clientId}] Processing message from ${senderNumber} [${message.type}]`);
       
       // Extract and store contact information
       const contactInfo = this.extractContactInfo(message);
       this.contactInfo[userKey] = contactInfo;
-      console.log(`👤 Contact: ${contactInfo.name} (${senderNumber})`);
       
       // Check if user is paused
       const isPaused = await this.userPauseService.isUserPaused(clientId, senderNumber);
@@ -954,7 +968,7 @@ export class WPPConnectMessageHandler {
       return;
     }
 
-    console.log(`🚀 [${clientId}] Starting processing for ${senderNumber}`);
+    // Silent - processing started
     this.processingUsers[userKey] = 1;
 
     // Send read receipt immediately if not already sent
@@ -1010,13 +1024,19 @@ export class WPPConnectMessageHandler {
       const messages = this.messageQueue[userKey] || [];
       this.messageQueue[userKey] = []; // Clear immediately after reading
       
+      // Force GC hint after processing messages to free memory
+      if (messages.length > 5) {
+        const { suggestGC } = require('../config/memory-config');
+        suggestGC();
+      }
+      
       if (messages.length === 0) {
         console.log(`⚠️ No messages in queue for ${senderNumber}`);
         this.cleanupProcessingState(clientId, senderNumber);
         return;
       }
 
-      console.log(`🤖 [${clientId}] Processing ${messages.length} message(s) from ${senderNumber}`);
+      // Silent - already processed messages are being sent
 
       // Combine all messages with metadata and media URLs
       const combinedMessages = messages.map(item => {
@@ -1049,16 +1069,13 @@ export class WPPConnectMessageHandler {
         return `${metadataPrefix} ${messageText}`;
       }).join('\n');
 
-      console.log(`📝 Combined message with metadata (${messages.length} messages):\n${combinedMessages.substring(0, 500)}${combinedMessages.length > 500 ? '...' : ''}`);
-
       // Send to AI and respond (using the specific client)
       const sendStartTime = Date.now();
-      console.log(`⏱️  [SEND START] Beginning message send at ${new Date().toISOString()}`);
       
       await this.sendMessage(clientId, senderNumber, combinedMessages, null, false, null);
       
       const sendDuration = ((Date.now() - sendStartTime) / 1000).toFixed(2);
-      console.log(`⏱️  [SEND END] Total send duration: ${sendDuration}s`);
+      console.log(`✅ [${clientId}] Response sent to ${senderNumber} (${sendDuration}s)`);
 
       // Stop typing indicator
       await this.sendTypingIndicator(clientId, senderNumber, false);
@@ -1229,7 +1246,9 @@ export class WPPConnectMessageHandler {
     initial: boolean, 
     campaign: string | null
   ): Promise<void> {
-    console.log(`📤 sendMessage called for ${number} with message: "${message}"`);
+      // Log truncated message
+      const msgPreview = message.length > 100 ? message.substring(0, 100) + '...' : message;
+      console.log(`📤 [${clientId}] Sending to ${number}: ${msgPreview}`);
     console.log(`📤 Initial: ${initial}, Campaign: ${campaign}`);
     
     try {
@@ -1253,16 +1272,17 @@ export class WPPConnectMessageHandler {
       
       const userName = storedContact.name || 'WhatsApp User';
 
+      // Truncate message for logging
+      const messagePreview = message.length > 100 ? message.substring(0, 100) + '...' : message;
+      console.log(`🤖 [${clientId}] Calling AI API for ${number} (${messagePreview})`);
+      
       let aiagent: any;
-      console.log(`🤖 Calling AI API with message: "${message}"`);
-      console.log(`🤖 AI API Parameters:`, {
-        message,
-        phoneNumber: number,
-        userName,
-        clientId
-      });
       aiagent = await this.callInferenceFw(message, number, userName, clientId);
-      console.log(`🤖 AI Response received:`, aiagent);
+      
+      if (aiagent && aiagent.text) {
+        const responsePreview = aiagent.text.length > 100 ? aiagent.text.substring(0, 100) + '...' : aiagent.text;
+        console.log(`🤖 [${clientId}] AI Response: ${responsePreview}`);
+      }
       
       // Validate that we have a valid response text
       if (!aiagent || !aiagent.text) {
@@ -1272,7 +1292,7 @@ export class WPPConnectMessageHandler {
       
       try {
         // Check for sendText template in ORIGINAL response (before WhatsApp formatting)
-        console.log(`🔍 Checking for sendText template in original response...`);
+        // Checking for sendText template - silent
         const templateCheck = this.parseSendTextTemplate(aiagent.text);
         
         // Determine which text to format for WhatsApp
@@ -2030,7 +2050,7 @@ export class WPPConnectMessageHandler {
         }
       };
 
-      console.log(`🔐 JWT Payload before signing:`, JSON.stringify(payload, null, 2));
+      // JWT payload creation - silent
       const authToken = jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
 
       // threadId = agentCode:phoneNumber:whatsapp, resourceId = agentCode:phoneNumber
@@ -2042,7 +2062,7 @@ export class WPPConnectMessageHandler {
         resourceId: `${agentCode}:${formattedPhoneNumber}`
       };
 
-      console.log(`🤖 Request URL: ${url}`);
+      // Request URL - silent (already logged in AI call summary)
 
       const response = await axios.post(url, requestBody, {
         headers: {
@@ -2052,7 +2072,10 @@ export class WPPConnectMessageHandler {
         timeout: parseInt(this.env.AI_REQUEST_TIMEOUT || '240000', 10) // 4 minutes default, configurable
       });
 
-      console.log(`🤖 Response Status: ${response.status} ${response.status >= 200 && response.status < 300 ? '✅' : '❌'}`);
+      // Response status - only log errors
+      if (response.status < 200 || response.status >= 300) {
+        console.error(`❌ [${clientId}] AI API error: Status ${response.status}`);
+      }
 
       const rsp = response.data;
       const jsonData = {

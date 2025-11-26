@@ -137,54 +137,61 @@ export class WPPConnectClientManager {
     // Create message handler function BEFORE client creation
     // This ensures we can register it immediately after client is created
     const messageHandler = async (message: any) => {
-      // CRITICAL: Log EVERYTHING immediately - this proves the callback is being called
-      console.log(`\n🔔🔔🔔 [${clientId}] ========== MESSAGE EVENT RECEIVED ==========`);
-      console.log(`📥 Type: ${message.type || 'unknown'}`);
-      console.log(`📥 From: ${message.from || 'unknown'}`);
-      console.log(`📥 Body: ${message.body?.substring(0, 100) || '[no body]'}`);
-      console.log(`📥 Timestamp: ${message.timestamp || Date.now()}`);
-      console.log(`📥 Message Object Keys: ${Object.keys(message || {}).join(', ')}`);
+      // CRITICAL: Filter out messages sent by the bot itself to prevent infinite loops
+      // This must be checked FIRST before any processing
+      if (message.fromMe === true) {
+        // Silently ignore - don't even log to reduce noise
+        return; // Exit early - don't process bot's own messages
+      }
+      
+      // Also check if message is from bot's own number
+      const senderNumber = message.from?.replace('@c.us', '') || '';
+      const currentClientInfo = this.clients.get(clientId);
+      if (currentClientInfo && currentClientInfo.phoneNumber) {
+        const botNumber = currentClientInfo.phoneNumber.replace('@c.us', '');
+        if (senderNumber === botNumber) {
+          // Silently ignore messages from bot's own number
+          return;
+        }
+      }
+      
+      // Filter out non-message events
+      const msgType = message.type || '';
+      const ignoredTypes = ['ack', 'status', 'notification', 'protocol', 'e2e_notification'];
+      if (ignoredTypes.includes(msgType.toLowerCase())) {
+        // Silently ignore status/ACK events
+        return; // Exit early - these are status updates, not messages
+      }
       
       try {
         const clientInfo = this.clients.get(clientId);
-        console.log(`🔍 [${clientId}] Client info check: exists=${!!clientInfo}, isReady=${clientInfo?.isReady}, status=${clientInfo?.status}`);
         
         if (!clientInfo) {
-          console.error(`❌ [${clientId}] CRITICAL: Client info not found in clients map!`);
+          console.error(`❌ [${clientId}] Client info not found - message dropped`);
           return;
         }
         
         if (!clientInfo.isReady) {
-          console.warn(`⏸️  [${clientId}] Client not ready yet (isReady: ${clientInfo.isReady}), storing message for later...`);
-          // Don't return - let it try to process anyway, just log
+          console.warn(`⏸️  [${clientId}] Client not ready - message may be delayed`);
         }
         
-        console.log(`📨 [${clientId}] Proceeding with message processing...`);
-        console.log(`📨 Handler count: ${this.messageHandlers.length}`);
-        
         if (this.messageHandlers.length === 0) {
-          console.error(`❌ [${clientId}] CRITICAL: No message handlers registered! Messages will be lost!`);
+          console.error(`❌ [${clientId}] No message handlers registered!`);
           return;
         }
         
-        // Process messages
-        console.log(`🚀 [${clientId}] Calling message handlers...`);
+        // Process messages (silently - handlers will log if needed)
         for (let i = 0; i < this.messageHandlers.length; i++) {
           const handler = this.messageHandlers[i];
           if (!handler) {
-            console.warn(`⚠️  [${clientId}] Handler ${i + 1} is undefined, skipping`);
             continue;
           }
           try {
-            console.log(`🔄 [${clientId}] Executing handler ${i + 1}/${this.messageHandlers.length}...`);
             await handler(clientId, message);
-            console.log(`✅ [${clientId}] Handler ${i + 1} completed`);
           } catch (error) {
-            console.error(`❌ [${clientId}] Error in message handler ${i + 1}:`, error);
-            console.error(`❌ [${clientId}] Error stack:`, error instanceof Error ? error.stack : 'No stack');
+            console.error(`❌ [${clientId}] Handler error:`, error instanceof Error ? error.message : error);
           }
         }
-        console.log(`✅ [${clientId}] ========== MESSAGE PROCESSING COMPLETE ==========\n`);
       } catch (error) {
         console.error(`❌ [${clientId}] CRITICAL ERROR in onMessage callback:`, error);
         console.error(`❌ [${clientId}] Error stack:`, error instanceof Error ? error.stack : 'No stack');
@@ -244,6 +251,7 @@ export class WPPConnectClientManager {
             if (clientInfo) {
               clientInfo.isReady = true;
               clientInfo.status = 'ready';
+              clientInfo.qrCode = undefined; // Clear QR code when authenticated
               console.log(`✅ [${clientId}] Client marked as ready (isLogged status)`);
             }
           } else if (statusSession === 'qrReadSuccess') {
@@ -262,6 +270,7 @@ export class WPPConnectClientManager {
             if (clientInfo) {
               clientInfo.isReady = true;
               clientInfo.status = 'ready';
+              clientInfo.qrCode = undefined; // Clear QR code when ready
               console.log(`✅ [${clientId}] Client marked as ready (inChat status)`);
             }
           } else {
@@ -441,8 +450,7 @@ export class WPPConnectClientManager {
                 // Also register onAnyMessage as fallback
                 if (typeof client.onAnyMessage === 'function') {
                   client.onAnyMessage(async (msg: any) => {
-                    console.log(`\n🔔🔔🔔 [${clientId}] ========== onAnyMessage CALLBACK EXECUTED ==========`);
-                    console.log(`📥 Type: ${msg.type || 'unknown'}, From: ${msg.from || 'unknown'}`);
+                    // onAnyMessage is a fallback - don't log every event
                     await messageHandler(msg);
                   });
                   console.log(`✅ [${clientId}] client.onAnyMessage() registered`);
@@ -451,19 +459,7 @@ export class WPPConnectClientManager {
                 }
                 
                 (clientInfo as any)._messageHandlerRegistered = true;
-                console.log(`✅ [${clientId}] ✅✅✅ MESSAGE HANDLERS REGISTERED IN CONNECTED STATE ✅✅✅`);
-                console.log(`🧪 [${clientId}] Ready to receive messages!`);
-                console.log(`🧪 [${clientId}] Send a test message NOW - you should see '🔔🔔🔔 MESSAGE EVENT RECEIVED' logs`);
-                console.log(`🧪 [${clientId}] If no logs appear, WPPConnect may not be receiving messages from WhatsApp`);
-                
-                // Test: Try to verify handler registration by checking if it's actually working
-                setTimeout(() => {
-                  console.log(`🧪 [${clientId}] Handler verification: onMessage type = ${typeof client.onMessage}`);
-                  console.log(`🧪 [${clientId}] If messages still don't work, check:`);
-                  console.log(`🧪    1. Phone is online and connected`);
-                  console.log(`🧪    2. WhatsApp Web shows as connected on phone`);
-                  console.log(`🧪    3. Browser session is synced with phone`);
-                }, 5000);
+                console.log(`✅ [${clientId}] Message handlers registered and ready`);
               } catch (regError) {
                 console.error(`❌ [${clientId}] CRITICAL: Error registering handlers:`, regError);
                 console.error(`❌ [${clientId}] Error details:`, regError instanceof Error ? regError.stack : regError);
@@ -520,7 +516,7 @@ export class WPPConnectClientManager {
                   try {
                     client.onMessage(messageHandler);
                     client.onAnyMessage(async (msg: any) => {
-                      console.log(`\n🔔🔔🔔 [${clientId}] ========== onAnyMessage CALLBACK EXECUTED ==========`);
+                      // onAnyMessage is a fallback - don't log every event
                       await messageHandler(msg);
                     });
                     (clientInfo as any)._messageHandlerRegistered = true;
@@ -726,6 +722,7 @@ export class WPPConnectClientManager {
           // Client is authenticated and ready
           clientInfo.status = 'ready';
           clientInfo.isReady = true;
+          clientInfo.qrCode = undefined; // Clear QR code when ready (no longer needed)
           console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
           
           // WPPConnect automatically handles session saving via tokenStore

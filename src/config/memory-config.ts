@@ -3,15 +3,15 @@
 // ============================================
 
 export const MEMORY_CONFIG = {
-  // Message queue limits
-  MAX_QUEUE_SIZE: 30, // Max messages per user in queue
-  MAX_QUEUE_AGE: 120000, // 2 minutes max message age
-  QUEUE_CLEANUP_INTERVAL: 120000, // Clean queue every 2 minutes
+  // Message queue limits (optimized for lower memory)
+  MAX_QUEUE_SIZE: 20, // Max messages per user in queue (reduced from 30)
+  MAX_QUEUE_AGE: 90000, // 1.5 minutes max message age (reduced from 2 min)
+  QUEUE_CLEANUP_INTERVAL: 90000, // Clean queue every 1.5 minutes (reduced from 2 min)
   
-  // File handling
+  // File handling (more aggressive cleanup)
   MAX_FILE_SIZE: 10 * 1024 * 1024, // 10MB max file size
-  TEMP_FILE_CLEANUP_INTERVAL: 300000, // Clean temp files every 5 minutes
-  TEMP_FILE_MAX_AGE: 600000, // 10 minutes max temp file age
+  TEMP_FILE_CLEANUP_INTERVAL: 180000, // Clean temp files every 3 minutes (reduced from 5 min)
+  TEMP_FILE_MAX_AGE: 300000, // 5 minutes max temp file age (reduced from 10 min)
   
   // Client management
   MAX_CLIENTS: 50, // Maximum number of concurrent clients

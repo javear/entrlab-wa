@@ -106,7 +106,8 @@ export class WPPConnectWhatsAppController {
           clientId: client.clientId,
           status: client.status,
           isReady: client.isReady,
-          hasQrCode: !!client.qrCode,
+          // QR code should never be true if client is ready or status is ready
+          hasQrCode: (client.isReady || client.status === 'ready') ? false : !!client.qrCode,
           phoneNumber: client.phoneNumber,
           lastActivity: client.lastActivity,
           ai_agent_code: client.ai_agent_code || null
@@ -169,7 +170,8 @@ export class WPPConnectWhatsAppController {
           clientId: client.clientId,
           status: client.status,
           isReady: client.isReady,
-          hasQrCode: !!client.qrCode,
+          // QR code should never be true if client is ready or status is ready
+          hasQrCode: (client.isReady || client.status === 'ready') ? false : !!client.qrCode,
           phoneNumber: client.phoneNumber,
           lastActivity: client.lastActivity,
           ai_agent_code: client.ai_agent_code || null

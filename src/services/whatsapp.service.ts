@@ -199,15 +199,13 @@ export class WPPConnectWhatsAppService {
 
   async loadAgentAssignments(): Promise<void> {
     try {
-      console.log('🔄 Starting to load agent assignments...');
-      
       if (!ClientAgent) {
-        console.log('⚠️ ClientAgent model not found');
+        console.warn('⚠️ ClientAgent model not found');
         return;
       }
 
       const assignments = await ClientAgent.find({ isActive: true });
-      console.log(`📋 Found ${assignments.length} agent assignments in MongoDB:`, assignments);
+      console.log(`📋 Loaded ${assignments.length} agent assignment(s) from MongoDB`);
 
       for (const assignment of assignments) {
         const clientInfo = this.clientManager.getClient(assignment.clientId);
