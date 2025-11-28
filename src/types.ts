@@ -9,6 +9,7 @@ export interface Environment {
   WHITELISTED_NUMBERS?: string | undefined;
   ALLOWED_NUMBERS?: string | undefined;
   FW_ENDPOINT?: string | undefined;
+  FW_ENDPOINT_WORKFLOW?: string | undefined;
   FW_AUTH_TOKEN?: string | undefined;
   JWT_SECRET?: string | undefined;
   WA_JWT_SECRET?: string | undefined;
@@ -79,6 +80,43 @@ export interface ProcessingState {
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+// Workflow response message object types
+export interface WorkflowMessageObject {
+  type: 'text' | 'image' | 'video' | 'audio' | 'file' | 'sticker' | 'animated-sticker' | 'reaction' | 'location' | 'reply' | 'stop-response';
+  text?: string;
+  url?: string;
+  caption?: string;
+  latitude?: number;
+  longitude?: number;
+  messageid?: string;
+  emoji?: string;
+  reason?: string;
+}
+
+// Workflow API response interface
+export interface WorkflowResponse {
+  status: string;
+  steps: any;
+  result: {
+    success: boolean;
+    content: {
+      text?: string;
+      object: WorkflowMessageObject[];
+    };
+    usage?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+      reasoningTokens?: number;
+      cachedInputTokens?: number;
+    };
+    formatted?: {
+      whatsapp?: WorkflowMessageObject[];
+    };
+    timestamp?: string;
+  };
 }
 
 // API request interfaces

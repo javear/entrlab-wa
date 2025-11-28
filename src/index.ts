@@ -26,6 +26,7 @@ const env: Environment = {
   WA_JWT_SECRET: process.env.WA_JWT_SECRET,
   CHROMIUM_PATH: process.env.CHROMIUM_PATH,
   FW_ENDPOINT: process.env.FW_ENDPOINT,
+  FW_ENDPOINT_WORKFLOW: process.env.FW_ENDPOINT_WORKFLOW,
   ALLOWED_NUMBERS: process.env.ALLOWED_NUMBERS,
   UPLOAD_USER_ID: process.env.UPLOAD_USER_ID || undefined,
   UPLOAD_AUTH_TOKEN: process.env.UPLOAD_AUTH_TOKEN || undefined,

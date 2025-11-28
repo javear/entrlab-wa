@@ -1,5 +1,5 @@
 import { WPPConnectWhatsAppService } from '../services/whatsapp.service';
-import { Environment, ChatMessage } from '../types';
+import { Environment, ChatMessage, WorkflowResponse, WorkflowMessageObject } from '../types';
 import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
@@ -144,58 +144,6 @@ export class WPPConnectMessageHandler {
     }
   }
 
-  /**
-   * Parse sendText template data from AI response
-   * Detects JSON blocks containing sendText_args and sendText_data
-   */
-  private parseSendTextTemplate(text: string): {
-    hasTemplate: boolean;
-    cleanText: string;
-    templateData?: any;
-  } {
-    try {
-      // Extract JSON from code blocks in ORIGINAL AI response (before WhatsApp formatting)
-      // Pattern: ```json ... ``` or ``` ... ```
-      const codeBlockRegex = /```(?:json)?\s*\n([\s\S]*?)\n```/;
-      const match = text.match(codeBlockRegex);
-      
-      if (match && match[1]) {
-        try {
-          const jsonStr = match[1].trim();
-          console.log(`🔍 Found code block, attempting to parse JSON...`);
-          const parsed = JSON.parse(jsonStr);
-          
-          if (parsed.sendText_args === true && parsed.sendText_data) {
-            console.log(`🎯 Detected sendText template in AI response`);
-            console.log(`📋 Template data:`, JSON.stringify(parsed.sendText_data, null, 2));
-            
-            // Remove the entire code block from text
-            const cleanText = text.replace(match[0], '').trim();
-            
-            return {
-              hasTemplate: true,
-              cleanText: cleanText || 'Message with interactive buttons',
-              templateData: parsed.sendText_data
-            };
-          }
-        } catch (parseError) {
-          console.log(`⚠️  Could not parse sendText template JSON:`, parseError);
-        }
-      }
-      
-      return {
-        hasTemplate: false,
-        cleanText: text
-      };
-      
-    } catch (error) {
-      console.log(`⚠️  Error parsing sendText template:`, error);
-      return {
-        hasTemplate: false,
-        cleanText: text
-      };
-    }
-  }
 
   /**
    * Send read receipt with retry mechanism
@@ -476,16 +424,16 @@ export class WPPConnectMessageHandler {
   }
 
   /**
-   * Public method to send a message with full media support (stickers, images, links, etc.)
-   * This is used by the /send API endpoint to send messages with the same rich media handling
-   * as the message handler uses for AI responses.
+   * Public method to send a message using workflow object array format
+   * This is used by the /send API endpoint to send messages with rich media support
+   * Accepts either a string (will be sent as text) or an array of WorkflowMessageObject
    */
-  public async sendMessageWithMedia(clientId: string, number: string, message: string): Promise<void> {
+  public async sendMessageWithMedia(clientId: string, number: string, message: string | WorkflowMessageObject[]): Promise<void> {
     // Format number
     const formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
     
     try {
-      console.log(`📤 [${clientId}] Sending message with media support to ${number}`);
+      console.log(`📤 [${clientId}] Sending message to ${number}`);
       
       // Get client
       const client = this.whatsappService.getClient(clientId);
@@ -493,195 +441,20 @@ export class WPPConnectMessageHandler {
         throw new Error(`Client ${clientId} not found or not ready`);
       }
 
-      // Format message for WhatsApp (applies markdown, emoji, etc.)
-      const formattedResponse = this.convertLLMToWhatsApp(message);
-      
-      // Parse response for media URLs and text parts
-      const outgoingParts = this.parseResponseForMedia(formattedResponse);
-      
-      // Check memory before processing media-heavy operations
-      const memUsage = process.memoryUsage();
-      const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
-      const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
-      const memPercent = Math.round((heapUsedMB / heapTotalMB) * 100);
-      
-      if (memPercent > 95) {
-        console.warn(`⚠️  High memory usage (${memPercent}%) - may affect media processing`);
+      // If message is a string, convert it to a text object
+      let messageObjects: WorkflowMessageObject[];
+      if (typeof message === 'string') {
+        messageObjects = [{ type: 'text', text: message }];
+      } else {
+        messageObjects = message;
       }
+
+      // Use the workflow message sending function
+      await this.sendWorkflowMessages(client, clientId, formattedNumber, messageObjects);
       
-      // Track if ANY part was successfully sent
-      let anySent = false;
-      
-      // Send each part
-      for (let i = 0; i < outgoingParts.length; i++) {
-        const part = outgoingParts[i];
-        if (!part) continue;
-        
-        try {
-          // Show typing before each part
-          await client.client.startTyping(formattedNumber);
-        } catch {}
-        
-        if (part.kind === 'media') {
-          try {
-            const mediaUrl = String(part.value);
-            console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
-            
-            // Handle location
-            if (mediaUrl.startsWith('#loc:') || mediaUrl.startsWith('#loc-')) {
-              const locationData = mediaUrl.replace(/^#loc[:-]/, '').trim();
-              const coords = locationData.split(/[;,]/);
-              if (coords.length >= 2 && coords[0] && coords[1]) {
-                const latitude = coords[0].trim();
-                const longitude = coords[1].trim();
-                const title = coords[2]?.trim() || 'Location';
-                await client.client.sendLocation(formattedNumber, latitude, longitude, title);
-                console.log(`✅ Sent location: ${latitude}, ${longitude}`);
-                anySent = true;
-              }
-            }
-            // Handle sticker
-            else if (mediaUrl.startsWith('#sticker:')) {
-              const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
-              const urlLower = stickerUrl.toLowerCase();
-              // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
-              const isAnimated = urlLower.match(/\.(gif|webp)(?=\?|#|$)/i);
-              
-              if (memPercent > 97) {
-                console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker`);
-                throw new Error(`Memory too low for sticker processing`);
-              }
-              
-              const stickerTimeout = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Sticker timeout')), 30000)
-              );
-              
-              if (isAnimated) {
-                await Promise.race([
-                  client.client.sendImageAsStickerGif(formattedNumber, stickerUrl),
-                  stickerTimeout
-                ]);
-                console.log(`✅ Sent animated sticker`);
-                anySent = true;
-              } else {
-                await Promise.race([
-                  client.client.sendImageAsSticker(formattedNumber, stickerUrl),
-                  stickerTimeout
-                ]);
-                console.log(`✅ Sent static sticker`);
-                anySent = true;
-              }
-            }
-            // Handle other media (images, videos, files)
-            else {
-              const urlLower = mediaUrl.toLowerCase();
-              // Check for image extensions (allowing query parameters)
-              // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
-              if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(?=\?|#|$)/i)) {
-                if (part.caption) {
-                  await client.client.sendImage(formattedNumber, mediaUrl, undefined, part.caption);
-                } else {
-                  await client.client.sendImage(formattedNumber, mediaUrl);
-                }
-                console.log(`✅ Sent image`);
-                anySent = true;
-              } else {
-                // Send as file (PDFs, documents, videos, audio, archives, etc.)
-                if (part.caption) {
-                  await client.client.sendFile(formattedNumber, mediaUrl, undefined, part.caption);
-                } else {
-                  await client.client.sendFile(formattedNumber, mediaUrl);
-                }
-                console.log(`✅ Sent file: ${mediaUrl}`);
-                anySent = true;
-              }
-            }
-          } catch (mediaErr: any) {
-            console.warn(`⚠️ Failed to send media: ${mediaErr?.message || mediaErr}`);
-            // Fallback: send URL as text
-            try {
-              await client.client.sendText(formattedNumber, String(part.value));
-              anySent = true;
-            } catch {}
-          }
-        } else if (part.kind === 'link') {
-          try {
-            await client.client.sendLinkPreview(formattedNumber, String(part.value), part.caption || '');
-            console.log(`✅ Sent link preview`);
-            anySent = true;
-          } catch (linkErr: any) {
-            console.warn(`⚠️ Failed to send link preview: ${linkErr?.message || linkErr}`);
-            // Fallback: send as text
-            try {
-              const fallbackText = part.caption ? `${part.caption} ${part.value}` : String(part.value);
-              await client.client.sendText(formattedNumber, fallbackText);
-              anySent = true;
-            } catch {}
-          }
-        } else {
-          // Send text part
-          try {
-            const textContent = String(part.value);
-            
-            // Check for sticker in text
-            if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
-              const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
-              if (stickerMatch && stickerMatch[1]) {
-                const stickerUrl = stickerMatch[1];
-                await client.client.sendImageAsSticker(formattedNumber, stickerUrl);
-                console.log(`✅ Sent sticker from text`);
-                
-                // Send remaining text
-                const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
-                if (remainingText) {
-                  await client.client.sendText(formattedNumber, remainingText);
-                  console.log(`✅ Sent remaining text`);
-                }
-                anySent = true;
-              }
-            } else {
-              await client.client.sendText(formattedNumber, textContent);
-              console.log(`✅ Sent text`);
-              anySent = true;
-            }
-          } catch (textErr: any) {
-            console.warn(`⚠️ Error sending text: ${textErr?.message || textErr}`);
-          }
-        }
-        
-        // Delay between parts
-        if (i < outgoingParts.length - 1) {
-          const delayMs = 1000 + Math.floor(Math.random() * 2000);
-          try {
-            await client.client.startTyping(formattedNumber);
-          } catch {}
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
-      }
-      
-      // Fallback: If nothing was sent, send text-only
-      if (!anySent && formattedResponse) {
-        console.warn(`⚠️  No parts were sent - sending text-only fallback`);
-        try {
-          const cleanText = formattedResponse
-            .replace(/#sticker:?\s*https?:\/\/[^\s]+/gi, '')
-            .replace(/#loc[:-][^\s]+/gi, '')
-            .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g, '')
-            .trim();
-          
-          if (cleanText) {
-            await client.client.sendText(formattedNumber, cleanText);
-            console.log(`✅ Sent text-only fallback`);
-          }
-        } catch (fallbackError) {
-          console.error(`❌ Text-only fallback failed:`, fallbackError);
-          throw fallbackError;
-        }
-      }
-      
-      console.log(`✅ [${clientId}] Message with media sent successfully to ${number}`);
+      console.log(`✅ [${clientId}] Message sent successfully to ${number}`);
     } catch (error) {
-      console.error(`❌ Error sending message with media:`, error);
+      console.error(`❌ Error sending message:`, error);
       throw error;
     } finally {
       // Always stop typing indicator after sending (success or error)
@@ -713,37 +486,6 @@ export class WPPConnectMessageHandler {
     return mediaTypes.includes(message.type.toLowerCase());
   }
 
-  // New: Helper to clean up URLs from markdown formatting and bullet points
-  private cleanupUrl(url: string): string {
-    if (!url || typeof url !== 'string') return url;
-    
-    // Remove common markdown formatting and bullet points
-    let cleanedUrl = url
-      // Remove bullet points and list markers
-      .replace(/^[\s]*[-•*+]\s*/gm, '')
-      // Remove numbered list markers
-      .replace(/^[\s]*\d+\.\s*/gm, '')
-      // Remove leading/trailing whitespace first
-      .trim()
-      // Remove parentheses around URLs (both leading and trailing)
-      .replace(/^\(/g, '')  // Remove leading (
-      .replace(/\)$/g, '')  // Remove trailing )
-      // Remove brackets around URLs (both leading and trailing)
-      .replace(/^\[/g, '')  // Remove leading [
-      .replace(/\]$/g, '')  // Remove trailing ]
-      // Remove markdown link formatting ![alt](url) -> url
-      .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$2')
-      // Remove markdown link formatting [text](url) -> url
-      .replace(/\[([^\]]*)\]\(([^)]+)\)/g, '$2')
-      // Final trim
-      .trim();
-    
-    // If the cleaned URL is just the original URL, return it
-    if (cleanedUrl === url) return url;
-    
-    console.log(`🧹 Cleaned URL: "${url}" -> "${cleanedUrl}"`);
-    return cleanedUrl;
-  }
 
   private async downloadMediaFromUrl(url: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
     try {
@@ -1124,117 +866,279 @@ export class WPPConnectMessageHandler {
     // Keep contactInfo for future messages from same user
   }
 
-  private convertLLMToWhatsApp(content: string, preserveStructure: boolean = true): string {
+  /**
+   * Send messages from workflow response object array
+   * Each object represents a WhatsApp message bubble with a specific type
+   */
+  private async sendWorkflowMessages(
+    client: any,
+    clientId: string,
+    formattedNumber: string,
+    messageObjects: WorkflowMessageObject[]
+  ): Promise<void> {
     try {
-      const originalLength = content.length;
-      let formattedContent = content.replace(/\r\n/g, '\n');
+      // Check memory before processing
+      const memUsage = process.memoryUsage();
+      const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+      const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+      const memPercent = Math.round((heapUsedMB / heapTotalMB) * 100);
 
-      // Tokenize code regions to avoid accidental formatting inside code
-      const codeBlocks: string[] = [];
-      const inlineCodes: string[] = [];
-      formattedContent = formattedContent.replace(/```([\s\S]*?)```/g, (_m, p1) => {
-        const token = `__CODEBLOCK_${codeBlocks.length}__`;
-        codeBlocks.push(String(p1));
-        return token;
-      });
-      formattedContent = formattedContent.replace(/`([^`\n]+)`/g, (_m, p1) => {
-        const token = `__INLINECODE_${inlineCodes.length}__`;
-        inlineCodes.push(String(p1));
-        return token;
-      });
-
-      // Markdown links → plain text with URL to ensure clickability in WhatsApp
-      formattedContent = formattedContent.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)');
-
-      // Unescape already-escaped formatting sequences
-      formattedContent = formattedContent
-        .replace(/\\\\_([^_]+)\\\\_/g, '_$1_')
-        .replace(/\\\\\*([^*]+)\\\\\*/g, '*$1*')
-        .replace(/\\\\~([^~]+)\\\\~/g, '~$1~')
-        .replace(/\\\\`([^`]+)\\\\`/g, '```$1```');
-
-      // Bullets: •, -, * at line-start → '* '
-      // Protect bullet markers using a neutral sentinel that won't collide with formatting rules
-      formattedContent = formattedContent
-        .replace(/^[\t ]*[•]\s+/gm, '§BULLET§ ')
-        .replace(/^[\t ]*[-*]\s+/gm, '§BULLET§ ');
-
-      // Numbered lists: 1) → 1.
-      formattedContent = formattedContent
-        .replace(/^[\t ]*(\d+)\)\s+/gm, '$1. ')
-        .replace(/^[\t ]*(\d+)\.\s+/gm, '$1. ');
-
-      // Bold: **text** or __text__ → *text*
-      // Protect __CODEBLOCK_N__ and __INLINECODE_N__ tokens from being converted
-      formattedContent = formattedContent
-        .replace(/\*\*(.+?)\*\*/g, '*$1*')
-        .replace(/__(?!CODEBLOCK_\d+__|INLINECODE_\d+__)(.+?)__/g, '*$1*')
-        .replace(/<b>([\s\S]*?)<\/b>/gi, '*$1*')
-        .replace(/<strong>([\s\S]*?)<\/strong>/gi, '*$1*');
-
-      // Italic: single-asterisk or underscores → _text_
-      // - Do not convert list bullets '* ' (handled via sentinel)
-      // - Do not convert bold '**...**' (handled above)
-      // - Avoid snake_case by requiring non-word boundaries
-      formattedContent = formattedContent
-        .replace(/(^|[^\w*])\*(?!\*)([^\s*][^*]*?[^\s*])\*(?!\*)/g, '$1_$2_')
-        .replace(/(^|[^\w])_(?!_)([^_\n]+?)_(?=[^\w]|$)/g, '$1_$2_')
-        .replace(/<i>([\s\S]*?)<\/i>/gi, '_$1_')
-        .replace(/<em>([\s\S]*?)<\/em>/gi, '_$1_');
-
-      // Strikethrough: ~~text~~ or <s>/<strike> → ~text~
-      formattedContent = formattedContent
-        .replace(/~~([\s\S]*?)~~/g, '~$1~')
-        .replace(/<s>([\s\S]*?)<\/s>/gi, '~$1~')
-        .replace(/<strike>([\s\S]*?)<\/strike>/gi, '~$1~');
-
-      // Headers (# ...) → *...*
-      formattedContent = formattedContent.replace(/^[\t ]*#{1,6}[\t ]+(.+)$/gm, '*$1*');
-
-      // Remove horizontal rules (---, ___, ***)
-      formattedContent = formattedContent.replace(/^[\t ]*[-_*]{3,}[\t ]*$/gm, '');
-
-      // Blockquotes (> ...) and <blockquote>
-      formattedContent = formattedContent
-        .replace(/^[\t ]*>[\t ]+/gm, '> ')
-        .replace(/<blockquote>([\s\S]*?)<\/blockquote>/gi, (_m, p1) => String(p1).replace(/^/gm, '> '));
-
-      // Basic HTML → text
-      formattedContent = formattedContent
-        .replace(/<br\s*\/?>(\n)?/gi, '\n')
-        .replace(/<\/(p|div)>\s*<\1>/gi, '\n\n')
-        .replace(/<\/(h\d)>\s*/gi, '\n\n')
-        .replace(/<\/?(p|div|span)>/gi, '')
-        .replace(/<[^>]+>/g, '');
-
-      // Restore bullet sentinel to WhatsApp bullet style
-      formattedContent = formattedContent.replace(/^§BULLET§ /gm, '* ');
-
-      if (!preserveStructure) {
-        formattedContent = formattedContent
-          .replace(/\n{3,}/g, '\n\n')
-          .replace(/[ ]{2,}/g, ' ');
+      if (memPercent > 95) {
+        console.warn(`⚠️  High memory usage (${memPercent}%) - may affect media processing`);
       }
 
-      // Restore code placeholders
-      // Inline code: use WhatsApp monospace formatting
-      formattedContent = formattedContent.replace(/__INLINECODE_(\d+)__/g, (_m, i) => '`' + (inlineCodes[Number(i)] ?? '') + '`');
-      
-      // Code blocks: format content for WhatsApp using monospace (```)
-      formattedContent = formattedContent.replace(/__CODEBLOCK_(\d+)__/g, (_m, i) => {
-        const codeContent = codeBlocks[Number(i)] ?? '';
-        // Remove language identifier if present (e.g., ```javascript\n...)
-        const cleanCode = codeContent.replace(/^[a-z]+\n/i, '');
-        
-        // Use WhatsApp monospace formatting: wrap entire block in triple backticks
-        // Reference: https://faq.whatsapp.com/539178204879377/?cms_platform=web
-        return '\n```\n' + cleanCode.trim() + '\n```\n';
-      });
+      let anySent = false;
 
-      return formattedContent;
+      for (let i = 0; i < messageObjects.length; i++) {
+        const msgObj = messageObjects[i];
+        if (!msgObj || !msgObj.type) continue;
+
+        try {
+          // Show typing before each message
+          await client.client.startTyping(formattedNumber);
+        } catch {}
+
+        try {
+          switch (msgObj.type) {
+            case 'text':
+              if (msgObj.text) {
+                await client.client.sendText(formattedNumber, msgObj.text);
+                console.log(`✅ Sent text: ${msgObj.text.substring(0, 50)}...`);
+                anySent = true;
+              }
+              break;
+
+            case 'image':
+              if (msgObj.url) {
+                if (msgObj.caption) {
+                  await client.client.sendImage(formattedNumber, msgObj.url, undefined, msgObj.caption);
+                } else {
+                  await client.client.sendImage(formattedNumber, msgObj.url);
+                }
+                console.log(`✅ Sent image: ${msgObj.url}`);
+                anySent = true;
+              }
+              break;
+
+            case 'video':
+              if (msgObj.url) {
+                if (msgObj.caption) {
+                  await client.client.sendFile(formattedNumber, msgObj.url, undefined, msgObj.caption);
+                } else {
+                  await client.client.sendFile(formattedNumber, msgObj.url);
+                }
+                console.log(`✅ Sent video: ${msgObj.url}`);
+                anySent = true;
+              }
+              break;
+
+            case 'audio':
+              if (msgObj.url) {
+                await client.client.sendFile(formattedNumber, msgObj.url);
+                console.log(`✅ Sent audio: ${msgObj.url}`);
+                anySent = true;
+              }
+              break;
+
+            case 'file':
+              if (msgObj.url) {
+                if (msgObj.caption) {
+                  await client.client.sendFile(formattedNumber, msgObj.url, undefined, msgObj.caption);
+                } else {
+                  await client.client.sendFile(formattedNumber, msgObj.url);
+                }
+                console.log(`✅ Sent file: ${msgObj.url}`);
+                anySent = true;
+              }
+              break;
+
+            case 'sticker':
+              if (msgObj.url) {
+                const stickerTimeout = new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error('Sticker timeout')), 30000)
+                );
+
+                const urlLower = msgObj.url.toLowerCase();
+                const isAnimated = urlLower.match(/\.(gif|webp)(?=\?|#|$)/i);
+
+                if (isAnimated) {
+                  await Promise.race([
+                    client.client.sendImageAsStickerGif(formattedNumber, msgObj.url),
+                    stickerTimeout
+                  ]);
+                  console.log(`✅ Sent animated sticker: ${msgObj.url}`);
+                } else {
+                  await Promise.race([
+                    client.client.sendImageAsSticker(formattedNumber, msgObj.url),
+                    stickerTimeout
+                  ]);
+                  console.log(`✅ Sent static sticker: ${msgObj.url}`);
+                }
+                anySent = true;
+              }
+              break;
+
+            case 'animated-sticker':
+              if (msgObj.url) {
+                const stickerTimeout = new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error('Animated sticker timeout')), 30000)
+                );
+
+                await Promise.race([
+                  client.client.sendImageAsStickerGif(formattedNumber, msgObj.url),
+                  stickerTimeout
+                ]);
+                console.log(`✅ Sent animated sticker: ${msgObj.url}`);
+                anySent = true;
+              }
+              break;
+
+            case 'reaction':
+              if (msgObj.messageid && msgObj.emoji) {
+                // Note: WPPConnect may not have direct reaction support
+                // This is a placeholder - you may need to implement via WhatsApp Web API
+                console.log(`⚠️  Reaction not yet implemented: ${msgObj.emoji} to message ${msgObj.messageid}`);
+                // TODO: Implement reaction sending if WPPConnect supports it
+              }
+              break;
+
+            case 'location':
+              if (msgObj.latitude !== undefined && msgObj.longitude !== undefined) {
+                const title = msgObj.caption || 'Location';
+                await client.client.sendLocation(
+                  formattedNumber,
+                  String(msgObj.latitude),
+                  String(msgObj.longitude),
+                  title
+                );
+                console.log(`✅ Sent location: ${msgObj.latitude}, ${msgObj.longitude}`);
+                anySent = true;
+              }
+              break;
+
+            case 'reply':
+              if (msgObj.text && msgObj.messageid) {
+                let messageId = msgObj.messageid.trim();
+                
+                // Detect if messageid is only the suffix (e.g., "3B9B7419026B9E944FD1")
+                // WhatsApp message IDs format: "false_<formattedNumber>_<suffix>"
+                // If it doesn't contain underscores or doesn't start with "false_", it's likely incomplete
+                if (!messageId.includes('_') || !messageId.startsWith('false_')) {
+                  // Construct full message ID: false_<formattedNumber>_<suffix>
+                  messageId = `false_${formattedNumber}_${messageId}`;
+                  console.log(`🔧 Constructed full message ID: ${messageId}`);
+                }
+                
+                try {
+                  // Try to get the message first to validate it exists
+                  const targetMessage = await client.client.getMessageById(messageId);
+                  
+                  if (!targetMessage) {
+                    console.log(`⚠️  Message with ID ${messageId} not found, sending as regular text`);
+                    await client.client.sendText(formattedNumber, msgObj.text);
+                    anySent = true;
+                  } else {
+                    // Extract the proper message ID format from the message object
+                    let validMessageId: string;
+                    
+                    if (targetMessage.id) {
+                      if (typeof targetMessage.id === 'object' && targetMessage.id._serialized) {
+                        validMessageId = targetMessage.id._serialized;
+                      } else if (typeof targetMessage.id === 'string') {
+                        validMessageId = targetMessage.id;
+                      } else {
+                        validMessageId = messageId; // Fallback to constructed ID
+                      }
+                    } else {
+                      validMessageId = messageId; // Fallback to constructed ID
+                    }
+                    
+                    await client.client.reply(
+                      formattedNumber,
+                      msgObj.text,
+                      validMessageId
+                    );
+                    console.log(`✅ Sent reply to message ${validMessageId}: ${msgObj.text.substring(0, 50)}...`);
+                    anySent = true;
+                  }
+                } catch (replyErr: any) {
+                  const errorMsg = replyErr?.message || replyErr;
+                  console.log(`⚠️  Failed to send reply (ID: ${messageId}): ${errorMsg}`);
+                  console.log(`🔄 Falling back to regular text...`);
+                  await client.client.sendText(formattedNumber, msgObj.text);
+                  anySent = true;
+                }
+              } else if (msgObj.text) {
+                // No messageid provided - send as regular text
+                console.log(`ℹ️  Reply type without messageid, sending as regular text`);
+                await client.client.sendText(formattedNumber, msgObj.text);
+                console.log(`✅ Sent as regular text: ${msgObj.text.substring(0, 50)}...`);
+                anySent = true;
+              }
+              break;
+
+            case 'stop-response':
+              // AI decided not to respond - log reason and stop processing
+              const reason = msgObj.reason || 'No reason provided';
+              console.log(`🛑 Stop-response received: ${reason}`);
+              console.log(`ℹ️  Skipping all message sending to user ${formattedNumber}`);
+              
+              // Stop typing indicator if it was started
+              try {
+                await client.client.stopTyping(formattedNumber);
+              } catch {}
+              
+              // Return early - don't send any messages
+              return;
+
+            default:
+              console.warn(`⚠️  Unknown message type: ${msgObj.type}`);
+          }
+        } catch (error: any) {
+          const errorMsg = error?.message || error;
+          const isInvalidNumber = String(errorMsg).includes('invalid wid') ||
+                                  String(errorMsg).includes('InvalidWidError') ||
+                                  String(errorMsg).includes('wid error');
+
+          if (isInvalidNumber) {
+            console.warn(`⚠️  Invalid WhatsApp number detected - stopping message send`);
+            return;
+          }
+
+          console.error(`⚠️  Error sending ${msgObj.type}:`, errorMsg);
+        }
+
+        // Natural delay between messages (except for reactions which are instant)
+        if (i < messageObjects.length - 1 && msgObj.type !== 'reaction') {
+          const delayMs = 1000 + Math.floor(Math.random() * 2000);
+          console.log(`⏳ Waiting ${delayMs}ms before next workflow bubble`);
+          
+          // Show typing indicator during the delay
+          try {
+            await client.client.startTyping(formattedNumber);
+          } catch {}
+          
+          // Wait with typing indicator showing
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      }
+
+      if (!anySent) {
+        console.warn(`⚠️  No messages were sent successfully from workflow response`);
+      }
+
+      // Stop typing indicator after all messages are sent
+      try {
+        await client.client.stopTyping(formattedNumber);
+      } catch {}
+
     } catch (error) {
-      console.log('⚠️ Error in WhatsApp formatting, sending original content', error);
-      return content;
+      console.error('❌ Error in sendWorkflowMessages:', error);
+      // Ensure typing indicator is stopped even on error
+      try {
+        await client.client.stopTyping(formattedNumber);
+      } catch {}
+      throw error;
     }
   }
 
@@ -1279,397 +1183,48 @@ export class WPPConnectMessageHandler {
       let aiagent: any;
       aiagent = await this.callInferenceFw(message, number, userName, clientId);
       
-      if (aiagent && aiagent.text) {
-        const responsePreview = aiagent.text.length > 100 ? aiagent.text.substring(0, 100) + '...' : aiagent.text;
-        console.log(`🤖 [${clientId}] AI Response: ${responsePreview}`);
-      }
-      
-      // Validate that we have a valid response text
-      if (!aiagent || !aiagent.text) {
-        console.error('❌ Invalid AI response:', aiagent);
+      // Get client for sending
+      const client = this.whatsappService.getClient(clientId);
+      if (!client || !client.client) {
+        console.error('❌ Client not found or not ready');
         return;
       }
-      
-      try {
-        // Check for sendText template in ORIGINAL response (before WhatsApp formatting)
-        // Checking for sendText template - silent
-        const templateCheck = this.parseSendTextTemplate(aiagent.text);
+
+      // Workflow format - use object array
+      if (aiagent && aiagent.result && aiagent.result.content && aiagent.result.content.object) {
+        const messageObjects = aiagent.result.content.object;
+        console.log(`🤖 [${clientId}] Received workflow response with ${messageObjects.length} message objects`);
         
-        // Determine which text to format for WhatsApp
-        // If template detected, use cleanText (without JSON), otherwise use original
-        const textToFormat = templateCheck.hasTemplate ? templateCheck.cleanText : aiagent.text;
-        
-        // Format the response for WhatsApp (this will NOT include the JSON template)
-        const formattedResponse = this.convertLLMToWhatsApp(textToFormat);
-        
-        if (templateCheck.hasTemplate && templateCheck.templateData) {
-          // Send the message with template buttons directly
-          console.log(`🔘 Detected sendText template, sending with buttons`);
-          
-          const client = this.whatsappService.getClient(clientId);
-          if (client && client.client) {
-            try {
-              // Use formatted clean text (with WhatsApp formatting applied)
-              await client.client.sendText(
-                formattedNumber || '',
-                formattedResponse,
-                templateCheck.templateData
-              );
-              console.log(`✅ Sent text with interactive buttons`);
-              return; // Done - template sent successfully
-            } catch (templateError: any) {
-              console.log(`⚠️  Template send failed: ${templateError?.message || templateError}`);
-              console.log(`📝 Falling back to regular formatted message...`);
-              // Don't return - continue to send as regular message below
-            }
-          }
-        }
-        
-        // Parse response for media URLs and text parts (regular messages)
-        const outgoingParts = this.parseResponseForMedia(formattedResponse);
-        
-        // Get client for sending
-        const client = this.whatsappService.getClient(clientId);
-        if (!client || !client.client) {
-          console.error('❌ Client not found or not ready');
+        try {
+          await this.sendWorkflowMessages(client, clientId, formattedNumber, messageObjects);
+          return;
+        } catch (error) {
+          console.error('❌ Error sending workflow messages:', error);
           return;
         }
+      }
+      
+      // Fallback: If workflow response has text but no object array, use text
+      if (aiagent && aiagent.result && aiagent.result.content && aiagent.result.content.text) {
+        const text = aiagent.result.content.text;
+        console.log(`🤖 [${clientId}] Received workflow response with text only (no object array)`);
         
-        // Check memory before processing media-heavy operations
-        const memUsage = process.memoryUsage();
-        const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
-        const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
-        const memPercent = Math.round((heapUsedMB / heapTotalMB) * 100);
-        
-        if (memPercent > 95) {
-          console.warn(`⚠️  High memory usage (${memPercent}%) - may affect media processing`);
+        try {
+          await client.client.sendText(formattedNumber, text);
+          console.log(`✅ Sent text-only workflow response`);
+          return;
+        } catch (error) {
+          console.error('❌ Error sending text-only workflow response:', error);
+          return;
         }
-        
-        // Track if ANY part was successfully sent
-        let anySent = false;
-        
-        // Send each part with typing indicator
-        for (let i = 0; i < outgoingParts.length; i++) {
-          const part = outgoingParts[i];
-          if (!part) continue;
-          
-          try {
-            // Show typing before each part
-            await client.client.startTyping(formattedNumber || '');
-          } catch {}
-
-          if (part.kind === 'media') {
-            try {
-              const mediaUrl = String(part.value);
-              console.log(`🖼️ Sending media from URL: ${mediaUrl}`);
-              
-              // Check if it's a location (starts with #loc: or #loc-)
-              if (mediaUrl.startsWith('#loc:') || mediaUrl.startsWith('#loc-')) {
-                const locationData = mediaUrl.replace(/^#loc[:-]/, '').trim();
-                console.log(`📍 Detected location data: ${locationData}`);
-                
-                // Parse latitude and longitude (format: lat;lng or lat,lng)
-                const coords = locationData.split(/[;,]/);
-                if (coords.length >= 2 && coords[0] && coords[1]) {
-                  const latitude = coords[0].trim();
-                  const longitude = coords[1].trim();
-                  const title = coords[2]?.trim() || 'Location'; // Optional title
-                  
-                  console.log(`📍 Sending location - Lat: ${latitude}, Lng: ${longitude}, Title: ${title}`);
-                  
-                  try {
-                    await client.client.sendLocation(
-                      formattedNumber || '',
-                      latitude,
-                      longitude,
-                      title
-                    );
-                    console.log(`✅ Sent location: ${latitude}, ${longitude}`);
-                  } catch (locError: any) {
-                    console.error(`❌ Failed to send location:`, locError);
-                  }
-                } else {
-                  console.error(`❌ Invalid location format: ${locationData} (expected: lat;lng or lat,lng)`);
-                }
-              }
-              // Check if it's a sticker (starts with #sticker:)
-              else if (mediaUrl.startsWith('#sticker:')) {
-                const stickerUrl = mediaUrl.replace('#sticker:', '').trim();
-                const urlLower = stickerUrl.toLowerCase();
-                
-                console.log(`🔍 Sticker URL: ${stickerUrl}`);
-                console.log(`🔍 URL lowercase: ${urlLower}`);
-                
-                // Check if it's an animated sticker (GIF or WEBP)
-                // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
-              const isAnimated = urlLower.match(/\.(gif|webp)(?=\?|#|$)/i);
-                console.log(`🔍 isAnimated match result: ${isAnimated ? 'YES - ' + isAnimated[0] : 'NO'}`);
-                
-                const stickerStartTime = Date.now();
-                console.log(`⏱️  [STICKER START] Beginning sticker processing at ${new Date().toISOString()}`);
-                
-                // Add timeout wrapper for sticker sending (30 second timeout)
-                const stickerTimeout = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error('Sticker sending timeout after 30s')), 30000)
-                );
-                
-                if (isAnimated) {
-                  console.log(`🎭 Sending as animated sticker (GIF/WEBP): ${stickerUrl}`);
-                  try {
-                    // Check if memory is critically low before processing
-                    if (memPercent > 97) {
-                      console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker to prevent hang`);
-                      throw new Error(`Memory too low (${memPercent}%) for sticker processing`);
-                    }
-                    
-                    await Promise.race([
-                      client.client.sendImageAsStickerGif(
-                        formattedNumber || '',
-                        stickerUrl
-                      ),
-                      stickerTimeout
-                    ]);
-                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
-                    console.log(`✅ Sent animated sticker from ${stickerUrl} (took ${stickerDuration}s)`);
-                    anySent = true; // Mark successful send
-                  } catch (stickerErr: any) {
-                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
-                    console.error(`❌ Failed to send animated sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
-                    console.log(`⚠️  Skipping sticker, will send text fallback if available`);
-                    // Don't throw - continue with other parts
-                  }
-                } else {
-                  console.log(`🎭 Sending as static sticker: ${stickerUrl}`);
-                  try {
-                    // Check if memory is critically low before processing
-                    if (memPercent > 97) {
-                      console.warn(`⚠️  Memory critically low (${memPercent}%), skipping sticker to prevent hang`);
-                      throw new Error(`Memory too low (${memPercent}%) for sticker processing`);
-                    }
-                    
-                    await Promise.race([
-                      client.client.sendImageAsSticker(
-                        formattedNumber || '',
-                        stickerUrl
-                      ),
-                      stickerTimeout
-                    ]);
-                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
-                    console.log(`✅ Sent static sticker from ${stickerUrl} (took ${stickerDuration}s)`);
-                    anySent = true; // Mark successful send
-                  } catch (stickerErr: any) {
-                    const stickerDuration = ((Date.now() - stickerStartTime) / 1000).toFixed(2);
-                    console.error(`❌ Failed to send static sticker after ${stickerDuration}s:`, stickerErr?.message || stickerErr);
-                    console.log(`⚠️  Skipping sticker, will send text fallback if available`);
-                    // Don't throw - continue with other parts
-                  }
-                }
-              } else {
-                // Determine media type from URL extension or content
-                const urlLower = mediaUrl.toLowerCase();
-                let mimeType = 'application/octet-stream'; // default (includes PDFs, documents, archives)
-                
-                // Check extensions (allowing query parameters)
-                // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
-                if (urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(?=\?|#|$)/i)) {
-                  mimeType = 'image/';
-                // Support extensions in middle of URL
-                } else if (urlLower.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv|m4v)(?=\?|#|$)/i)) {
-                  mimeType = 'video/';
-                } else if (urlLower.match(/\.(mp3|wav|ogg|m4a|aac)(?=\?|#|$)/i)) {
-                  mimeType = 'audio/';
-                }
-                
-                // Send using WPPConnect's direct URL support
-                if (mimeType.startsWith('image/')) {
-                  // Send as image using URL directly
-                  if (part.caption) {
-                    await client.client.sendImage(
-                      formattedNumber || '',
-                      mediaUrl,
-                      undefined, // filename (optional)
-                      part.caption
-                    );
-                  } else {
-                    await client.client.sendImage(
-                      formattedNumber || '',
-                      mediaUrl
-                    );
-                  }
-                  console.log(`✅ Sent image from URL: ${mediaUrl}`);
-                } else {
-                  // Send as file using URL directly
-                  if (part.caption) {
-                    await client.client.sendFile(
-                      formattedNumber || '',
-                      mediaUrl,
-                      undefined, // filename (optional)
-                      part.caption
-                    );
-                  } else {
-                    await client.client.sendFile(
-                      formattedNumber || '',
-                      mediaUrl
-                    );
-                  }
-                  console.log(`✅ Sent file from URL: ${mediaUrl}`);
-                }
-              }
-              
-            } catch (mediaErr: any) {
-              const errorMsg = mediaErr?.message || mediaErr;
-              const isInvalidNumber = String(errorMsg).includes('invalid wid') || 
-                                      String(errorMsg).includes('InvalidWidError') ||
-                                      String(errorMsg).includes('wid error');
-              
-              if (isInvalidNumber) {
-                console.warn(`⚠️  Invalid WhatsApp number detected for ${number} - stopping message send`);
-                return; // Stop processing this message entirely
-              }
-              
-              console.log(`⚠️ Failed to send media ${String(part.value)}:`, errorMsg);
-              // Fallback: send URL as text
-              try {
-                await client.client.sendText(formattedNumber || '', String(part.value));
-              } catch (fallbackErr: any) {
-                const fallbackMsg = fallbackErr?.message || fallbackErr;
-                if (String(fallbackMsg).includes('invalid wid')) {
-                  console.warn(`⚠️  Invalid WhatsApp number - skipping fallback`);
-                  return;
-                }
-              }
-            }
-          } else if (part.kind === 'link') {
-            // Send link preview
-            try {
-              const linkUrl = String(part.value);
-              const linkTitle = part.caption || '';
-              
-              console.log(`🔗 Sending link preview: "${linkTitle}" -> ${linkUrl}`);
-              
-              await client.client.sendLinkPreview(
-                formattedNumber || '',
-                linkUrl,
-                linkTitle
-              );
-              console.log(`✅ Sent link preview: ${linkUrl}`);
-              
-            } catch (linkErr: any) {
-              console.log(`⚠️ Failed to send link preview ${String(part.value)}:`, linkErr?.message || linkErr);
-              // Fallback: send URL as text with title
-              const fallbackText = part.caption ? `${part.caption} ${part.value}` : String(part.value);
-              await client.client.sendText(formattedNumber || '', fallbackText);
-            }
-          } else {
-            // Send text part - check for special patterns
-            try {
-              const textContent = String(part.value);
-              const quotedMsgId = part.quotedMsgId;
-              
-              // Check if text contains #sticker: pattern
-              if (textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i)) {
-                const stickerMatch = textContent.match(/#sticker:\s*(https?:\/\/[^\s]+)/i);
-                if (stickerMatch && stickerMatch[1]) {
-                  const stickerUrl = stickerMatch[1];
-                  console.log(`🎭 Sending as sticker from text: ${stickerUrl}`);
-                  
-                  const targetNumber = formattedNumber || '';
-                  await client.client.sendImageAsSticker(
-                    targetNumber,
-                    stickerUrl
-                  );
-                  console.log(`✅ Sent sticker from text: ${stickerUrl}`);
-                  
-                  // Remove the sticker part from the text and send the remaining text
-                  const remainingText = textContent.replace(/#sticker:\s*https?:\/\/[^\s]+/gi, '').trim();
-                  if (remainingText) {
-                    // Send with quotedMsg if available, with fallback
-                    if (quotedMsgId) {
-                      console.log(`💬 Sending text with quoted message ID: ${quotedMsgId}`);
-                      try {
-                        await client.client.sendText(formattedNumber || '', remainingText, {
-                          quotedMsg: quotedMsgId
-                        });
-                      } catch (quotedErr: any) {
-                        console.log(`⚠️  Failed to send with quotedMsg: ${quotedErr?.message || quotedErr}`);
-                        console.log(`🔄 Retrying without quotedMsg...`);
-                        await client.client.sendText(formattedNumber || '', remainingText);
-                      }
-                    } else {
-                      await client.client.sendText(formattedNumber || '', remainingText);
-                    }
-                    console.log(`✅ Sent remaining text: ${remainingText}`);
-                  }
-                }
-              } else {
-                // Regular text - send with quotedMsg if available, with fallback
-                if (quotedMsgId) {
-                  console.log(`💬 Sending text with quoted message ID: ${quotedMsgId}`);
-                  try {
-                    await client.client.sendText(formattedNumber || '', textContent, {
-                      quotedMsg: quotedMsgId
-                    });
-                  } catch (quotedErr: any) {
-                    console.log(`⚠️  Failed to send with quotedMsg: ${quotedErr?.message || quotedErr}`);
-                    console.log(`🔄 Retrying without quotedMsg...`);
-                    await client.client.sendText(formattedNumber || '', textContent);
-                  }
-                } else {
-                  await client.client.sendText(formattedNumber || '', textContent);
-                }
-                anySent = true; // Mark successful send
-              }
-            } catch (textErr: any) {
-              const errorMsg = textErr?.message || textErr;
-              const isInvalidNumber = String(errorMsg).includes('invalid wid') || 
-                                      String(errorMsg).includes('InvalidWidError') ||
-                                      String(errorMsg).includes('wid error');
-              
-              if (isInvalidNumber) {
-                console.warn(`⚠️  Invalid WhatsApp number detected for ${number} - stopping message send`);
-                return; // Stop processing this message entirely
-              }
-              
-              console.log('⚠️ Error sending text part:', errorMsg);
-            }
-          }
-
-          // Natural delay between parts
-          if (i < outgoingParts.length - 1) {
-            const delayMs = 1000 + Math.floor(Math.random() * 2000);
-            console.log(`⏳ Waiting ${delayMs}ms before next part`);
-            
-            try {
-              await client.client.startTyping(formattedNumber || '');
-            } catch {}
-            
-            await new Promise(resolve => setTimeout(resolve, delayMs));
-          }
-        }
-        
-        // Fallback: If nothing was sent (likely due to memory issues), send text-only
-        if (!anySent && formattedResponse) {
-          console.warn(`⚠️  No parts were sent successfully - sending text-only fallback`);
-          try {
-            // Strip all media markers and send clean text
-            const cleanText = formattedResponse
-              .replace(/#sticker:?\s*https?:\/\/[^\s]+/gi, '')
-              .replace(/#loc[:-][^\s]+/gi, '')
-              .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g, '')
-              .trim();
-            
-            if (cleanText) {
-              await client.client.sendText(formattedNumber || '', cleanText);
-              console.log(`✅ Sent text-only fallback`);
-              anySent = true;
-            }
-          } catch (fallbackError) {
-            console.error(`❌ Even text-only fallback failed:`, fallbackError);
-          }
-        }
-        
+      }
+      
+      // Invalid response format
+      console.error('❌ Invalid workflow response format:', aiagent);
+      try {
+        await client.client.sendText(formattedNumber, 'Sorry, I received an invalid response from the AI service.');
       } catch (error) {
-        console.error('❌ Error sending message:', error);
+        console.error('❌ Error sending error message:', error);
       }
       
     } catch (error) {
@@ -1677,293 +1232,21 @@ export class WPPConnectMessageHandler {
     }
   }
 
-  private parseResponseForMedia(text: string): Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string, quotedMsgId?: string }> {
-    const outgoingParts: Array<{ kind: 'text' | 'media' | 'link', value: string, caption?: string, quotedMsgId?: string }> = [];
-    
-    // Pre-process text to remove duplicate URLs and wrapped URLs in parentheses/brackets
-    // Pattern: url (url) -> url
-    text = text.replace(/(https?:\/\/[^\s]+)\s+\(\1\)/g, '$1');
-    
-    // Remove parentheses/brackets wrapping URLs (for media files)
-    // Pattern: (https://example.com/image.png) -> https://example.com/image.png
-    // Pattern: [https://example.com/file.pdf] -> https://example.com/file.pdf
-    // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
-    // Use non-greedy matching to find extension before query params
-    text = text.replace(/\(\s*(https?:\/\/[^\s\)]*?\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\)]*)?)\s*\)/gi, '$1');
-    text = text.replace(/\[\s*(https?:\/\/[^\s\]]*?\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|zip|rar)(?:[?#][^\s\]]*)?)\s*\]/gi, '$1');
-    
-    // Protect code blocks from being split
-    const codeBlockTokens: string[] = [];
-    text = text.replace(/```[\s\S]*?```/g, (match) => {
-      const token = `__PROTECTED_CODE_${codeBlockTokens.length}__`;
-      codeBlockTokens.push(match);
-      return token;
-    });
-    
-    // First, extract location patterns: #loc: or #loc-
-    // Format: #loc:-6.347;106.770;Title or #loc-6.347,106.770,Title
-    const locationRegex = /#loc[:-]([0-9.-]+[;,][0-9.-]+(?:[;,][^#\n]+)?)/gi;
-    const extractedMediaList: { url: string; caption?: string; isSticker?: boolean }[] = [];
-    text = text.replace(locationRegex, (match: string) => {
-      const idx = extractedMediaList.length;
-      // Store the full #loc: pattern as the "url" - will be parsed later
-      extractedMediaList.push({ url: match.trim() });
-      return `[[MEDIA_${idx}]]`;
-    });
-    
-    // Then, extract sticker patterns: #sticker: url or #sticker url
-    const stickerRegex = /#sticker:?\s*(https?:\/\/[^\s\)]+)/gi;
-    text = text.replace(stickerRegex, (_m: string, url: string) => {
-      const idx = extractedMediaList.length;
-      const cleanedUrl = this.cleanupUrl(String(url));
-      extractedMediaList.push({ url: cleanedUrl, isSticker: true });
-      return `[[MEDIA_${idx}]]`;
-    });
-    
-    // Then, extract markdown-style images: ![alt](url)
-    // Updated regex to exclude trailing ) or ] from the URL capture
-    const imageMdRegex = /!\[([^\]]*)\]\((https?:\/\/[^\s\)]+)\)/g;
-    const withMediaTokens = text.replace(imageMdRegex, (_m: string, alt: string, url: string) => {
-      const idx = extractedMediaList.length;
-      const cap = String(alt || '').trim();
-      const cleanedUrl = this.cleanupUrl(String(url));
-      
-      // Check if this is a GIF or WEBP - treat as animated sticker
-      // Support extensions in middle of URL (e.g., https://example.com/image.png?params)
-      const isAnimatedImage = /\.(gif|webp)(?=\?|#|$)/i.test(cleanedUrl);
-      
-      const mediaItem: { url: string; caption?: string; isSticker?: boolean } = { 
-        url: cleanedUrl,
-        isSticker: isAnimatedImage // Automatically mark GIF/WEBP as stickers
-      };
-      if (cap.length > 0 && !isAnimatedImage) {
-        // Don't add caption to stickers (captions not supported for stickers)
-        mediaItem.caption = cap;
-      }
-      extractedMediaList.push(mediaItem);
-      return `[[MEDIA_${idx}]]`;
-    });
-    
-    // Clean up leftover brackets/parentheses around MEDIA tokens
-    // Pattern: (URL) or [URL] becomes just URL when URL is replaced with [[MEDIA_N]]
-    // Result: ([[MEDIA_0]]) or [[[MEDIA_0]]] -> [[MEDIA_0]]
-    let cleanedText = withMediaTokens
-      .replace(/\(\s*(\[\[MEDIA_\d+\]\])\s*\)/g, '$1')  // (url) -> url
-      .replace(/\[\s*(\[\[MEDIA_\d+\]\])\s*\]/g, '$1')  // [url] -> url
-      .replace(/\(\s*(\[\[MEDIA_\d+\]\])\s*\)/g, '$1')  // Extra pass for nested
-      .replace(/\[\s*(\[\[MEDIA_\d+\]\])\s*\]/g, '$1'); // Extra pass for nested
-    
-    // Extract quoted message pattern BEFORE splitting into blocks
-    // Pattern: #quotedMsg:messageId or #quotedMsgID:messageId (at the start or on its own line)
-    let globalQuotedMsgId: string | undefined = undefined;
-    const quotedMsgMatch = cleanedText.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
-    if (quotedMsgMatch && quotedMsgMatch[1]) {
-      globalQuotedMsgId = quotedMsgMatch[1].trim();
-      // Remove the quoted message pattern from the entire text
-      cleanedText = cleanedText.replace(/^#quoted(?:Msg|MsgID):?\s*[^\s\n]+\s*\n*/i, '').trim();
-      console.log(`💬 Detected quoted message ID: ${globalQuotedMsgId}`);
-    }
-    
-    // Split by single newlines to create separate chat bubbles
-    // Each line becomes a separate WhatsApp message bubble
-    const rawBlocks = cleanedText.split('\n').map(b => b.trim()).filter(Boolean);
-    
-    // Build regex to match media URLs by extension (images, videos, audio, documents, archives)
-    const mediaExtPattern = '(?:png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|tar|gz)';
-    
-    // Track pending quotedMsgId that needs to be applied to the next non-empty part
-    let pendingQuotedMsgId: string | undefined = globalQuotedMsgId;
-    
-    // Process each block separately
-    for (let block of rawBlocks) {
-      // Check for quoted message pattern at the start of this block (inline format)
-      let quotedMsgId: string | undefined = undefined;
-      const blockQuotedMatch = block.match(/^#quoted(?:Msg|MsgID):?\s*([^\s\n]+)/i);
-      if (blockQuotedMatch && blockQuotedMatch[1]) {
-        pendingQuotedMsgId = blockQuotedMatch[1].trim();
-        // Remove the quoted message pattern from the block
-        block = block.replace(/^#quoted(?:Msg|MsgID):?\s*[^\s\n]+\s*/i, '').trim();
-        console.log(`💬 Detected quoted message ID (inline): ${pendingQuotedMsgId}`);
-      }
-      
-      // Use pending quotedMsgId for the first non-empty content
-      if (pendingQuotedMsgId && block.trim()) {
-        quotedMsgId = pendingQuotedMsgId;
-        pendingQuotedMsgId = undefined; // Clear after using
-      }
-      // Combined regex to match:
-      // 1) [[MEDIA_n]] tokens from markdown images
-      // 2) @media URLs
-      // 3) bare media URLs
-      // Updated to exclude trailing ) and ] from URL capture
-      const mediaUrlPattern = new RegExp(
-        `(\\[\\[MEDIA_(\\d+)\\]\\])|@\\s*(https?:\\/\\/[^\\s\\)\\]]+\\.(?:${mediaExtPattern})(?:[?#][^\\s\\)\\]]*)?)|(https?:\\/\\/[^\\s\\)\\]]+\\.(?:${mediaExtPattern})(?:[?#][^\\s\\)\\]]*)?)`,
-        'gi'
-      );
-      
-      let lastIndex = 0;
-      let match: RegExpExecArray | null;
-      let foundMedia = false;
-      
-      while ((match = mediaUrlPattern.exec(block)) !== null) {
-        foundMedia = true;
-        // Add text before the media URL
-        const textBefore = block.slice(lastIndex, match.index).trim();
-        if (textBefore) {
-          const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: textBefore };
-          if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
-          outgoingParts.push(textPart);
-        }
-        
-        if (match[1]) {
-          // Media token: [[MEDIA_n]]
-          const idx = Number(match[2] ?? -1);
-          const meta = extractedMediaList[idx];
-          if (meta && meta.url) {
-            // If it's a sticker, prefix with #sticker:
-            const mediaUrl = meta.isSticker ? `#sticker:${meta.url}` : meta.url;
-            const mediaPart: { kind: 'media'; value: string; caption?: string; quotedMsgId?: string } = { kind: 'media', value: mediaUrl };
-            if (meta.caption) {
-              mediaPart.caption = meta.caption;
-            }
-            if (quotedMsgId) mediaPart.quotedMsgId = quotedMsgId;
-            outgoingParts.push(mediaPart);
-          } else {
-            // Fallback: keep the token textually if something went wrong
-            const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: match[0] };
-            if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
-            outgoingParts.push(textPart);
-          }
-        } else {
-          // Either @media url (group 3) or bare media url (group 4)
-          const mediaUrl = (match[3] || match[4]) ?? '';
-          if (mediaUrl) {
-            const cleanedUrl = this.cleanupUrl(mediaUrl);
-            const mediaPart: { kind: 'media'; value: string; quotedMsgId?: string } = { kind: 'media', value: cleanedUrl };
-            if (quotedMsgId) mediaPart.quotedMsgId = quotedMsgId;
-            outgoingParts.push(mediaPart);
-          }
-        }
-        
-        lastIndex = match.index + match[0].length;
-      }
-      
-      // If media was found, add remaining text after last media URL
-      if (foundMedia) {
-        const textAfter = block.slice(lastIndex).trim();
-        if (textAfter) {
-          const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: textAfter };
-          if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
-          outgoingParts.push(textPart);
-        }
-      } else {
-        // If no media found in this block, check for link previews (non-media URLs)
-        const linkPreviewRegex = /^(.*?)\s*(https?:\/\/[^\s\)]+?)(\s*\)?)\s*$/i;
-        const linkMatch = block.match(linkPreviewRegex);
-        
-        if (linkMatch && linkMatch[2]) {
-          const textBeforeUrl = linkMatch[1] ? linkMatch[1].trim() : '';
-          const url = this.cleanupUrl(linkMatch[2]);
-          
-          // Check if URL is NOT a media file (not image/video/audio/documents/archives)
-          // Support extensions in middle of URL (e.g., https://quickchart.io/chart.png?c=...)
-          const isMediaUrl = /\.(png|jpe?g|gif|webp|bmp|svg|mp4|mov|m4v|webm|avi|mkv|mp3|wav|ogg|m4a|aac|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|7z|tar|gz)(?=\?|#|$)/i.test(url);
-          
-          if (!isMediaUrl && textBeforeUrl) {
-            // This is a link preview: text + URL
-            console.log(`🔗 Detected link preview: "${textBeforeUrl}" -> ${url}`);
-            const linkPart: { kind: 'link'; value: string; caption: string; quotedMsgId?: string } = { 
-              kind: 'link', 
-              value: url, 
-              caption: textBeforeUrl 
-            };
-            if (quotedMsgId) linkPart.quotedMsgId = quotedMsgId;
-            outgoingParts.push(linkPart);
-          } else {
-            // Just add as text
-            if (block.trim()) {
-              const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: block };
-              if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
-              outgoingParts.push(textPart);
-            }
-          }
-        } else {
-          // No URL found, add as regular text
-          if (block.trim()) {
-            const textPart: { kind: 'text'; value: string; quotedMsgId?: string } = { kind: 'text', value: block };
-            if (quotedMsgId) textPart.quotedMsgId = quotedMsgId;
-            outgoingParts.push(textPart);
-          }
-        }
-      }
-    }
-    
-    // If no blocks found at all, return the whole text as one part
-    if (outgoingParts.length === 0 && text.trim()) {
-      outgoingParts.push({ kind: 'text', value: text });
-    }
-    
-    // Restore protected code blocks
-    const restoredParts = outgoingParts.map(part => {
-      if (part.kind === 'text') {
-        let restoredValue = part.value;
-        restoredValue = restoredValue.replace(/__PROTECTED_CODE_(\d+)__/g, (_m, i) => {
-          return codeBlockTokens[Number(i)] || '';
-        });
-        return { ...part, value: restoredValue };
-      }
-      return part;
-    });
-    
-    return restoredParts;
-  }
-
-  private splitMessageIntoParts(message: string): string[] {
-    const maxLength = 4000;
-    if (message.length <= maxLength) {
-      return [message];
-    }
-
-    const parts: string[] = [];
-    let remaining = message;
-
-    while (remaining.length > 0) {
-      if (remaining.length <= maxLength) {
-        parts.push(remaining);
-        break;
-      }
-
-      // Find the last complete sentence within the limit
-      let cutPoint = maxLength;
-      const lastSentenceEnd = remaining.lastIndexOf('. ', maxLength);
-      const lastParagraphEnd = remaining.lastIndexOf('\n\n', maxLength);
-      
-      if (lastSentenceEnd > maxLength * 0.7) {
-        cutPoint = lastSentenceEnd + 1;
-      } else if (lastParagraphEnd > maxLength * 0.7) {
-        cutPoint = lastParagraphEnd + 2;
-      }
-
-      parts.push(remaining.substring(0, cutPoint).trim());
-      remaining = remaining.substring(cutPoint).trim();
-    }
-
-    return parts;
-  }
-
-  private async callInferenceFw(message: string, phoneNumber: string, userName: string, clientId: string): Promise<any> {
+  private async callInferenceFw(message: string, phoneNumber: string, userName: string, clientId: string): Promise<WorkflowResponse> {
     try {
       // Get agent code for this client
       const agentCode = await this.whatsappService.getClientAgent(clientId);
       if (!agentCode) {
-        console.log(`⚠️ No agent assigned to client ${clientId}`);
-        return { text: "Please connect to an agent" };
+        throw new Error(`No agent assigned to client ${clientId}`);
       }
 
       console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}`);
 
-      // Get AI endpoint URL
-      const url = this.env.FW_ENDPOINT || 'http://localhost:3000/api/agents/generalAssistanceAgent/generate/vnext';
+      // Use workflow endpoint - required
+      const url = this.env.FW_ENDPOINT_WORKFLOW;
+      if (!url) {
+        throw new Error('FW_ENDPOINT_WORKFLOW environment variable is required');
+      }
 
       const jwtSecret = this.env.JWT_SECRET;
       if (!jwtSecret) {
@@ -2053,16 +1336,26 @@ export class WPPConnectMessageHandler {
       // JWT payload creation - silent
       const authToken = jwt.sign(payload, jwtSecret, { algorithm: 'HS256' });
 
-      // threadId = agentCode:phoneNumber:whatsapp, resourceId = agentCode:phoneNumber
       const formattedPhoneNumber = phoneNumber || 'unknown';
 
+      // Workflow format request body
       const requestBody = {
-        messages: [message],
-        threadId: `${agentCode}:${formattedPhoneNumber}:whatsapp`,
-        resourceId: `${agentCode}:${formattedPhoneNumber}`
+        inputData: {
+          agent_code: "generalAssistanceAgent", // HARDCODED
+          format: "whatsapp", // HARDCODED
+          messages: [
+            {
+              role: "user", // HARDCODED
+              content: message // the [message]
+            }
+          ],
+          client_platform: "whatsapp",
+          memory: {
+            resourceId: `${agentCode}:${formattedPhoneNumber}`,
+            threadId: `${agentCode}:${formattedPhoneNumber}:whatsapp`
+          }
+        }
       };
-
-      // Request URL - silent (already logged in AI call summary)
 
       const response = await axios.post(url, requestBody, {
         headers: {
@@ -2077,13 +1370,15 @@ export class WPPConnectMessageHandler {
         console.error(`❌ [${clientId}] AI API error: Status ${response.status}`);
       }
 
-      const rsp = response.data;
-      const jsonData = {
-        text: rsp.text || rsp.message || '',
-        usage: rsp.usage || {}
-      };
-
-      return jsonData;
+      // Parse workflow response
+      const workflowResponse: WorkflowResponse = response.data;
+      
+      if (workflowResponse && workflowResponse.result && workflowResponse.result.content) {
+        return workflowResponse;
+      } else {
+        console.error('❌ Invalid workflow response structure:', workflowResponse);
+        throw new Error('Invalid response from AI service');
+      }
 
     } catch (error) {
       console.error('❌ Error calling AI API:', error);
