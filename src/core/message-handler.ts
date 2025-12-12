@@ -19,6 +19,7 @@ export class WPPConnectMessageHandler {
   private processingUsers: { [key: string]: number } = {};
   private readReceiptSent: { [key: string]: boolean } = {};
   private contactInfo: { [key: string]: any } = {}; // Store contact metadata
+  private senderFullIds: { [key: string]: string } = {}; // Store full sender IDs (with suffix like @c.us, @lid, @g.us)
   private userPauseService: UserPauseService;
   private env: Environment;
   private tempDir: string;
@@ -147,11 +148,14 @@ export class WPPConnectMessageHandler {
 
   /**
    * Send read receipt with retry mechanism
+   * @param senderNumber - Can be either a phone number (e.g., "6287700293693") or a full WhatsApp ID (e.g., "123939971948667@lid", "6287700293693@c.us")
    */
   private async sendReadReceipt(clientId: string, senderNumber: string, maxRetries: number = 3): Promise<boolean> {
-    const chatId = `${senderNumber}@c.us`;
+    // Check if senderNumber already contains a suffix (@c.us, @lid, @g.us, etc.)
+    // If it does, use it directly as chatId; otherwise, append @c.us
+    const chatId = senderNumber.includes('@') ? senderNumber : `${senderNumber}@c.us`;
     
-    console.log(`📖 Sending read receipt for sender ${senderNumber} (client: ${clientId})`);
+    console.log(`📖 Sending read receipt for sender ${senderNumber} (chatId: ${chatId}, client: ${clientId})`);
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -207,11 +211,17 @@ export class WPPConnectMessageHandler {
 
   /**
    * Send typing indicator with retry mechanism
+   * @param senderNumber - Can be either a phone number (e.g., "6287700293693") or a full WhatsApp ID (e.g., "123939971948667@lid", "6287700293693@c.us")
    */
   private async sendTypingIndicator(clientId: string, senderNumber: string, start: boolean = true): Promise<boolean> {
-    const chatId = `${senderNumber}@c.us`;
+    // Get the full sender ID (with suffix) if available from storage, otherwise construct it
+    const userKey = this.getUserKey(clientId, senderNumber);
+    const storedFullId = (this.senderFullIds as any)[userKey];
+    // Check if senderNumber already contains a suffix (@c.us, @lid, @g.us, etc.)
+    // If it does, use it directly as chatId; otherwise, append @c.us
+    const chatId = storedFullId || (senderNumber.includes('@') ? senderNumber : `${senderNumber}@c.us`);
     
-    console.log(`⌨️  ${start ? 'Starting' : 'Stopping'} typing indicator for ${senderNumber} (client: ${clientId})`);
+    console.log(`⌨️  ${start ? 'Starting' : 'Stopping'} typing indicator for ${senderNumber} (chatId: ${chatId}, client: ${clientId})`);
     
     try {
       const client = this.whatsappService.getClient(clientId);
@@ -282,11 +292,20 @@ export class WPPConnectMessageHandler {
       return;
     }
     
-    // Also check if sender is the bot's own phone number
-    const senderNumber = message.from?.replace('@c.us', '') || 'unknown';
+    // Extract sender information - message.from can be in different formats:
+    // - "6287700293693@c.us" (regular contact)
+    // - "123939971948667@lid" (list/group)
+    // - "6287700293693@g.us" (group)
+    const senderFullId = message.from || 'unknown';
+    const senderNumber = senderFullId.replace(/@.*$/, '') || 'unknown'; // Extract just the number/ID part
+    
     const client = this.whatsappService.getClient(clientId);
-    if (client && client.phoneNumber && senderNumber === client.phoneNumber.replace('@c.us', '')) {
-      return;
+    // Check if sender is the bot's own phone number (compare numbers only, ignoring suffix)
+    if (client && client.phoneNumber) {
+      const botNumber = client.phoneNumber.replace(/@.*$/, '');
+      if (senderNumber === botNumber) {
+        return;
+      }
     }
     
     try {
@@ -406,9 +425,14 @@ export class WPPConnectMessageHandler {
         }
       }
 
+      // Store the full sender ID (with suffix) for later use (e.g., read receipts)
+      // This is important for non-standard IDs like @lid, @g.us, etc.
+      const senderFullIdForStorage = senderFullId !== 'unknown' ? senderFullId : `${senderNumber}@c.us`;
+      (this.senderFullIds as any)[userKey] = senderFullIdForStorage;
+
       // If user is already being processed, mark this message as read immediately
       if (this.processingUsers[userKey]) {
-        await this.sendReadReceipt(clientId, senderNumber);
+        await this.sendReadReceipt(clientId, senderFullIdForStorage);
       }
 
       // Add to message queue
@@ -429,8 +453,14 @@ export class WPPConnectMessageHandler {
    * Accepts either a string (will be sent as text) or an array of WorkflowMessageObject
    */
   public async sendMessageWithMedia(clientId: string, number: string, message: string | WorkflowMessageObject[]): Promise<void> {
-    // Format number
-    const formattedNumber = number.includes('@c.us') ? number : `${number}@c.us`;
+    // Get the phone number part (without suffix) for lookups
+    const phoneNumber = number.replace(/@.*$/, ''); // Remove any existing suffix
+    const userKey = this.getUserKey(clientId, phoneNumber);
+    
+    // Try to get the stored full sender ID (with correct suffix like @lid, @c.us, etc.)
+    const storedFullId = (this.senderFullIds as any)[userKey];
+    // Format number: use stored full ID if available, otherwise check if number already has suffix
+    const formattedNumber = storedFullId || (number.includes('@') ? number : `${number}@c.us`);
     
     try {
       console.log(`📤 [${clientId}] Sending message to ${number}`);
@@ -717,6 +747,10 @@ export class WPPConnectMessageHandler {
     const preDelayMs = 300; // 300ms before typing
     console.log(`⏰ Setting read/typing timer for ${senderNumber} (${preDelayMs}ms)`);
     
+    // Get the full sender ID (with suffix) if available, otherwise construct it
+    const storedFullId = (this.senderFullIds as any)[userKey];
+    const senderIdForReadReceipt = storedFullId || (senderNumber.includes('@') ? senderNumber : `${senderNumber}@c.us`);
+    
     const readTypingTimer = setTimeout(async () => {
       try {
         console.log(`📖 Read/typing timer fired for ${senderNumber}`);
@@ -724,7 +758,7 @@ export class WPPConnectMessageHandler {
         // Send read receipt only once
         if (!this.readReceiptSent[userKey]) {
           console.log(`📖 Sending read receipt for ${senderNumber}...`);
-          const readSent = await this.sendReadReceipt(clientId, senderNumber);
+          const readSent = await this.sendReadReceipt(clientId, senderIdForReadReceipt);
           if (readSent) {
             this.readReceiptSent[userKey] = true;
             console.log(`✅ Read receipt marked as sent for ${senderNumber}`);
@@ -761,6 +795,14 @@ export class WPPConnectMessageHandler {
       return;
     }
     
+    // Prevent concurrent execution - mark as processing in-flight
+    const processingKey = `${userKey}_processing`;
+    if ((this.processingUsers as any)[processingKey]) {
+      console.log(`⚠️ [${clientId}] processQueuedMessages already in progress for ${senderNumber}, skipping duplicate call`);
+      return;
+    }
+    (this.processingUsers as any)[processingKey] = true;
+    
     try {
       // Read and immediately clear the queue to prevent duplicate processing
       const messages = this.messageQueue[userKey] || [];
@@ -780,10 +822,22 @@ export class WPPConnectMessageHandler {
 
       // Silent - already processed messages are being sent
 
+      // Deduplicate messages by message ID to prevent processing the same message twice
+      const seenMessageIds = new Set<string>();
+      const uniqueMessages = messages.filter(item => {
+        const messageId = item.message?.id?._serialized || item.message?.id || item.message?.id?.id || 'unknown';
+        if (seenMessageIds.has(messageId)) {
+          console.log(`⚠️  [${clientId}] Duplicate message detected (ID: ${messageId}), skipping`);
+          return false;
+        }
+        seenMessageIds.add(messageId);
+        return true;
+      });
+
       // Combine all messages with metadata and media URLs
-      const combinedMessages = messages.map(item => {
+      const combinedMessages = uniqueMessages.map(item => {
         // Extract message metadata
-        const messageId = item.message?.id || 'unknown';
+        const messageId = item.message?.id?._serialized || item.message?.id || item.message?.id?.id || 'unknown';
         const messageTimestamp = item.message?.timestamp || item.timestamp;
         
         // Format timestamp: Thursday, 2025-04-17T17:43:35+07:00 (GMT+7)
@@ -804,6 +858,18 @@ export class WPPConnectMessageHandler {
         const metadataPrefix = `[#messageid:${messageId}#message-timestamp:${formattedTimestamp}]`;
         
         let messageText = item.enhancedText !== undefined ? item.enhancedText : '';
+        
+        // Check if messageText already contains the metadata prefix (to avoid duplication)
+        // If it does, don't add it again
+        if (messageText.includes('#messageid:') && messageText.includes('#message-timestamp:')) {
+          // Message already has metadata, return as-is (but still add media URLs if any)
+          if (item.mediaUrls && item.mediaUrls.length > 0) {
+            messageText += `\nMedia attached:\n- @[${item.mediaUrls.join(']\n- @[')}]`;
+          }
+          return messageText;
+        }
+        
+        // Add metadata prefix if not already present
         if (item.mediaUrls && item.mediaUrls.length > 0) {
           messageText += `\nMedia attached:\n- @[${item.mediaUrls.join(']\n- @[')}]`;
         }
@@ -828,6 +894,9 @@ export class WPPConnectMessageHandler {
     } catch (error) {
       console.error(`❌ Error processing messages for ${senderNumber}:`, error);
       this.cleanupProcessingState(clientId, senderNumber);
+    } finally {
+      // Always clear the processing flag
+      delete (this.processingUsers as any)[`${userKey}_processing`];
     }
   }
 
@@ -995,10 +1064,48 @@ export class WPPConnectMessageHandler {
 
             case 'reaction':
               if (msgObj.messageid && msgObj.emoji) {
-                // Note: WPPConnect may not have direct reaction support
-                // This is a placeholder - you may need to implement via WhatsApp Web API
-                console.log(`⚠️  Reaction not yet implemented: ${msgObj.emoji} to message ${msgObj.messageid}`);
-                // TODO: Implement reaction sending if WPPConnect supports it
+                let messageId = msgObj.messageid.trim();
+                
+                // Detect if messageid is only the suffix (e.g., "3B0450ADBC405C4E4D7F")
+                // WhatsApp message IDs format: "false_<formattedNumber>_<suffix>"
+                // If it doesn't contain underscores or doesn't start with "false_", it's likely incomplete
+                if (!messageId.includes('_') || !messageId.startsWith('false_')) {
+                  // Construct full message ID: false_<formattedNumber>_<suffix>
+                  messageId = `false_${formattedNumber}_${messageId}`;
+                  console.log(`🔧 Constructed full message ID for reaction: ${messageId}`);
+                }
+                
+                try {
+                  // Get the message object first to validate it exists and extract proper ID
+                  const targetMessage = await client.client.getMessageById(messageId);
+                  
+                  if (!targetMessage) {
+                    console.log(`⚠️  Message with ID ${messageId} not found for reaction`);
+                  } else {
+                    // Extract the proper message ID format from the message object
+                    let validMessageId: string;
+                    if (targetMessage.id) {
+                      if (typeof targetMessage.id === 'object' && targetMessage.id._serialized) {
+                        validMessageId = targetMessage.id._serialized;
+                      } else if (typeof targetMessage.id === 'string') {
+                        validMessageId = targetMessage.id;
+                      } else {
+                        validMessageId = messageId; // Fallback to constructed ID
+                      }
+                    } else {
+                      validMessageId = messageId; // Fallback to constructed ID
+                    }
+                    
+                    // Send reaction using WPPConnect's sendReactionToMessage
+                    // Reference: https://wppconnect.io/wa-js/functions/chat.sendReactionToMessage.html
+                    await (client.client as any).sendReactionToMessage(validMessageId, msgObj.emoji);
+                    console.log(`✅ Sent reaction ${msgObj.emoji} to message ${validMessageId}`);
+                    anySent = true;
+                  }
+                } catch (reactionErr: any) {
+                  const errorMsg = reactionErr?.message || reactionErr;
+                  console.log(`⚠️  Failed to send reaction ${msgObj.emoji} to message ${messageId}: ${errorMsg}`);
+                }
               }
               break;
 
@@ -1156,7 +1263,14 @@ export class WPPConnectMessageHandler {
     console.log(`📤 Initial: ${initial}, Campaign: ${campaign}`);
     
     try {
-      const formattedNumber = `${number || ''}@c.us`;
+      // Get the phone number part (without suffix) for lookups
+      const phoneNumber = number.replace(/@.*$/, ''); // Remove any existing suffix
+      const userKey = this.getUserKey(clientId, phoneNumber);
+      
+      // Try to get the stored full sender ID (with correct suffix like @lid, @c.us, etc.)
+      const storedFullId = (this.senderFullIds as any)[userKey];
+      // Construct formattedNumber: use stored full ID if available, otherwise construct from number
+      const formattedNumber = storedFullId || (number.includes('@') ? number : `${number}@c.us`);
       
       if (initial) {
         await this.whatsappService.sendMessage(clientId, formattedNumber, message);
@@ -1164,8 +1278,6 @@ export class WPPConnectMessageHandler {
       } 
 
       // Get user contact information from stored metadata
-      const phoneNumber = number.replace('@c.us', '');
-      const userKey = this.getUserKey(clientId, phoneNumber);
       const storedContact = this.contactInfo[userKey] || {
         name: 'WhatsApp User',
         pushname: 'WhatsApp User',
@@ -1176,9 +1288,7 @@ export class WPPConnectMessageHandler {
       
       const userName = storedContact.name || 'WhatsApp User';
 
-      // Truncate message for logging
-      const messagePreview = message.length > 100 ? message.substring(0, 100) + '...' : message;
-      console.log(`🤖 [${clientId}] Calling AI API for ${number} (${messagePreview})`);
+      // Note: Logging happens inside callInferenceFw, no need to log here
       
       let aiagent: any;
       aiagent = await this.callInferenceFw(message, number, userName, clientId);
@@ -1227,8 +1337,28 @@ export class WPPConnectMessageHandler {
         console.error('❌ Error sending error message:', error);
       }
       
-    } catch (error) {
-      console.error('❌ Error in sendMessage:', error);
+    } catch (error: any) {
+      const errorMessage = error?.message || String(error);
+      const isTimeout = errorMessage.includes('timeout') || errorMessage.includes('TIMEOUT');
+      
+      if (isTimeout) {
+        console.error(`⏱️  [${clientId}] Message processing failed due to AI API timeout for ${number}`);
+        // Optionally send a timeout message to user
+        try {
+          const client = this.whatsappService.getClient(clientId);
+          if (client && client.client) {
+            const phoneNumberPart = number.replace(/@.*$/, '');
+            const userKey = this.getUserKey(clientId, phoneNumberPart);
+            const storedFullId = (this.senderFullIds as any)[userKey];
+            const formattedNumber = storedFullId || (number.includes('@') ? number : `${number}@c.us`);
+            await client.client.sendText(formattedNumber, 'Maaf, server sedang sibuk. Silakan coba lagi dalam beberapa saat.');
+          }
+        } catch (sendError) {
+          console.error('❌ Error sending timeout message to user:', sendError);
+        }
+      } else {
+        console.error(`❌ [${clientId}] Error in sendMessage for ${number}:`, errorMessage);
+      }
     }
   }
 
@@ -1357,31 +1487,105 @@ export class WPPConnectMessageHandler {
         }
       };
 
+      // Log request summary (full message)
+      console.log(`📤 [${clientId}] Request to workflow: agent=${agentCode}, user=${formattedPhoneNumber}, message="${message}"`);
+
+      const timeoutMs = parseInt(this.env.AI_REQUEST_TIMEOUT || '300000', 10); // 5 minutes default (increased from 4)
+      const requestStartTime = Date.now();
+      
+      console.log(`⏱️  [${clientId}] Calling workflow endpoint with ${timeoutMs / 1000}s timeout...`);
+      
       const response = await axios.post(url, requestBody, {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authToken}`
         },
-        timeout: parseInt(this.env.AI_REQUEST_TIMEOUT || '240000', 10) // 4 minutes default, configurable
+        timeout: timeoutMs
       });
+
+      const requestDuration = ((Date.now() - requestStartTime) / 1000).toFixed(2);
+      console.log(`✅ [${clientId}] Workflow endpoint responded in ${requestDuration}s`);
 
       // Response status - only log errors
       if (response.status < 200 || response.status >= 300) {
         console.error(`❌ [${clientId}] AI API error: Status ${response.status}`);
       }
 
-      // Parse workflow response
-      const workflowResponse: WorkflowResponse = response.data;
-      
-      if (workflowResponse && workflowResponse.result && workflowResponse.result.content) {
-        return workflowResponse;
-      } else {
-        console.error('❌ Invalid workflow response structure:', workflowResponse);
-        throw new Error('Invalid response from AI service');
-      }
+      // Log raw response data for debugging (especially when issues occur)
+      const rawResponseData = response.data;
+      console.log(`🔍 [${clientId}] Raw response status: ${response.status}, data type: ${typeof rawResponseData}, isObject: ${typeof rawResponseData === 'object'}`);
 
-    } catch (error) {
-      console.error('❌ Error calling AI API:', error);
+      // Parse workflow response
+      const workflowResponse: WorkflowResponse = rawResponseData;
+      
+      // Log full response structure for debugging when empty
+      if (!workflowResponse || !workflowResponse.result || !workflowResponse.result.content) {
+        console.error(`❌ [${clientId}] Invalid workflow response structure`);
+        console.error(`❌ [${clientId}] Response keys:`, rawResponseData ? Object.keys(rawResponseData) : 'null');
+        console.error(`❌ [${clientId}] Full response:`, JSON.stringify(rawResponseData, null, 2).substring(0, 1000));
+        throw new Error('Invalid response from AI service - missing result or content');
+      }
+      
+      // Use formatted.whatsapp as primary source, fallback to content.object if not available
+      let messageObjects: WorkflowMessageObject[] = [];
+      
+      if (workflowResponse.result?.formatted?.whatsapp && Array.isArray(workflowResponse.result.formatted.whatsapp) && workflowResponse.result.formatted.whatsapp.length > 0) {
+        // Primary: Use formatted.whatsapp
+        messageObjects = workflowResponse.result.formatted.whatsapp;
+        console.log(`📥 [${clientId}] Using formatted.whatsapp: ${messageObjects.length} message(s)`);
+      } else if (workflowResponse.result?.content?.object && Array.isArray(workflowResponse.result.content.object) && workflowResponse.result.content.object.length > 0) {
+        // Fallback: Use content.object if formatted.whatsapp is not available
+        messageObjects = workflowResponse.result.content.object;
+        console.log(`📥 [${clientId}] Using content.object: ${messageObjects.length} message(s)`);
+      } else {
+        // No message objects found
+        console.warn(`⚠️  [${clientId}] Workflow response has no message objects in formatted.whatsapp or content.object`);
+        console.warn(`⚠️  [${clientId}] Response structure:`, {
+          status: workflowResponse.status,
+          hasFormattedWhatsapp: !!workflowResponse.result?.formatted?.whatsapp,
+          formattedWhatsappLength: Array.isArray(workflowResponse.result?.formatted?.whatsapp) ? workflowResponse.result.formatted.whatsapp.length : 'N/A',
+          hasContentObject: !!workflowResponse.result?.content?.object,
+          contentObjectLength: Array.isArray(workflowResponse.result?.content?.object) ? workflowResponse.result.content.object.length : 'N/A',
+          hasText: !!workflowResponse.result?.content?.text,
+          textPreview: workflowResponse.result?.content?.text ? workflowResponse.result.content.text.substring(0, 200) : 'N/A'
+        });
+      }
+      
+      // Set messageObjects in content.object for consistent processing downstream
+      if (messageObjects.length > 0) {
+        workflowResponse.result.content.object = messageObjects;
+        const messageTypes = messageObjects.map((obj: any) => obj.type).join(', ');
+        console.log(`📥 [${clientId}] Response from workflow: ${messageObjects.length} message(s) [${messageTypes}]`);
+      }
+      
+      return workflowResponse;
+
+    } catch (error: any) {
+      const errorMessage = error?.message || String(error);
+      const isTimeout = error?.code === 'ECONNABORTED' || 
+                       errorMessage.includes('timeout') || 
+                       errorMessage.includes('TIMEOUT') ||
+                       error?.code === 'ETIMEDOUT';
+      
+      if (isTimeout) {
+        const timeoutMs = parseInt(this.env.AI_REQUEST_TIMEOUT || '300000', 10);
+        console.error(`⏱️  [${clientId}] AI API request TIMEOUT after ${timeoutMs / 1000}s`);
+        console.error(`⏱️  [${clientId}] Timeout error details:`, {
+          code: error?.code,
+          message: errorMessage,
+          url: this.env.FW_ENDPOINT_WORKFLOW,
+          timeout: timeoutMs
+        });
+        throw new Error(`AI API request timeout after ${timeoutMs / 1000}s. The server may be processing but took too long to respond.`);
+      } else {
+        console.error(`❌ [${clientId}] Error calling AI API:`, {
+          message: errorMessage,
+          code: error?.code,
+          status: error?.response?.status,
+          statusText: error?.response?.statusText,
+          url: this.env.FW_ENDPOINT_WORKFLOW
+        });
+      }
       throw error;
     }
   }

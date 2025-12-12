@@ -447,16 +447,8 @@ export class WPPConnectClientManager {
                 client.onMessage(messageHandler);
                 console.log(`✅ [${clientId}] client.onMessage() registered`);
                 
-                // Also register onAnyMessage as fallback
-                if (typeof client.onAnyMessage === 'function') {
-                  client.onAnyMessage(async (msg: any) => {
-                    // onAnyMessage is a fallback - don't log every event
-                    await messageHandler(msg);
-                  });
-                  console.log(`✅ [${clientId}] client.onAnyMessage() registered`);
-                } else {
-                  console.warn(`⚠️  [${clientId}] client.onAnyMessage is not available`);
-                }
+                // NOTE: onAnyMessage is NOT registered to prevent duplicate message processing
+                // onMessage already handles all incoming messages, so onAnyMessage is redundant
                 
                 (clientInfo as any)._messageHandlerRegistered = true;
                 console.log(`✅ [${clientId}] Message handlers registered and ready`);
@@ -515,14 +507,11 @@ export class WPPConnectClientManager {
                 if (messageHandler) {
                   try {
                     client.onMessage(messageHandler);
-                    client.onAnyMessage(async (msg: any) => {
-                      // onAnyMessage is a fallback - don't log every event
-                      await messageHandler(msg);
-                    });
+                    // NOTE: onAnyMessage is NOT registered to prevent duplicate message processing
                     (clientInfo as any)._messageHandlerRegistered = true;
-                    console.log(`✅ [${clientId}] Handlers registered (waiting for QR scan to connect)`);
+                    console.log(`✅ [${clientId}] Handler registered (waiting for QR scan to connect)`);
                   } catch (regError) {
-                    console.error(`❌ [${clientId}] Error registering handlers in UNPAIRED state:`, regError);
+                    console.error(`❌ [${clientId}] Error registering handler in UNPAIRED state:`, regError);
                   }
                 }
               }, 2000);
@@ -1044,18 +1033,16 @@ export class WPPConnectClientManager {
   }
 
   /**
-   * Periodic session backup to MongoDB
-   * Backs up all active authenticated sessions every 30 minutes
+   * Daily session backup to MongoDB
+   * Backs up all active authenticated sessions daily at 1:00 AM
    */
   private startPeriodicSessionBackup(): void {
     if (this.sessionBackupInterval) {
-      clearInterval(this.sessionBackupInterval);
+      clearTimeout(this.sessionBackupInterval);
     }
 
-    const backupIntervalMs = 30 * 60 * 1000; // 30 minutes
-    
-    this.sessionBackupInterval = setInterval(async () => {
-      console.log('🔄 Starting periodic session backup to MongoDB...');
+    const performBackup = async () => {
+      console.log('🔄 Starting daily session backup to MongoDB (scheduled at 1:00 AM)...');
       let backedUp = 0;
       let failed = 0;
       
@@ -1073,19 +1060,52 @@ export class WPPConnectClientManager {
               await this.sessionBackup.cleanupOldWhatsAppBackups(clientId, 2);
             } else {
               failed++;
-              console.warn(`⚠️  [${clientId}] Periodic backup failed`);
+              console.warn(`⚠️  [${clientId}] Daily backup failed`);
             }
           } catch (error) {
             failed++;
-            console.error(`❌ [${clientId}] Periodic backup error:`, error);
+            console.error(`❌ [${clientId}] Daily backup error:`, error);
           }
         }
       }
       
-      console.log(`🔄 Periodic session backup completed: ${backedUp} backed up, ${failed} failed`);
-    }, backupIntervalMs);
+      console.log(`🔄 Daily session backup completed: ${backedUp} backed up, ${failed} failed`);
+      
+      // Schedule next backup for tomorrow at 1:00 AM
+      scheduleNextBackup();
+    };
 
-    console.log(`💾 Periodic session backup started (every 30 minutes)`);
+    const scheduleNextBackup = () => {
+      const now = new Date();
+      const nextBackup = new Date();
+      
+      // Set next backup time to 1:00 AM
+      nextBackup.setHours(1, 0, 0, 0);
+      
+      // If it's already past 1:00 AM today, schedule for tomorrow
+      if (now.getHours() >= 1 && (now.getHours() > 1 || now.getMinutes() > 0)) {
+        nextBackup.setDate(nextBackup.getDate() + 1);
+      }
+      
+      const msUntilNextBackup = nextBackup.getTime() - now.getTime();
+      
+      this.sessionBackupInterval = setTimeout(() => {
+        performBackup();
+      }, msUntilNextBackup);
+      
+      const nextBackupStr = nextBackup.toLocaleString('en-US', { 
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      console.log(`💾 Daily session backup scheduled for: ${nextBackupStr} (in ${Math.round(msUntilNextBackup / 1000 / 60)} minutes)`);
+    };
+
+    // Schedule the first backup
+    scheduleNextBackup();
   }
 
   private async performHealthCheck(): Promise<void> {
@@ -1188,8 +1208,8 @@ export class WPPConnectClientManager {
     }
     
     if (this.sessionBackupInterval) {
-      clearInterval(this.sessionBackupInterval);
-      console.log('✅ Session backup interval cleared');
+      clearTimeout(this.sessionBackupInterval);
+      console.log('✅ Session backup scheduled task cleared');
     }
 
     // Disconnect all clients
