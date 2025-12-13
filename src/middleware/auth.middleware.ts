@@ -75,8 +75,10 @@ export class AuthMiddleware {
 
                 console.log(`🔐 Authenticated user: ${req.user?.id}`);
                 next();
-            } catch (jwtError) {
-                console.error('❌ JWT verification failed:', jwtError);
+            } catch (jwtError: any) {
+                // Log error message without full stack trace for cleaner logs
+                const errorMessage = jwtError instanceof Error ? jwtError.message : String(jwtError);
+                console.error(`❌ JWT verification failed: ${errorMessage}`);
                 res.status(401).json({
                     success: false,
                     error: 'Invalid or expired token'

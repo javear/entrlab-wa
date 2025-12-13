@@ -303,24 +303,17 @@ export class WPPConnectWhatsAppController {
         return;
       }
       
-      console.log(`🔄 Resetting client: ${clientId}`);
+      console.log(`🔄 Resetting client: ${clientId} (deleting old session data and creating fresh session)`);
       
-      // Disconnect existing client
-      await this.whatsappService.disconnectClient(clientId);
+      // Disconnect existing client and delete all session data permanently
+      await this.whatsappService.disconnectClient(clientId, true);
       
-      // Delete session backup from MongoDB
-      const clientManager = (this.whatsappService as any).clientManager;
-      if (clientManager && clientManager.sessionBackup) {
-        // Note: We don't delete backups on reset, just recreate client
-        console.log(`🔄 [${clientId}] Will create fresh session (backups preserved)`);
-      }
-      
-      // Recreate client (will generate fresh QR)
+      // Recreate client (will generate fresh QR and create new session)
       await this.whatsappService.createClient(clientId);
       
       res.json({
         success: true,
-        message: `Client ${clientId} reset successfully - new QR code will be generated`,
+        message: `Client ${clientId} reset successfully - all old session data deleted, new QR code will be generated`,
         clientId
       });
     } catch (error) {
@@ -534,19 +527,39 @@ export class WPPConnectWhatsAppController {
         });
         return;
       }
-      const success = await this.whatsappService.disconnectClient(clientId);
+      
+      console.log(`🗑️  Removing client ${clientId} permanently (deleting all session data)...`);
+      
+      // Check if client exists in memory
+      const clientExists = this.whatsappService.getClient(clientId) !== undefined;
+      
+      // Permanently delete client and all session data (local folders, MongoDB backups, tokens)
+      const disconnectSuccess = await this.whatsappService.disconnectClient(clientId, true);
 
-      if (!success) {
+      // If client wasn't in memory, try to delete session data anyway
+      let sessionDataDeleted = false;
+      if (!clientExists) {
+        const clientManager = (this.whatsappService as any).clientManager;
+        if (clientManager) {
+          sessionDataDeleted = await clientManager['deleteAllSessionData'](clientId);
+        }
+      } else {
+        // If client was in memory, disconnectClient with deletePermanently=true already deleted session data
+        sessionDataDeleted = true;
+      }
+
+      // If neither client nor session data exists, return 404
+      if (!clientExists && !sessionDataDeleted) {
         res.status(404).json({
           success: false,
-          message: 'WPPConnect client not found'
+          message: `WPPConnect client '${clientId}' not found and no session data exists`
         });
         return;
       }
 
       res.json({
         success: true,
-        message: 'WPPConnect client removed successfully'
+        message: 'WPPConnect client removed successfully (all session data deleted permanently)'
       });
     } catch (error) {
       console.error('❌ Error removing WPPConnect client:', error);

@@ -83,8 +83,8 @@ export class WPPConnectWhatsAppService {
     return await this.clientManager.sendMessage(clientId, number, message);
   }
 
-  public async disconnectClient(clientId: string): Promise<boolean> {
-    return await this.clientManager.disconnectClient(clientId);
+  public async disconnectClient(clientId: string, deletePermanently: boolean = false): Promise<boolean> {
+    return await this.clientManager.disconnectClient(clientId, deletePermanently);
   }
 
   public async forceCleanupSession(clientId: string): Promise<boolean> {

@@ -874,21 +874,191 @@ export class WPPConnectClientManager {
     }
   }
 
-  public async disconnectClient(clientId: string): Promise<boolean> {
+  /**
+   * Delete all session data for a client (local folders, MongoDB backups, tokens)
+   * This ensures the client won't be recreated on restart
+   * @returns true if any session data was found and deleted, false otherwise
+   */
+  public async deleteAllSessionData(clientId: string): Promise<boolean> {
+    console.log(`🗑️  Deleting all session data for ${clientId}...`);
+    
+    let foundAnyData = false;
+    
+    try {
+      // 1. Delete local session folder
+      const tokensPath = path.join(process.cwd(), 'tokens', clientId);
+      if (fs.existsSync(tokensPath)) {
+        try {
+          // Use rmSync with maxRetries for more robust deletion
+          // This handles cases where files might be locked or in use
+          const deleteRecursive = (dirPath: string): void => {
+            if (fs.existsSync(dirPath)) {
+              const files = fs.readdirSync(dirPath);
+              files.forEach((file) => {
+                const filePath = path.join(dirPath, file);
+                const stat = fs.statSync(filePath);
+                if (stat.isDirectory()) {
+                  deleteRecursive(filePath);
+                } else {
+                  try {
+                    fs.unlinkSync(filePath);
+                  } catch (unlinkError: any) {
+                    // If file is locked, try to make it writable and retry
+                    if (unlinkError.code === 'EACCES' || unlinkError.code === 'EPERM') {
+                      try {
+                        fs.chmodSync(filePath, 0o666);
+                        fs.unlinkSync(filePath);
+                      } catch (retryError) {
+                        console.warn(`⚠️  Could not delete locked file ${filePath}, skipping`);
+                      }
+                    } else {
+                      throw unlinkError;
+                    }
+                  }
+                }
+              });
+              try {
+                fs.rmdirSync(dirPath);
+              } catch (rmdirError: any) {
+                // If directory still has files, try force removal
+                if (rmdirError.code === 'ENOTEMPTY') {
+                  // Retry with a small delay in case files are being released
+                  setTimeout(() => {
+                    try {
+                      fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3 });
+                    } catch (retryError) {
+                      console.warn(`⚠️  Could not delete directory ${dirPath} after retry`);
+                    }
+                  }, 100);
+                } else {
+                  throw rmdirError;
+                }
+              }
+            }
+          };
+          
+          deleteRecursive(tokensPath);
+          // Final check - try rmSync as fallback if directory still exists
+          if (fs.existsSync(tokensPath)) {
+            fs.rmSync(tokensPath, { recursive: true, force: true, maxRetries: 3 });
+          }
+          console.log(`✅ Deleted local session folder: ${tokensPath}`);
+          foundAnyData = true;
+        } catch (error: any) {
+          // If still failing, log but don't throw - continue with other deletions
+          console.error(`⚠️  Error deleting local session folder for ${clientId}:`, error.message || error);
+          // Try one more time with a simple rmSync
+          try {
+            if (fs.existsSync(tokensPath)) {
+              fs.rmSync(tokensPath, { recursive: true, force: true });
+            }
+          } catch (finalError) {
+            console.warn(`⚠️  Final attempt to delete ${tokensPath} failed, directory may need manual cleanup`);
+          }
+        }
+      }
+
+      // 2. Delete MongoDB GridFS WhatsApp session backups
+      if (this.sessionBackup) {
+        try {
+          const files = await this.sessionBackup['gridFS'].find({ 
+            filename: `${clientId}_whatsapp_session.zip`,
+            'metadata.type': 'whatsapp_specific'
+          }).toArray();
+          
+          for (const file of files) {
+            try {
+              await this.sessionBackup['gridFS'].delete(file._id);
+              console.log(`✅ Deleted WhatsApp session backup: ${file.filename} (${file._id})`);
+              foundAnyData = true;
+            } catch (error) {
+              console.error(`⚠️  Error deleting WhatsApp backup ${file._id}:`, error);
+            }
+          }
+          
+          if (files.length > 0) {
+            console.log(`✅ Deleted ${files.length} WhatsApp session backup(s) from MongoDB`);
+          }
+        } catch (error) {
+          console.error(`⚠️  Error deleting WhatsApp session backups for ${clientId}:`, error);
+        }
+      }
+
+      // 3. Delete browser session backups from MongoDB GridFS
+      try {
+        const { deleteBrowserSessionFromMongo } = require('./tokenstore');
+        const deleted = await deleteBrowserSessionFromMongo(clientId);
+        if (deleted) {
+          foundAnyData = true;
+        }
+      } catch (error) {
+        console.error(`⚠️  Error deleting browser session backups for ${clientId}:`, error);
+      }
+
+      // 4. Delete WPPConnect tokens from MongoDB
+      try {
+        // Get the mongoose model (same way tokenstore.ts does it)
+        const WPPConnectSession = mongoose.model('WPPConnectSession');
+        const result = await WPPConnectSession.deleteOne({ sessionName: clientId });
+        if (result.deletedCount > 0) {
+          console.log(`✅ Deleted WPPConnect token for ${clientId} from MongoDB`);
+          foundAnyData = true;
+        }
+      } catch (error) {
+        console.error(`⚠️  Error deleting WPPConnect token for ${clientId}:`, error);
+      }
+
+      // 5. Delete client-agent assignment from MongoDB
+      try {
+        const ClientAgent = mongoose.model('ClientAgent');
+        const result = await ClientAgent.deleteOne({ clientId });
+        if (result.deletedCount > 0) {
+          console.log(`✅ Deleted client-agent assignment for ${clientId} from MongoDB`);
+          foundAnyData = true;
+        }
+      } catch (error) {
+        console.error(`⚠️  Error deleting client-agent assignment for ${clientId}:`, error);
+      }
+
+      if (foundAnyData) {
+        console.log(`✅ All session data deleted for ${clientId}`);
+      } else {
+        console.log(`📋 No session data found for ${clientId}`);
+      }
+      
+      return foundAnyData;
+    } catch (error) {
+      console.error(`❌ Error deleting session data for ${clientId}:`, error);
+      // Return true if we found any data before the error, false otherwise
+      return foundAnyData;
+    }
+  }
+
+  public async disconnectClient(clientId: string, deletePermanently: boolean = false): Promise<boolean> {
     const clientInfo = this.clients.get(clientId);
-    if (!clientInfo) {
+    if (!clientInfo && !deletePermanently) {
       return false;
     }
 
     try {
-      // No need to sync before disconnect - periodic backups handle this
-      // Sessions are already backed up every 30 minutes and after authentication
-      
-      if (clientInfo.client) {
+      // Close client if it exists
+      if (clientInfo && clientInfo.client) {
         await clientInfo.client.close();
       }
-      this.clients.delete(clientId);
-      console.log(`✅ WPPConnect client ${clientId} disconnected successfully`);
+      
+      // Remove from memory
+      if (clientInfo) {
+        this.clients.delete(clientId);
+      }
+
+      // If permanent deletion requested, delete all session data
+      if (deletePermanently) {
+        await this.deleteAllSessionData(clientId);
+        console.log(`✅ WPPConnect client ${clientId} disconnected and all session data deleted permanently`);
+      } else {
+        console.log(`✅ WPPConnect client ${clientId} disconnected successfully (session data preserved)`);
+      }
+      
       return true;
     } catch (error) {
       console.error(`❌ Error disconnecting WPPConnect client ${clientId}:`, error);
@@ -1180,19 +1350,9 @@ export class WPPConnectClientManager {
    */
   public async forceCleanupSession(clientId: string): Promise<boolean> {
     try {
-      // Remove from active clients map if present
-      if (this.clients.has(clientId)) {
-        const clientInfo = this.clients.get(clientId);
-        if (clientInfo && clientInfo.client) {
-          try {
-            await clientInfo.client.close();
-          } catch (error) {
-            console.error(`⚠️  Error closing client ${clientId}:`, error);
-          }
-        }
-        this.clients.delete(clientId);
-      }
-      return true;
+      console.log(`🧹 Force cleanup requested for client: ${clientId}`);
+      // Use disconnectClient with permanent deletion to clean up everything
+      return await this.disconnectClient(clientId, true);
     } catch (error) {
       console.error(`❌ Error force cleaning session for ${clientId}:`, error);
       return false;
