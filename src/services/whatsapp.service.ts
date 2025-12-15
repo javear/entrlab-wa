@@ -10,6 +10,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 interface IClientAgent extends Document {
   clientId: string;
   ai_agent_code: string;
+  platform?: 'wpp' | 'wa-official';
+  configuration?: string; // Encrypted configuration
   assignedAt: Date;
   updatedAt: Date;
   isActive: boolean;
@@ -29,8 +31,16 @@ try {
     },
     ai_agent_code: {
       type: String,
-      required: true,
+      required: false, // Made optional for wa-official clients that may not have agent assigned at creation
       index: true
+    },
+    platform: {
+      type: String,
+      enum: ['wpp', 'wa-official'],
+      index: true
+    },
+    configuration: {
+      type: String // Encrypted configuration stored as string
     },
     assignedAt: {
       type: Date,

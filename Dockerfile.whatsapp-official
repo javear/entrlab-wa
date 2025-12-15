@@ -1,0 +1,66 @@
+# Dockerfile for WhatsApp Business API Service
+# This service handles webhooks and messaging for Meta WhatsApp Business API
+# It doesn't require Chromium/Puppeteer like the main WPPConnect service
+
+FROM node:18-alpine
+
+# Install runtime dependencies (minimal - no Chromium needed)
+RUN apk add --no-cache \
+    dumb-init \
+    ca-certificates
+
+# Create app user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S whatsapp-official -u 1001
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV WA_OFFICIAL_PORT=3004
+ENV PORT=3004
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Copy package files
+COPY package*.json ./
+
+# Install only production dependencies
+RUN npm install --only=production && \
+    npm cache clean --force
+
+# Copy WhatsApp Official service files
+COPY services/whatsapp-official/ ./services/whatsapp-official/
+
+# Copy startup script
+COPY scripts/start-whatsapp-official.sh /usr/src/app/start.sh
+RUN chmod +x /usr/src/app/start.sh
+
+# Note: Environment variables should be provided at runtime via the deployment platform
+# (e.g., Railway, Docker Compose, Kubernetes secrets, etc.)
+# Required env vars:
+#   - MONGODB_URI
+#   - VAULT_ADDR
+#   - VAULT_TOKEN
+#   - VAULT_KEY_NAME (optional, defaults to 'automark-key')
+#   - WA_OFFICIAL_PORT or PORT (optional, defaults to 3004)
+
+# Set proper ownership (including start.sh)
+# Note: Running as root to avoid permission issues on Railway/managed platforms
+# The whatsapp-official service doesn't write to volumes, but Railway sometimes
+# requires root for proper startup
+RUN chown -R root:root /usr/src/app
+
+# Keep running as root (like main service) to avoid Railway permission issues
+# USER whatsapp-official  # Commented out for Railway compatibility
+
+# Expose the service port (default 3004, but can be overridden via PORT env var)
+EXPOSE 3004
+
+# Health check against the service's /health endpoint
+# Uses PORT env var if available, otherwise defaults to 3004
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
+    CMD node -e "const port = process.env.PORT || process.env.WA_OFFICIAL_PORT || '3004'; require('http').get('http://localhost:' + port + '/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+
+# Use the startup script (which handles environment setup and uses dumb-init)
+CMD ["/usr/src/app/start.sh"]
+

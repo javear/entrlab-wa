@@ -21,6 +21,9 @@ export interface Environment {
   AUTO_RESTART_CRON?: string | undefined;
   AUTO_RESTART_METHOD?: string | undefined;
   AI_REQUEST_TIMEOUT?: string | undefined;
+  VAULT_ADDR?: string | undefined;
+  VAULT_TOKEN?: string | undefined;
+  VAULT_KEY_NAME?: string | undefined;
 }
 
 // WhatsApp Service Configuration interface
