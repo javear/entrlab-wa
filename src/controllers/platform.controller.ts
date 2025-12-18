@@ -13,6 +13,7 @@ interface IPlatformClientAgent extends Document {
   clientId: string;
   platform: 'wpp' | 'wa-official';
   ai_agent_code?: string;
+  phone_number_id?: string; // Plain phone_number_id for wa-official clients (for easy querying)
   configuration?: string; // Encrypted configuration
   assignedAt?: Date;
   updatedAt?: Date;
@@ -41,6 +42,10 @@ try {
       type: String,
       index: true
     },
+    phone_number_id: {
+      type: String, // Plain phone_number_id for wa-official clients (for easy querying)
+      index: true
+    },
     configuration: {
       type: String // Encrypted configuration stored as string
     },
@@ -67,6 +72,7 @@ try {
 
   PlatformClientAgentSchema.index({ clientId: 1, platform: 1, isActive: 1 });
   PlatformClientAgentSchema.index({ platform: 1, isActive: 1 });
+  PlatformClientAgentSchema.index({ phone_number_id: 1, platform: 1, isActive: 1 }); // Index for querying by phone_number_id
 
   PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent', PlatformClientAgentSchema);
 }
@@ -76,6 +82,7 @@ interface IClientAgent extends Document {
   clientId: string;
   ai_agent_code: string;
   platform?: 'wpp' | 'wa-official';
+  phone_number_id?: string; // Plain phone_number_id for wa-official clients (for easy querying)
   configuration?: string;
   assignedAt: Date;
   updatedAt: Date;
@@ -241,11 +248,13 @@ export class PlatformController {
           const encryptedConfiguration = await encryptWithVault(configObject);
 
           // Create or update client in MongoDB
+          // Save phone_number_id as plain field for easy querying
           const clientAgent = await PlatformClientAgent.findOneAndUpdate(
             { clientId },
             {
               clientId,
               platform: 'wa-official',
+              phone_number_id: configuration.phone_number_id, // Save as plain field for easy querying
               configuration: encryptedConfiguration,
               updatedAt: new Date(),
               isActive: true
@@ -259,11 +268,12 @@ export class PlatformController {
           try {
             const existingClientAgent = await ClientAgent.findOne({ clientId });
             if (existingClientAgent) {
-              // Update existing record with platform and configuration (only if it exists)
+              // Update existing record with platform, phone_number_id, and configuration (only if it exists)
               await ClientAgent.findOneAndUpdate(
                 { clientId },
                 {
                   platform: 'wa-official',
+                  phone_number_id: configuration.phone_number_id, // Save as plain field for easy querying
                   configuration: encryptedConfiguration,
                   updatedAt: new Date()
                 }

@@ -448,9 +448,54 @@ export class WPPConnectMessageHandler {
   }
 
   /**
+   * Helper method to detect and parse JSON stringified WorkflowMessageObject array
+   * Returns parsed array if valid, null otherwise
+   */
+  private tryParseJsonMessage(message: string): WorkflowMessageObject[] | null {
+    try {
+      // Trim whitespace
+      const trimmed = message.trim();
+      
+      // Check if it looks like JSON (starts with [ and ends with ])
+      if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+        return null;
+      }
+      
+      // Try to parse as JSON
+      const parsed = JSON.parse(trimmed);
+      
+      // Validate it's an array
+      if (!Array.isArray(parsed)) {
+        return null;
+      }
+      
+      // Validate each item is a valid WorkflowMessageObject
+      const validTypes = ['text', 'image', 'video', 'audio', 'file', 'sticker', 'animated-sticker', 'reaction', 'location', 'reply', 'stop-response'];
+      const isValid = parsed.every((item: any) => {
+        return item && 
+               typeof item === 'object' && 
+               typeof item.type === 'string' && 
+               validTypes.includes(item.type);
+      });
+      
+      if (!isValid) {
+        console.log(`⚠️  Parsed JSON array but contains invalid WorkflowMessageObject structure`);
+        return null;
+      }
+      
+      console.log(`✅ Detected and parsed JSON stringified WorkflowMessageObject array (${parsed.length} items)`);
+      return parsed as WorkflowMessageObject[];
+    } catch (error) {
+      // Not valid JSON or not the right format - return null to fall back to plain text
+      return null;
+    }
+  }
+
+  /**
    * Public method to send a message using workflow object array format
    * This is used by the /send API endpoint to send messages with rich media support
    * Accepts either a string (will be sent as text) or an array of WorkflowMessageObject
+   * Also supports JSON stringified WorkflowMessageObject arrays for convenience
    */
   public async sendMessageWithMedia(clientId: string, number: string, message: string | WorkflowMessageObject[]): Promise<void> {
     // Get the phone number part (without suffix) for lookups
@@ -471,11 +516,19 @@ export class WPPConnectMessageHandler {
         throw new Error(`Client ${clientId} not found or not ready`);
       }
 
-      // If message is a string, convert it to a text object
+      // Parse message - handle string, JSON stringified array, or array
       let messageObjects: WorkflowMessageObject[];
       if (typeof message === 'string') {
-        messageObjects = [{ type: 'text', text: message }];
+        // Try to detect and parse JSON stringified array
+        const parsedJson = this.tryParseJsonMessage(message);
+        if (parsedJson) {
+          messageObjects = parsedJson;
+        } else {
+          // Fall back to plain text
+          messageObjects = [{ type: 'text', text: message }];
+        }
       } else {
+        // Already an array
         messageObjects = message;
       }
 

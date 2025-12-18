@@ -53,6 +53,10 @@ class WhatsAppOfficialClientManager {
         type: String,
         index: true
       },
+      phone_number_id: {
+        type: String, // Plain phone_number_id for wa-official clients (for easy querying)
+        index: true
+      },
       configuration: {
         type: String // Encrypted configuration
       },
@@ -76,6 +80,10 @@ class WhatsAppOfficialClientManager {
       this.updatedAt = new Date();
       next();
     });
+
+    // Create indexes for better performance
+    PlatformClientAgentSchema.index({ clientId: 1, platform: 1, isActive: 1 });
+    PlatformClientAgentSchema.index({ phone_number_id: 1, platform: 1, isActive: 1 }); // Index for querying by phone_number_id
 
     try {
       return mongoose.model('PlatformClientAgent');
@@ -122,11 +130,12 @@ class WhatsAppOfficialClientManager {
       const decryptedConfig = await decryptWithVault(client.configuration);
 
       // Log decrypted values for debugging (mask sensitive data)
+      // Note: phone_number_id is now stored in MongoDB plain field, not in vault config
       console.log(`✅ Decrypted configuration for ${clientId}:`);
       console.log(`   - access_token: ${decryptedConfig.access_token ? `${decryptedConfig.access_token.substring(0, 20)}...` : 'MISSING'}`);
-      console.log(`   - phone_number_id: ${decryptedConfig.phone_number_id || 'MISSING'}`);
       console.log(`   - verify_token: ${decryptedConfig.verify_token ? '***' : 'MISSING'}`);
       console.log(`   - app_secret: ${decryptedConfig.app_secret ? '***' : 'MISSING'}`);
+      console.log(`   - phone_number_id: (read from MongoDB plain field, not from vault)`);
 
       // Cache the decrypted configuration
       this.clientCache.set(clientId, {
@@ -166,17 +175,37 @@ class WhatsAppOfficialClientManager {
 
   /**
    * Get phone number ID for a client
+   * Reads ONLY from MongoDB plain field (single source of truth)
    */
   async getPhoneNumberId(clientId) {
-    const config = await this.getClientConfig(clientId);
-    const phoneNumberId = config.phone_number_id;
-    
-    // Warn if placeholder/dummy phone number ID is detected
-    if (phoneNumberId && (phoneNumberId.includes('your_phone_number') || phoneNumberId.includes('YOUR_PHONE_NUMBER'))) {
-      console.warn(`⚠️ [${clientId}] Warning: Using placeholder phone_number_id. Please update with real credentials.`);
+    try {
+      await this.initialize();
+      const ClientAgent = this.getClientAgentModel();
+      
+      const client = await ClientAgent.findOne({
+        clientId,
+        platform: 'wa-official',
+        isActive: true
+      }).select('phone_number_id');
+      
+      if (!client) {
+        throw new Error(`Client ${clientId} not found or not active`);
+      }
+      
+      if (!client.phone_number_id) {
+        throw new Error(`Phone number ID not found for client ${clientId} in MongoDB. Please ensure phone_number_id is saved in the client configuration.`);
+      }
+      
+      // Warn if placeholder/dummy phone number ID is detected
+      if (client.phone_number_id.includes('your_phone_number') || client.phone_number_id.includes('YOUR_PHONE_NUMBER')) {
+        console.warn(`⚠️ [${clientId}] Warning: Using placeholder phone_number_id. Please update with real credentials.`);
+      }
+      
+      return client.phone_number_id;
+    } catch (error) {
+      console.error(`❌ Error getting phone_number_id for client ${clientId}:`, error.message);
+      throw error;
     }
-    
-    return phoneNumberId;
   }
 
   /**
@@ -219,6 +248,32 @@ class WhatsAppOfficialClientManager {
     } catch (error) {
       console.error(`❌ Error checking if client exists ${clientId}:`, error.message);
       return false;
+    }
+  }
+
+  /**
+   * Find clientId by phone_number_id
+   * This is useful when receiving webhooks where we need to identify which client a phone_number_id belongs to
+   */
+  async findClientIdByPhoneNumberId(phoneNumberId) {
+    try {
+      await this.initialize();
+      const ClientAgent = this.getClientAgentModel();
+
+      const client = await ClientAgent.findOne({
+        phone_number_id: phoneNumberId,
+        platform: 'wa-official',
+        isActive: true
+      }).select('clientId');
+
+      if (!client) {
+        return null;
+      }
+
+      return client.clientId;
+    } catch (error) {
+      console.error(`❌ Error finding clientId by phone_number_id ${phoneNumberId}:`, error.message);
+      return null;
     }
   }
 }

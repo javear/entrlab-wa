@@ -11,6 +11,7 @@ interface IClientAgent extends Document {
   clientId: string;
   ai_agent_code: string;
   platform?: 'wpp' | 'wa-official';
+  phone_number_id?: string; // Plain phone_number_id for wa-official clients (for easy querying)
   configuration?: string; // Encrypted configuration
   assignedAt: Date;
   updatedAt: Date;
@@ -37,6 +38,10 @@ try {
     platform: {
       type: String,
       enum: ['wpp', 'wa-official'],
+      index: true
+    },
+    phone_number_id: {
+      type: String, // Plain phone_number_id for wa-official clients (for easy querying)
       index: true
     },
     configuration: {
@@ -67,6 +72,7 @@ try {
   // Create indexes for better performance
   ClientAgentSchema.index({ clientId: 1, isActive: 1 });
   ClientAgentSchema.index({ ai_agent_code: 1, isActive: 1 });
+  ClientAgentSchema.index({ phone_number_id: 1, platform: 1, isActive: 1 }); // Index for querying by phone_number_id
 
   ClientAgent = mongoose.model<IClientAgent>('ClientAgent', ClientAgentSchema);
 }

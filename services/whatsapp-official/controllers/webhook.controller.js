@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const clientManager = require('../services/client-manager');
 const WhatsAppMessageController = require('./message.controller');
+const WhatsAppOfficialMessageHandler = require('../services/message-handler');
 
 /**
  * WhatsApp Business API Webhook Controller
@@ -11,6 +12,7 @@ class WhatsAppWebhookController {
   constructor() {
     this.clientManager = clientManager;
     this.messageController = new WhatsAppMessageController();
+    this.messageHandler = new WhatsAppOfficialMessageHandler();
   }
 
   /**
@@ -70,19 +72,45 @@ class WhatsAppWebhookController {
   /**
    * Handle incoming webhook events (POST)
    * Meta sends message updates, delivery status, read receipts, etc.
-   * Route: /webhook/v1/:clientId
+   * Route: /webhook/v1/:clientId (clientId is optional - will be auto-detected from phone_number_id in metadata)
    */
   async handleWebhook(req, res) {
     try {
-      const { clientId } = req.params;
+      let clientId = req.params.clientId;
       const body = req.body; // Parsed JSON body (for processing)
       const rawBody = req.rawBody || Buffer.from(JSON.stringify(body)); // Raw body for signature verification
 
-      if (!clientId) {
-        return res.status(400).json({
-          success: false,
-          error: 'clientId is required'
-        });
+      // Extract phone_number_id from webhook metadata (single source of truth for client identification)
+      const phoneNumberId = body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
+      
+      // Always use phone_number_id from metadata to identify the correct client (single source of truth)
+      if (phoneNumberId) {
+        const foundClientId = await this.clientManager.findClientIdByPhoneNumberId(phoneNumberId);
+        
+        if (foundClientId) {
+          // Use the clientId found from phone_number_id (this is the correct one)
+          // Route clientId is ignored when phone_number_id is available in metadata
+          if (clientId && clientId !== foundClientId) {
+            console.log(`ℹ️  Route clientId "${clientId}" ignored. Using client "${foundClientId}" identified from phone_number_id "${phoneNumberId}" in webhook metadata.`);
+          }
+          clientId = foundClientId;
+          console.log(`✅ Processing webhook for client "${clientId}" (identified from phone_number_id: ${phoneNumberId})`);
+        } else {
+          console.error(`❌ Could not find clientId for phone_number_id: ${phoneNumberId}`);
+          return res.status(404).json({
+            success: false,
+            error: `Could not identify client for phone_number_id: ${phoneNumberId}. Please ensure client is created with this phone_number_id.`
+          });
+        }
+      } else {
+        // No phone_number_id in metadata - fall back to route parameter if provided
+        if (!clientId) {
+          return res.status(400).json({
+            success: false,
+            error: 'clientId is required in route or phone_number_id must be present in webhook metadata'
+          });
+        }
+        console.log(`ℹ️  No phone_number_id in webhook metadata, using route clientId: ${clientId}`);
       }
 
       // Check if client exists
@@ -170,7 +198,13 @@ class WhatsAppWebhookController {
         console.warn(`   Available headers:`, JSON.stringify(relevantHeaders, null, 2));
       }
 
-      console.log(`📨 Received webhook for client ${clientId}:`, JSON.stringify(body, null, 2));
+      // Extract phone_number_id from metadata for logging
+      const phoneNumberIdFromMetadata = body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
+      if (phoneNumberIdFromMetadata) {
+        console.log(`📨 Received webhook for client ${clientId} (phone_number_id: ${phoneNumberIdFromMetadata}):`, JSON.stringify(body, null, 2));
+      } else {
+        console.log(`📨 Received webhook for client ${clientId}:`, JSON.stringify(body, null, 2));
+      }
 
       // Meta sends a 200 response immediately, then processes the webhook
       res.sendStatus(200);
@@ -214,27 +248,28 @@ class WhatsAppWebhookController {
    */
   async handleMessageChange(clientId, value) {
     if (value.messages) {
+      // Extract metadata for logging/verification
+      const metadata = value.metadata;
+      
       // Process messages sequentially to avoid race conditions
       for (const message of value.messages) {
-        console.log(`📩 New message received for client ${clientId}:`, {
+        const phoneNumberId = metadata?.phone_number_id;
+        
+        console.log(`📩 New message received for client ${clientId}${phoneNumberId ? ` (phone_number_id: ${phoneNumberId})` : ''}:`, {
           from: message.from,
           type: message.type,
           messageId: message.id,
-          timestamp: message.timestamp
+          timestamp: message.timestamp,
+          phoneNumberIdFromMetadata: phoneNumberId || 'N/A'
         });
 
-        // Process different message types
-        if (message.type === 'text') {
-          await this.handleTextMessage(clientId, message, value.contacts?.[0]);
-        } else if (message.type === 'image') {
-          this.handleImageMessage(clientId, message, value.contacts?.[0]);
-        } else if (message.type === 'video') {
-          this.handleVideoMessage(clientId, message, value.contacts?.[0]);
-        } else if (message.type === 'document') {
-          this.handleDocumentMessage(clientId, message, value.contacts?.[0]);
-        } else if (message.type === 'location') {
-          this.handleLocationMessage(clientId, message, value.contacts?.[0]);
-        }
+        // Process all message types using the message handler (similar to WPPConnect)
+        await this.messageHandler.handleIncomingMessage(
+          clientId,
+          message,
+          value.contacts?.[0] || {},
+          metadata
+        );
       }
     }
   }
@@ -276,70 +311,6 @@ class WhatsAppWebhookController {
     // Note: Status updates are informational only - no reply needed
   }
 
-  /**
-   * Handle text messages
-   * Sends an echo reply to the sender using the same clientId
-   */
-  async handleTextMessage(clientId, message, contact) {
-    try {
-      const senderPhoneNumber = message.from;
-      const receivedText = message.text?.body || '';
-      const contactName = contact?.profile?.name || senderPhoneNumber;
-
-      console.log(`💬 Text message from ${contactName} (client: ${clientId}):`, receivedText);
-
-      // Send echo reply - echo back the received message
-      const echoMessage = `Echo: ${receivedText}`;
-      
-      console.log(`📤 Sending echo reply to ${senderPhoneNumber} via client ${clientId}...`);
-      
-      const result = await this.messageController.sendTextMessage(
-        clientId,
-        senderPhoneNumber,
-        echoMessage
-      );
-
-      console.log(`✅ Echo reply sent successfully. Message ID: ${result.messageId}`);
-    } catch (error) {
-      console.error(`❌ Error sending echo reply for client ${clientId}:`, error.message);
-      // Don't throw - webhook processing should continue even if reply fails
-    }
-  }
-
-  /**
-   * Handle image messages
-   */
-  handleImageMessage(clientId, message, contact) {
-    console.log(`🖼️ Image message from ${contact?.name || message.from} (client: ${clientId}):`, message.image.caption || 'No caption');
-    // TODO: Process image message
-  }
-
-  /**
-   * Handle video messages
-   */
-  handleVideoMessage(clientId, message, contact) {
-    console.log(`🎥 Video message from ${contact?.name || message.from} (client: ${clientId}):`, message.video.caption || 'No caption');
-    // TODO: Process video message
-  }
-
-  /**
-   * Handle document messages
-   */
-  handleDocumentMessage(clientId, message, contact) {
-    console.log(`📄 Document from ${contact?.name || message.from} (client: ${clientId}):`, message.document.filename);
-    // TODO: Process document message
-  }
-
-  /**
-   * Handle location messages
-   */
-  handleLocationMessage(clientId, message, contact) {
-    console.log(`📍 Location from ${contact?.name || message.from} (client: ${clientId}):`, {
-      latitude: message.location.latitude,
-      longitude: message.location.longitude
-    });
-    // TODO: Process location message
-  }
 
   /**
    * Verify webhook signature (HMAC SHA256)
