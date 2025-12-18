@@ -141,12 +141,33 @@ export class PlatformController {
 
       // Handle WPP platform
       if (platform === 'wpp') {
-        // Delegate to existing createClient method
         try {
+          // Check if client already exists in PlatformClientAgent
+          const existingPlatformClient = await PlatformClientAgent.findOne({
+            clientId,
+            platform: 'wpp'
+          });
+          const isUpdate = !!existingPlatformClient;
+
+          // Start WPPConnect client creation (asynchronously, don't await)
           this.whatsappService.createClient(clientId).catch((error) => {
             console.error(`❌ Error creating WPPConnect client ${clientId}:`, error);
           });
-          
+
+          // Create or update PlatformClientAgent record
+          await PlatformClientAgent.findOneAndUpdate(
+            { clientId },
+            {
+              clientId,
+              platform: 'wpp',
+              updatedAt: new Date(),
+              isActive: true
+            },
+            { upsert: true, new: true }
+          );
+
+          console.log(`✅ ${isUpdate ? 'Updated' : 'Created'} PlatformClientAgent record for WPP client ${clientId}`);
+
           res.status(202).json({
             success: true,
             message: 'WPPConnect client creation started',
@@ -340,6 +361,125 @@ export class PlatformController {
         success: false,
         error: 'Internal server error',
         details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Assign agent to a platform client
+   * PUT /api/v1/platform/clients/{clientId}/agent
+   * This method searches for the client in both ClientAgent (WPPConnect) and PlatformClientAgent (WA-Official) collections
+   */
+  async assignAgentToClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+      const { agentCode } = req.body;
+
+      // Validate input
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          message: 'agentCode is required'
+        });
+        return;
+      }
+
+      let foundIn = '';
+      let updated = false;
+
+      // Try to find and update in PlatformClientAgent first (WA-Official clients)
+      try {
+        const platformClient = await PlatformClientAgent.findOne({
+          clientId,
+          isActive: true
+        });
+
+        if (platformClient) {
+          platformClient.ai_agent_code = agentCode;
+          platformClient.assignedAt = new Date();
+          platformClient.updatedAt = new Date();
+          await platformClient.save();
+
+          foundIn = 'PlatformClientAgent';
+          updated = true;
+          console.log(`✅ Assigned agent ${agentCode} to platform client ${clientId} (${platformClient.platform}) in PlatformClientAgent`);
+
+          // Also update ClientAgent collection for backward compatibility if it exists
+          try {
+            const existingClientAgent = await ClientAgent.findOne({ clientId });
+            if (existingClientAgent) {
+              existingClientAgent.ai_agent_code = agentCode;
+              existingClientAgent.assignedAt = new Date();
+              existingClientAgent.updatedAt = new Date();
+              await existingClientAgent.save();
+              console.log(`✅ Also updated ClientAgent collection for backward compatibility`);
+            }
+          } catch (clientAgentError) {
+            console.warn('⚠️ Could not update ClientAgent collection:', clientAgentError);
+          }
+        }
+      } catch (platformError) {
+        console.error('❌ Error updating PlatformClientAgent:', platformError);
+      }
+
+      // If not found in PlatformClientAgent, try ClientAgent (WPPConnect clients)
+      if (!updated) {
+        try {
+          const clientAgent = await ClientAgent.findOne({
+            clientId,
+            isActive: true
+          });
+
+          if (clientAgent) {
+            clientAgent.ai_agent_code = agentCode;
+            clientAgent.assignedAt = new Date();
+            clientAgent.updatedAt = new Date();
+            await clientAgent.save();
+
+            foundIn = 'ClientAgent';
+            updated = true;
+            console.log(`✅ Assigned agent ${agentCode} to client ${clientId} in ClientAgent`);
+
+            // Also update the in-memory client object for immediate use (WPPConnect)
+            const clientInfo = this.whatsappService.getClient(clientId);
+            if (clientInfo) {
+              clientInfo.ai_agent_code = agentCode;
+              console.log(`✅ Also updated in-memory client object for immediate use`);
+            }
+          }
+        } catch (clientAgentError) {
+          console.error('❌ Error updating ClientAgent:', clientAgentError);
+        }
+      }
+
+      // If client was not found in either collection
+      if (!updated) {
+        res.status(404).json({
+          success: false,
+          message: `Client ${clientId} not found in ClientAgent or PlatformClientAgent collections. Please create the client first.`
+        });
+        return;
+      }
+
+      // Success response (matching the format of PUT /api/whatsapp/clients/{clientId}/agent)
+      res.json({
+        success: true,
+        message: 'Agent assigned to client successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error assigning agent to client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to assign agent to client',
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   }

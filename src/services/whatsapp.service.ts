@@ -77,6 +77,75 @@ try {
   ClientAgent = mongoose.model<IClientAgent>('ClientAgent', ClientAgentSchema);
 }
 
+// Platform Client-Agent Assignment Model (for clients created via /api/v1/platform/clients)
+interface IPlatformClientAgent extends Document {
+  clientId: string;
+  platform: 'wpp' | 'wa-official';
+  ai_agent_code?: string;
+  phone_number_id?: string;
+  configuration?: string;
+  assignedAt?: Date;
+  updatedAt?: Date;
+  isActive: boolean;
+}
+
+// Create PlatformClientAgent model with error handling
+let PlatformClientAgent: mongoose.Model<IPlatformClientAgent>;
+try {
+  PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent');
+} catch (error) {
+  const PlatformClientAgentSchema = new Schema<IPlatformClientAgent>({
+    clientId: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true
+    },
+    platform: {
+      type: String,
+      required: true,
+      enum: ['wpp', 'wa-official'],
+      index: true
+    },
+    ai_agent_code: {
+      type: String,
+      index: true
+    },
+    phone_number_id: {
+      type: String,
+      index: true
+    },
+    configuration: {
+      type: String
+    },
+    assignedAt: {
+      type: Date,
+      default: Date.now
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now
+    },
+    isActive: {
+      type: Boolean,
+      default: true
+    }
+  }, {
+    timestamps: true
+  });
+
+  PlatformClientAgentSchema.pre('save', function(next) {
+    this.updatedAt = new Date();
+    next();
+  });
+
+  PlatformClientAgentSchema.index({ clientId: 1, platform: 1, isActive: 1 });
+  PlatformClientAgentSchema.index({ platform: 1, isActive: 1 });
+  PlatformClientAgentSchema.index({ phone_number_id: 1, platform: 1, isActive: 1 });
+
+  PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent', PlatformClientAgentSchema);
+}
+
 export class WPPConnectWhatsAppService {
   public clientManager: WPPConnectClientManager;
   private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
@@ -190,8 +259,24 @@ export class WPPConnectWhatsAppService {
 
   async getClientAgent(clientId: string): Promise<string | null> {
     try {
-      const assignment = await ClientAgent.findOne({ clientId, isActive: true });
-      return assignment ? assignment.ai_agent_code : null;
+      // First, try to find in ClientAgent (for backward compatibility with existing clients)
+      let assignment = await ClientAgent.findOne({ clientId, isActive: true });
+      if (assignment && assignment.ai_agent_code) {
+        return assignment.ai_agent_code;
+      }
+
+      // If not found, try PlatformClientAgent (for clients created via /api/v1/platform/clients)
+      const platformAssignment = await PlatformClientAgent.findOne({ 
+        clientId, 
+        platform: 'wpp',
+        isActive: true 
+      });
+      if (platformAssignment && platformAssignment.ai_agent_code) {
+        console.log(`✅ Found agent for WPP client ${clientId} in PlatformClientAgent: ${platformAssignment.ai_agent_code}`);
+        return platformAssignment.ai_agent_code;
+      }
+
+      return null;
     } catch (error) {
       console.error(`❌ Error getting agent for WPPConnect client ${clientId}:`, error);
       return null;
@@ -215,26 +300,51 @@ export class WPPConnectWhatsAppService {
 
   async loadAgentAssignments(): Promise<void> {
     try {
-      if (!ClientAgent) {
+      let totalLoaded = 0;
+
+      // Load from ClientAgent (for backward compatibility)
+      if (ClientAgent) {
+        const assignments = await ClientAgent.find({ isActive: true });
+        console.log(`📋 Loaded ${assignments.length} agent assignment(s) from ClientAgent collection`);
+
+        for (const assignment of assignments) {
+          const clientInfo = this.clientManager.getClient(assignment.clientId);
+          if (clientInfo && assignment.ai_agent_code) {
+            // Set the ai_agent_code on the client object (matching main branch behavior)
+            clientInfo.ai_agent_code = assignment.ai_agent_code;
+            console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId}: ${assignment.ai_agent_code}`);
+            totalLoaded++;
+          } else if (!clientInfo) {
+            console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);
+          }
+        }
+      } else {
         console.warn('⚠️ ClientAgent model not found');
-        return;
       }
 
-      const assignments = await ClientAgent.find({ isActive: true });
-      console.log(`📋 Loaded ${assignments.length} agent assignment(s) from MongoDB`);
+      // Also load from PlatformClientAgent (for clients created via /api/v1/platform/clients)
+      if (PlatformClientAgent) {
+        const platformAssignments = await PlatformClientAgent.find({ 
+          platform: 'wpp', 
+          isActive: true,
+          ai_agent_code: { $exists: true, $ne: null }
+        });
+        console.log(`📋 Loaded ${platformAssignments.length} agent assignment(s) from PlatformClientAgent collection (WPP)`);
 
-      for (const assignment of assignments) {
-        const clientInfo = this.clientManager.getClient(assignment.clientId);
-        if (clientInfo) {
-          // Set the ai_agent_code on the client object (matching main branch behavior)
-          clientInfo.ai_agent_code = assignment.ai_agent_code;
-          console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId}: ${assignment.ai_agent_code}`);
-        } else {
-          console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);
+        for (const assignment of platformAssignments) {
+          const clientInfo = this.clientManager.getClient(assignment.clientId);
+          if (clientInfo && assignment.ai_agent_code) {
+            // Set the ai_agent_code on the client object (override if exists - PlatformClientAgent takes precedence)
+            clientInfo.ai_agent_code = assignment.ai_agent_code;
+            console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId} from PlatformClientAgent: ${assignment.ai_agent_code}`);
+            totalLoaded++;
+          } else if (!clientInfo) {
+            console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);
+          }
         }
       }
 
-      console.log(`✅ Loaded ${assignments.length} agent assignments from MongoDB`);
+      console.log(`✅ Loaded ${totalLoaded} total agent assignments for active WPPConnect clients`);
     } catch (error) {
       console.error('❌ Error loading agent assignments:', error);
     }

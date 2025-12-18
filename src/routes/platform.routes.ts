@@ -6,6 +6,9 @@ export function createPlatformRoutes(platformController: PlatformController): Ro
 
     // Platform Client Management Routes
     router.post('/clients', (req, res) => platformController.createPlatformClient(req, res));
+    
+    // Agent Assignment Routes
+    router.put('/clients/:clientId/agent', (req, res) => platformController.assignAgentToClient(req, res));
 
     return router;
 }
