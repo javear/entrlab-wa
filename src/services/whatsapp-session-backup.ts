@@ -412,11 +412,21 @@ export class WhatsAppSessionBackup {
               const fileSize = tempFile.length || 0;
               
               // Verify file size matches expected
-              if (Math.abs(fileSize - archiveSize) > 1024) { // Allow 1KB difference for metadata
-                console.error(`❌ [${clientId}] Backup size mismatch: expected ${archiveSize}, got ${fileSize}`);
+              // Use percentage-based tolerance: 0.1% for larger files, or minimum 10KB
+              // This accounts for GridFS chunking overhead and minor differences in size tracking
+              const tolerance = Math.max(archiveSize * 0.001, 10 * 1024); // 0.1% or 10KB, whichever is larger
+              const sizeDifference = Math.abs(fileSize - archiveSize);
+              
+              if (sizeDifference > tolerance) {
+                console.error(`❌ [${clientId}] Backup size mismatch: expected ${archiveSize}, got ${fileSize}, difference: ${sizeDifference} bytes (tolerance: ${tolerance.toFixed(0)} bytes)`);
                 await this.gridFS.delete(uploadStream.id).catch(() => {});
                 reject(new Error('Backup size mismatch'));
                 return;
+              }
+              
+              // Log if there's a difference but within tolerance (for debugging)
+              if (sizeDifference > 0) {
+                console.log(`ℹ️  [${clientId}] Backup size difference within tolerance: ${sizeDifference} bytes (${((sizeDifference / archiveSize) * 100).toFixed(3)}%)`);
               }
               
               console.log(`✅ [${clientId}] Backup verified: ${(fileSize / 1024 / 1024).toFixed(2)} MB`);

@@ -366,6 +366,302 @@ export class PlatformController {
   }
 
   /**
+   * Get all platform clients (includes both platform clients and legacy WPP clients)
+   * GET /api/v1/platform/clients
+   */
+  async getAllPlatformClients(req: Request, res: Response): Promise<void> {
+    try {
+      // Get all clients from PlatformClientAgent
+      const platformClients = await PlatformClientAgent.find({ isActive: true }).sort({ updatedAt: -1 });
+      
+      // Get all in-memory WPPConnect clients (legacy clients)
+      const allWppClients = this.whatsappService.getAllClients();
+      
+      // Create a map to track which clients we've already included
+      const clientMap = new Map<string, any>();
+
+      // First, add all platform clients
+      for (const client of platformClients) {
+        const clientData: any = {
+          clientId: client.clientId,
+          platform: client.platform,
+          ai_agent_code: client.ai_agent_code || null,
+          phone_number_id: client.phone_number_id || null,
+          assignedAt: client.assignedAt || null,
+          updatedAt: client.updatedAt,
+          isActive: client.isActive,
+          source: 'platform' // Mark as platform client
+        };
+
+        // For WPP clients, merge with in-memory client data
+        if (client.platform === 'wpp') {
+          const wppClient = this.whatsappService.getClient(client.clientId);
+          if (wppClient) {
+            clientData.status = wppClient.status;
+            clientData.isReady = wppClient.isReady;
+            clientData.hasQrCode = (wppClient.isReady || wppClient.status === 'ready') ? false : !!wppClient.qrCode;
+            clientData.phoneNumber = wppClient.phoneNumber || null;
+            clientData.lastActivity = wppClient.lastActivity;
+            // Override ai_agent_code if present in memory (should be synced, but memory is source of truth for active session)
+            if (wppClient.ai_agent_code) {
+              clientData.ai_agent_code = wppClient.ai_agent_code;
+            }
+          } else {
+            // Client exists in DB but not in memory (not initialized or disconnected)
+            clientData.status = 'not_initialized';
+            clientData.isReady = false;
+            clientData.hasQrCode = false;
+            clientData.phoneNumber = null;
+            clientData.lastActivity = null;
+          }
+        } else {
+          // WA-Official clients - no in-memory state
+          clientData.status = 'active';
+          clientData.isReady = true; // WA-Official clients are always "ready" (no QR needed)
+          clientData.hasQrCode = false;
+          clientData.phoneNumber = null;
+          clientData.lastActivity = client.updatedAt;
+        }
+
+        clientMap.set(client.clientId, clientData);
+      }
+
+      // Then, add legacy WPP clients that aren't in PlatformClientAgent
+      for (const wppClient of allWppClients) {
+        if (!clientMap.has(wppClient.clientId)) {
+          // Check if it exists in ClientAgent for agent assignment info
+          let agentCode: string | null = null;
+          let assignedAt: Date | null = null;
+          let updatedAt: Date = new Date();
+          
+          try {
+            const clientAgent = await ClientAgent.findOne({ 
+              clientId: wppClient.clientId, 
+              isActive: true 
+            });
+            if (clientAgent) {
+              agentCode = clientAgent.ai_agent_code || null;
+              assignedAt = clientAgent.assignedAt || null;
+              updatedAt = clientAgent.updatedAt || new Date();
+            }
+          } catch (error) {
+            // Silent fail - use in-memory agent code if available
+          }
+
+          const clientData: any = {
+            clientId: wppClient.clientId,
+            platform: 'wpp',
+            status: wppClient.status,
+            isReady: wppClient.isReady,
+            hasQrCode: (wppClient.isReady || wppClient.status === 'ready') ? false : !!wppClient.qrCode,
+            phoneNumber: wppClient.phoneNumber || null,
+            phone_number_id: null,
+            lastActivity: wppClient.lastActivity,
+            ai_agent_code: wppClient.ai_agent_code || agentCode || null,
+            assignedAt: assignedAt,
+            updatedAt: updatedAt,
+            isActive: true,
+            source: 'legacy' // Mark as legacy client
+          };
+
+          clientMap.set(wppClient.clientId, clientData);
+        }
+      }
+
+      // Convert map to array and sort by updatedAt (most recent first)
+      const clients = Array.from(clientMap.values()).sort((a, b) => {
+        const dateA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+        const dateB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+        return dateB - dateA;
+      });
+
+      res.json({
+        success: true,
+        clients: clients
+      });
+    } catch (error) {
+      console.error('❌ Error getting all platform clients:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get platform clients',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Get specific platform client
+   * GET /api/v1/platform/clients/{clientId}
+   */
+  async getPlatformClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          error: 'clientId is required'
+        });
+        return;
+      }
+
+      // Find client in PlatformClientAgent
+      const platformClient = await PlatformClientAgent.findOne({
+        clientId,
+        isActive: true
+      });
+
+      if (!platformClient) {
+        res.status(404).json({
+          success: false,
+          message: `Platform client ${clientId} not found`
+        });
+        return;
+      }
+
+      const clientData: any = {
+        clientId: platformClient.clientId,
+        platform: platformClient.platform,
+        ai_agent_code: platformClient.ai_agent_code || null,
+        phone_number_id: platformClient.phone_number_id || null,
+        assignedAt: platformClient.assignedAt || null,
+        updatedAt: platformClient.updatedAt,
+        isActive: platformClient.isActive
+      };
+
+      // For WPP clients, merge with in-memory client data
+      if (platformClient.platform === 'wpp') {
+        const wppClient = this.whatsappService.getClient(clientId);
+        if (wppClient) {
+          clientData.status = wppClient.status;
+          clientData.isReady = wppClient.isReady;
+          clientData.hasQrCode = (wppClient.isReady || wppClient.status === 'ready') ? false : !!wppClient.qrCode;
+          clientData.phoneNumber = wppClient.phoneNumber || null;
+          clientData.lastActivity = wppClient.lastActivity;
+          // Override ai_agent_code if present in memory
+          if (wppClient.ai_agent_code) {
+            clientData.ai_agent_code = wppClient.ai_agent_code;
+          }
+        } else {
+          // Client exists in DB but not in memory
+          clientData.status = 'not_initialized';
+          clientData.isReady = false;
+          clientData.hasQrCode = false;
+          clientData.phoneNumber = null;
+          clientData.lastActivity = null;
+        }
+      } else if (platformClient.platform === 'wa-official') {
+        // WA-Official clients - decrypt configuration to get verifyToken
+        clientData.status = 'active';
+        clientData.isReady = true;
+        clientData.hasQrCode = false;
+        clientData.phoneNumber = null;
+        clientData.lastActivity = platformClient.updatedAt;
+
+        // Decrypt configuration to get verifyToken and other details
+        if (platformClient.configuration) {
+          try {
+            const decryptedConfig = await decryptWithVault(platformClient.configuration);
+            clientData.verifyToken = decryptedConfig.verify_token || null;
+            // Optionally include other config details (masked for security)
+            clientData.configuration = {
+              access_token: decryptedConfig.access_token ? `${decryptedConfig.access_token.substring(0, 20)}...` : null,
+              app_secret: decryptedConfig.app_secret ? '***' : null,
+              verify_token: decryptedConfig.verify_token || null
+            };
+          } catch (error) {
+            console.error(`❌ Error decrypting configuration for client ${clientId}:`, error);
+            clientData.verifyToken = null;
+            clientData.configurationError = 'Failed to decrypt configuration';
+          }
+        } else {
+          clientData.verifyToken = null;
+          clientData.configurationError = 'No configuration found';
+        }
+      }
+
+      res.json({
+        success: true,
+        client: clientData
+      });
+    } catch (error) {
+      console.error('❌ Error getting platform client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get platform client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Get agent assignment for a platform client
+   * GET /api/v1/platform/clients/{clientId}/agent
+   */
+  async getClientAgent(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      // Try PlatformClientAgent first
+      let client = await PlatformClientAgent.findOne({
+        clientId,
+        isActive: true
+      });
+
+      if (client && client.ai_agent_code) {
+        res.json({
+          success: true,
+          clientId: client.clientId,
+          platform: client.platform,
+          ai_agent_code: client.ai_agent_code,
+          assignedAt: client.assignedAt || null,
+          updatedAt: client.updatedAt
+        });
+        return;
+      }
+
+      // If not found in PlatformClientAgent, try ClientAgent (for backward compatibility)
+      const clientAgent = await ClientAgent.findOne({
+        clientId,
+        isActive: true
+      });
+
+      if (clientAgent && clientAgent.ai_agent_code) {
+        res.json({
+          success: true,
+          clientId: clientAgent.clientId,
+          platform: clientAgent.platform || 'wpp',
+          ai_agent_code: clientAgent.ai_agent_code,
+          assignedAt: clientAgent.assignedAt,
+          updatedAt: clientAgent.updatedAt
+        });
+        return;
+      }
+
+      // No agent assigned
+      res.status(404).json({
+        success: false,
+        message: `No agent assigned to client ${clientId}`
+      });
+    } catch (error) {
+      console.error('❌ Error getting client agent:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get client agent',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
    * Assign agent to a platform client
    * PUT /api/v1/platform/clients/{clientId}/agent
    * This method searches for the client in both ClientAgent (WPPConnect) and PlatformClientAgent (WA-Official) collections
