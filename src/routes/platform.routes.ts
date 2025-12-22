@@ -11,7 +11,10 @@ export function createPlatformRoutes(platformController: PlatformController): Ro
     
     // Agent Assignment Routes
     router.get('/clients/:clientId/agent', (req, res) => platformController.getClientAgent(req, res));
+    router.get('/clients/:clientId/agents', (req, res) => platformController.getClientAgents(req, res));
     router.put('/clients/:clientId/agent', (req, res) => platformController.assignAgentToClient(req, res));
+    router.delete('/clients/:clientId/agent', (req, res) => platformController.removeAgentFromClient(req, res));
+    router.delete('/clients/:clientId/agent/:userIdentifier', (req, res) => platformController.removePrivateAgentAssignment(req, res));
 
     return router;
 }

@@ -9,12 +9,18 @@ import crypto from 'crypto';
 // Platform Client Model
 // ============================================
 
+interface IPrivateAgentAssignment {
+  userIdentifier: string;
+  agentCode: string;
+}
+
 interface IPlatformClientAgent extends Document {
   clientId: string;
   platform: 'wpp' | 'wa-official';
   ai_agent_code?: string;
   phone_number_id?: string; // Plain phone_number_id for wa-official clients (for easy querying)
   configuration?: string; // Encrypted configuration
+  privateAgentAssignment?: IPrivateAgentAssignment[]; // Array of user-specific agent assignments
   assignedAt?: Date;
   updatedAt?: Date;
   isActive: boolean;
@@ -23,7 +29,24 @@ interface IPlatformClientAgent extends Document {
 // Create model with error handling
 let PlatformClientAgent: mongoose.Model<IPlatformClientAgent>;
 try {
+  // Try to get existing model
   PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent');
+  // If model exists, try to add the privateAgentAssignment field to its schema if it doesn't exist
+  try {
+    const schema = PlatformClientAgent.schema;
+    if (!schema.path('privateAgentAssignment')) {
+      // Add the field to the existing schema
+      schema.add({
+        privateAgentAssignment: [{
+          userIdentifier: { type: String, required: true },
+          agentCode: { type: String, required: true }
+        }]
+      });
+      console.log('✅ Added privateAgentAssignment field to existing PlatformClientAgent schema');
+    }
+  } catch (schemaError) {
+    console.warn('⚠️ Could not add privateAgentAssignment to existing schema:', schemaError);
+  }
 } catch (error) {
   const PlatformClientAgentSchema = new Schema<IPlatformClientAgent>({
     clientId: {
@@ -48,6 +71,19 @@ try {
     },
     configuration: {
       type: String // Encrypted configuration stored as string
+    },
+    privateAgentAssignment: {
+      type: [{
+        userIdentifier: {
+          type: String,
+          required: true
+        },
+        agentCode: {
+          type: String,
+          required: true
+        }
+      }],
+      default: undefined
     },
     assignedAt: {
       type: Date,
@@ -616,15 +652,22 @@ export class PlatformController {
         isActive: true
       });
 
-      if (client && client.ai_agent_code) {
-        res.json({
+      if (client) {
+        const response: any = {
           success: true,
           clientId: client.clientId,
           platform: client.platform,
-          ai_agent_code: client.ai_agent_code,
+          ai_agent_code: client.ai_agent_code || null,
           assignedAt: client.assignedAt || null,
           updatedAt: client.updatedAt
-        });
+        };
+        
+        // Include privateAgentAssignment if it exists
+        if (client.privateAgentAssignment && client.privateAgentAssignment.length > 0) {
+          response.privateAgentAssignment = client.privateAgentAssignment;
+        }
+        
+        res.json(response);
         return;
       }
 
@@ -662,6 +705,72 @@ export class PlatformController {
   }
 
   /**
+   * Get all agents for a platform client (agentCode and privateAgentAssignment)
+   * GET /api/v1/platform/clients/{clientId}/agents
+   */
+  async getClientAgents(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      // Query with lean() to get raw MongoDB data including privateAgentAssignment
+      const client = await PlatformClientAgent.findOne({
+        clientId,
+        isActive: true
+      }).lean();
+
+      if (!client) {
+        // If not found in PlatformClientAgent, try ClientAgent for backward compatibility
+        const clientAgent = await ClientAgent.findOne({
+          clientId,
+          isActive: true
+        }).lean();
+
+        if (!clientAgent) {
+          res.status(404).json({
+            success: false,
+            message: `Client ${clientId} not found`
+          });
+          return;
+        }
+
+        // Return from ClientAgent (legacy, no privateAgentAssignment support)
+        res.json({
+          success: true,
+          agents: {
+            agentCode: clientAgent.ai_agent_code || null,
+            privateAgentAssignment: []
+          }
+        });
+        return;
+      }
+
+      // Return from PlatformClientAgent
+      res.json({
+        success: true,
+        agents: {
+          agentCode: (client as any).ai_agent_code || null,
+          privateAgentAssignment: (client as any).privateAgentAssignment || []
+        }
+      });
+    } catch (error) {
+      console.error('❌ Error getting client agents:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get client agents',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
    * Assign agent to a platform client
    * PUT /api/v1/platform/clients/{clientId}/agent
    * This method searches for the client in both ClientAgent (WPPConnect) and PlatformClientAgent (WA-Official) collections
@@ -669,7 +778,7 @@ export class PlatformController {
   async assignAgentToClient(req: Request, res: Response): Promise<void> {
     try {
       const { clientId } = req.params;
-      const { agentCode } = req.body;
+      const { agentCode, privateAgentAssignment } = req.body;
 
       // Validate input
       if (!clientId) {
@@ -680,12 +789,33 @@ export class PlatformController {
         return;
       }
 
-      if (!agentCode) {
+      // Either agentCode or privateAgentAssignment must be provided
+      if (!agentCode && !privateAgentAssignment) {
         res.status(400).json({
           success: false,
-          message: 'agentCode is required'
+          message: 'Either agentCode or privateAgentAssignment is required'
         });
         return;
+      }
+
+      // Validate privateAgentAssignment format if provided
+      if (privateAgentAssignment) {
+        if (!Array.isArray(privateAgentAssignment)) {
+          res.status(400).json({
+            success: false,
+            message: 'privateAgentAssignment must be an array'
+          });
+          return;
+        }
+        for (const assignment of privateAgentAssignment) {
+          if (!assignment.userIdentifier || !assignment.agentCode) {
+            res.status(400).json({
+              success: false,
+              message: 'Each privateAgentAssignment must have userIdentifier and agentCode'
+            });
+            return;
+          }
+        }
       }
 
       let foundIn = '';
@@ -699,27 +829,103 @@ export class PlatformController {
         });
 
         if (platformClient) {
-          platformClient.ai_agent_code = agentCode;
-          platformClient.assignedAt = new Date();
-          platformClient.updatedAt = new Date();
-          await platformClient.save();
+          // Build update object
+          const updateData: any = {
+            updatedAt: new Date()
+          };
+
+          // Update agentCode if provided
+          if (agentCode) {
+            updateData.ai_agent_code = agentCode;
+            updateData.assignedAt = new Date();
+          }
+          
+          // Handle privateAgentAssignment if provided
+          if (privateAgentAssignment) {
+            // IMPORTANT: Query the document with lean() to get the raw MongoDB data including privateAgentAssignment
+            // This ensures we get the field even if it's not in the Mongoose schema
+            const existingDoc = await PlatformClientAgent.findOne({ clientId, isActive: true }).lean();
+            const existingAssignments = (existingDoc?.privateAgentAssignment as IPrivateAgentAssignment[]) || [];
+            
+            console.log(`📋 Existing privateAgentAssignment from DB (${existingAssignments.length} items):`, JSON.stringify(existingAssignments, null, 2));
+            console.log(`📥 New assignments to upsert (${privateAgentAssignment.length} items):`, JSON.stringify(privateAgentAssignment, null, 2));
+            
+            // Always use upsert logic - start with existing assignments
+            const finalAssignments = [...existingAssignments];
+            
+            for (const newAssignment of privateAgentAssignment) {
+              const existingIndex = finalAssignments.findIndex(
+                (a: IPrivateAgentAssignment) => a.userIdentifier === newAssignment.userIdentifier
+              );
+              if (existingIndex >= 0) {
+                // Update existing assignment - preserve other existing items
+                finalAssignments[existingIndex] = newAssignment;
+                console.log(`✅ Updated existing assignment for userIdentifier ${newAssignment.userIdentifier} to agentCode ${newAssignment.agentCode}`);
+              } else {
+                // Add new assignment - preserve all existing items
+                finalAssignments.push(newAssignment);
+                console.log(`✅ Added new assignment for userIdentifier ${newAssignment.userIdentifier} with agentCode ${newAssignment.agentCode}`);
+              }
+            }
+            
+            console.log(`💾 Final privateAgentAssignment after upsert (${finalAssignments.length} items, all existing preserved):`, JSON.stringify(finalAssignments, null, 2));
+            updateData.privateAgentAssignment = finalAssignments;
+          }
+
+          // Log what we're about to save
+          if (privateAgentAssignment) {
+            console.log(`💾 About to save privateAgentAssignment for ${clientId}:`, JSON.stringify(updateData.privateAgentAssignment, null, 2));
+            console.log(`📦 Full updateData:`, JSON.stringify(updateData, null, 2));
+          }
+
+          // Use findOneAndUpdate to ensure the update is saved
+          // Use strict: false in options to allow fields not in schema
+          const savedClient = await PlatformClientAgent.findOneAndUpdate(
+            { clientId, isActive: true },
+            { $set: updateData },
+            { new: true, runValidators: false, strict: false }
+          );
+
+          // Verify the save - query directly using lean to get raw MongoDB document
+          if (privateAgentAssignment) {
+            const verifyClient = await PlatformClientAgent.findOne({ clientId, isActive: true }).lean();
+            console.log(`✅ Query result after save (lean):`, JSON.stringify(verifyClient, null, 2));
+            console.log(`🔍 privateAgentAssignment field:`, verifyClient?.privateAgentAssignment);
+            console.log(`📋 All document keys:`, Object.keys(verifyClient || {}));
+            
+            // Also try a raw MongoDB query to double-check what's actually in the database
+            const db = mongoose.connection.db;
+            if (db) {
+              const rawDoc = await db.collection('platformclientagents').findOne({ clientId, isActive: true });
+              console.log(`🔬 Raw MongoDB document (bypassing Mongoose):`, JSON.stringify(rawDoc, null, 2));
+              if (rawDoc && rawDoc.privateAgentAssignment) {
+                console.log(`✅ CONFIRMED: privateAgentAssignment exists in MongoDB!`);
+              } else {
+                console.log(`❌ WARNING: privateAgentAssignment NOT found in raw MongoDB document!`);
+              }
+            }
+          }
 
           foundIn = 'PlatformClientAgent';
           updated = true;
-          console.log(`✅ Assigned agent ${agentCode} to platform client ${clientId} (${platformClient.platform}) in PlatformClientAgent`);
+          if (agentCode) {
+            console.log(`✅ Assigned agent ${agentCode} to platform client ${clientId} (${savedClient?.platform || 'unknown'}) in PlatformClientAgent`);
+          }
 
-          // Also update ClientAgent collection for backward compatibility if it exists
-          try {
-            const existingClientAgent = await ClientAgent.findOne({ clientId });
-            if (existingClientAgent) {
-              existingClientAgent.ai_agent_code = agentCode;
-              existingClientAgent.assignedAt = new Date();
-              existingClientAgent.updatedAt = new Date();
-              await existingClientAgent.save();
-              console.log(`✅ Also updated ClientAgent collection for backward compatibility`);
+          // Also update ClientAgent collection for backward compatibility if it exists (only if agentCode is provided)
+          if (agentCode) {
+            try {
+              const existingClientAgent = await ClientAgent.findOne({ clientId });
+              if (existingClientAgent) {
+                existingClientAgent.ai_agent_code = agentCode;
+                existingClientAgent.assignedAt = new Date();
+                existingClientAgent.updatedAt = new Date();
+                await existingClientAgent.save();
+                console.log(`✅ Also updated ClientAgent collection for backward compatibility`);
+              }
+            } catch (clientAgentError) {
+              console.warn('⚠️ Could not update ClientAgent collection:', clientAgentError);
             }
-          } catch (clientAgentError) {
-            console.warn('⚠️ Could not update ClientAgent collection:', clientAgentError);
           }
         }
       } catch (platformError) {
@@ -727,7 +933,8 @@ export class PlatformController {
       }
 
       // If not found in PlatformClientAgent, try ClientAgent (WPPConnect clients)
-      if (!updated) {
+      // Note: privateAgentAssignment only applies to PlatformClientAgent, so we only update ClientAgent if agentCode is provided
+      if (!updated && agentCode) {
         try {
           const clientAgent = await ClientAgent.findOne({
             clientId,
@@ -758,23 +965,227 @@ export class PlatformController {
 
       // If client was not found in either collection
       if (!updated) {
-        res.status(404).json({
-          success: false,
-          message: `Client ${clientId} not found in ClientAgent or PlatformClientAgent collections. Please create the client first.`
-        });
+        // If only privateAgentAssignment was provided and client not found, return specific error
+        if (privateAgentAssignment && !agentCode) {
+          res.status(404).json({
+            success: false,
+            message: `Client ${clientId} not found in PlatformClientAgent collection. privateAgentAssignment can only be set for clients in PlatformClientAgent. Please create the client first.`
+          });
+        } else {
+          res.status(404).json({
+            success: false,
+            message: `Client ${clientId} not found in ClientAgent or PlatformClientAgent collections. Please create the client first.`
+          });
+        }
         return;
+      }
+
+      // Build response message
+      let message = 'Agent assignment updated successfully';
+      if (agentCode && privateAgentAssignment) {
+        message = 'Agent code and private agent assignments updated successfully';
+      } else if (privateAgentAssignment) {
+        message = 'Private agent assignments updated successfully';
       }
 
       // Success response (matching the format of PUT /api/whatsapp/clients/{clientId}/agent)
       res.json({
         success: true,
-        message: 'Agent assigned to client successfully'
+        message: message
       });
     } catch (error) {
       console.error('❌ Error assigning agent to client:', error);
       res.status(500).json({
         success: false,
         message: 'Failed to assign agent to client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Remove main agent assignment from a platform client
+   * DELETE /api/v1/platform/clients/{clientId}/agent
+   */
+  async removeAgentFromClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      let updated = false;
+
+      // Try to remove from PlatformClientAgent first
+      try {
+        const platformClient = await PlatformClientAgent.findOneAndUpdate(
+          { clientId, isActive: true },
+          { 
+            $unset: { ai_agent_code: '', assignedAt: '' },
+            $set: { updatedAt: new Date() }
+          },
+          { new: true }
+        );
+
+        if (platformClient) {
+          updated = true;
+          console.log(`✅ Removed main agent assignment from platform client ${clientId} in PlatformClientAgent`);
+
+          // Also update ClientAgent collection for backward compatibility
+          try {
+            const existingClientAgent = await ClientAgent.findOne({ clientId });
+            if (existingClientAgent) {
+              existingClientAgent.ai_agent_code = undefined as any;
+              existingClientAgent.assignedAt = undefined as any;
+              existingClientAgent.updatedAt = new Date();
+              await existingClientAgent.save();
+              console.log(`✅ Also removed agent assignment from ClientAgent collection for backward compatibility`);
+            }
+          } catch (clientAgentError) {
+            console.warn('⚠️ Could not update ClientAgent collection:', clientAgentError);
+          }
+        }
+      } catch (platformError) {
+        console.error('❌ Error removing agent from PlatformClientAgent:', platformError);
+      }
+
+      // If not found in PlatformClientAgent, try ClientAgent
+      if (!updated) {
+        try {
+          const clientAgent = await ClientAgent.findOneAndUpdate(
+            { clientId, isActive: true },
+            { 
+              $unset: { ai_agent_code: '', assignedAt: '' },
+              $set: { updatedAt: new Date() }
+            },
+            { new: true }
+          );
+
+          if (clientAgent) {
+            updated = true;
+            console.log(`✅ Removed agent assignment from client ${clientId} in ClientAgent`);
+          }
+        } catch (clientAgentError) {
+          console.error('❌ Error removing agent from ClientAgent:', clientAgentError);
+        }
+      }
+
+      // If client was not found in either collection
+      if (!updated) {
+        res.status(404).json({
+          success: false,
+          message: `Client ${clientId} not found in ClientAgent or PlatformClientAgent collections.`
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: 'Agent assignment removed successfully'
+      });
+    } catch (error) {
+      console.error('❌ Error removing agent from client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to remove agent assignment',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Remove private agent assignment for a specific user
+   * DELETE /api/v1/platform/clients/{clientId}/agent/{userIdentifier}
+   */
+  async removePrivateAgentAssignment(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId, userIdentifier } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      if (!userIdentifier) {
+        res.status(400).json({
+          success: false,
+          message: 'userIdentifier is required'
+        });
+        return;
+      }
+
+      // Query with lean() to get raw MongoDB data including privateAgentAssignment
+      const existingDoc = await PlatformClientAgent.findOne({ clientId, isActive: true }).lean();
+      
+      if (!existingDoc) {
+        res.status(404).json({
+          success: false,
+          message: `Client ${clientId} not found in PlatformClientAgent collection.`
+        });
+        return;
+      }
+
+      const existingAssignments = (existingDoc.privateAgentAssignment as IPrivateAgentAssignment[]) || [];
+      
+      // Check if userIdentifier exists in privateAgentAssignment
+      const assignmentIndex = existingAssignments.findIndex(
+        (a: IPrivateAgentAssignment) => a.userIdentifier === userIdentifier
+      );
+
+      if (assignmentIndex === -1) {
+        res.status(404).json({
+          success: false,
+          message: `Private agent assignment for userIdentifier ${userIdentifier} not found for client ${clientId}`
+        });
+        return;
+      }
+
+      // Remove the assignment from the array
+      const updatedAssignments = existingAssignments.filter(
+        (a: IPrivateAgentAssignment) => a.userIdentifier !== userIdentifier
+      );
+
+      // Update the document
+      const updatedClient = await PlatformClientAgent.findOneAndUpdate(
+        { clientId, isActive: true },
+        { 
+          $set: { 
+            privateAgentAssignment: updatedAssignments,
+            updatedAt: new Date()
+          }
+        },
+        { new: true, runValidators: false, strict: false }
+      );
+
+      if (!updatedClient) {
+        res.status(404).json({
+          success: false,
+          message: `Failed to update client ${clientId}`
+        });
+        return;
+      }
+
+      console.log(`✅ Removed private agent assignment for userIdentifier ${userIdentifier} from client ${clientId}`);
+      console.log(`💾 Remaining privateAgentAssignment count: ${updatedAssignments.length}`);
+
+      res.json({
+        success: true,
+        message: `Private agent assignment for userIdentifier ${userIdentifier} removed successfully`,
+        remainingAssignments: updatedAssignments.length
+      });
+    } catch (error) {
+      console.error('❌ Error removing private agent assignment:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to remove private agent assignment',
         error: error instanceof Error ? error.message : 'Unknown error'
       });
     }

@@ -283,6 +283,59 @@ export class WPPConnectWhatsAppService {
     }
   }
 
+  /**
+   * Get agent code for a specific user, checking privateAgentAssignment first
+   * @param clientId - The client ID
+   * @param userIdentifier - The user identifier (phone number for WPP, display_phone_number for WA-Official)
+   * @param platform - The platform ('wpp' or 'wa-official')
+   * @returns The agent code for this user, or null if not found
+   */
+  async getAgentForUser(clientId: string, userIdentifier: string, platform: 'wpp' | 'wa-official' = 'wpp'): Promise<string | null> {
+    try {
+      // Query PlatformClientAgent with lean() to get privateAgentAssignment
+      const platformClient = await PlatformClientAgent.findOne({
+        clientId,
+        platform,
+        isActive: true
+      }).lean();
+
+      if (platformClient) {
+        // Check privateAgentAssignment first
+        const privateAssignments = (platformClient as any).privateAgentAssignment || [];
+        if (privateAssignments.length > 0) {
+          const privateAssignment = privateAssignments.find(
+            (assignment: any) => assignment.userIdentifier === userIdentifier
+          );
+          
+          if (privateAssignment && privateAssignment.agentCode) {
+            console.log(`✅ Found private agent assignment for user ${userIdentifier} (client: ${clientId}): ${privateAssignment.agentCode}`);
+            return privateAssignment.agentCode;
+          }
+        }
+
+        // Fallback to main agent code
+        if ((platformClient as any).ai_agent_code) {
+          return (platformClient as any).ai_agent_code;
+        }
+      }
+
+      // If not found in PlatformClientAgent, try ClientAgent (for backward compatibility)
+      const clientAgent = await ClientAgent.findOne({
+        clientId,
+        isActive: true
+      });
+
+      if (clientAgent && clientAgent.ai_agent_code) {
+        return clientAgent.ai_agent_code;
+      }
+
+      return null;
+    } catch (error) {
+      console.error(`❌ Error getting agent for user ${userIdentifier} (client ${clientId}):`, error);
+      return null;
+    }
+  }
+
   async getAllAgentAssignments(): Promise<any[]> {
     try {
       const assignments = await ClientAgent.find({ isActive: true });

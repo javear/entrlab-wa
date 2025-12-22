@@ -252,6 +252,7 @@ class WhatsAppOfficialMessageHandler {
       const fullMessage = enhancedMessage ? `${metadataPrefix} ${enhancedMessage}` : `${metadataPrefix}`;
 
       // Add to message queue
+      // Note: For private agent assignment, we use senderPhoneNumber (message.from) as userIdentifier
       this.addToQueue(clientId, senderPhoneNumber, message, fullMessage, mediaUrls);
 
       // If user is already being processed, we'll mark the last message as read
@@ -527,6 +528,7 @@ class WhatsAppOfficialMessageHandler {
         .join('\n');
 
       // Send to AI and respond
+      // Note: For private agent assignment, we use senderNumber (message.from) as userIdentifier
       await this.sendMessage(clientId, senderNumber, combinedMessages);
 
       // Clean up
@@ -577,19 +579,24 @@ class WhatsAppOfficialMessageHandler {
 
   /**
    * Send message to AI workflow and send response
+   * @param clientId - The client ID
+   * @param number - The sender phone number (message.from) - this is used as userIdentifier for private agent assignment
+   * @param message - The message content
    */
   async sendMessage(clientId, number, message) {
     try {
       console.log(`📤 [${clientId}] Sending to ${number}: ${message.substring(0, 100)}...`);
 
-      // Get agent code for this client from PlatformClientAgent
-      const agentCode = await this.getClientAgent(clientId);
+      // Get agent code for this specific user (checks privateAgentAssignment first)
+      // For WA-Official, userIdentifier is the sender phone number (message.from)
+      const userIdentifier = number; // Use sender's phone number as userIdentifier
+      const agentCode = await this.getAgentForUser(clientId, userIdentifier);
       if (!agentCode) {
-        console.error(`❌ No agent assigned to client ${clientId}`);
+        console.error(`❌ No agent assigned to client ${clientId} for user ${userIdentifier}`);
         return;
       }
 
-      console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}`);
+      console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}, user ${userIdentifier}`);
 
       // Call AI workflow
       const workflowResponse = await this.callInferenceFw(message, number, clientId, agentCode);
@@ -651,7 +658,7 @@ class WhatsAppOfficialMessageHandler {
   }
 
   /**
-   * Get agent code from PlatformClientAgent
+   * Get agent code from PlatformClientAgent (main agent code)
    */
   async getClientAgent(clientId) {
     try {
@@ -662,11 +669,56 @@ class WhatsAppOfficialMessageHandler {
         clientId,
         platform: 'wa-official',
         isActive: true
-      }).select('ai_agent_code');
+      }).lean(); // Use lean() to get raw MongoDB data including privateAgentAssignment
 
       return client?.ai_agent_code || null;
     } catch (error) {
       console.error(`❌ Error getting agent code for client ${clientId}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Get agent code for a specific user, checking privateAgentAssignment first
+   * @param clientId - The client ID
+   * @param userIdentifier - The user identifier (display_phone_number for WA-Official)
+   * @returns The agent code for this user, or null if not found
+   */
+  async getAgentForUser(clientId, userIdentifier) {
+    try {
+      await this.clientManager.initialize();
+      const ClientAgent = this.clientManager.getClientAgentModel();
+      
+      // Query with lean() to get raw MongoDB data including privateAgentAssignment
+      const client = await ClientAgent.findOne({
+        clientId,
+        platform: 'wa-official',
+        isActive: true
+      }).lean();
+
+      if (client) {
+        // Check privateAgentAssignment first
+        const privateAssignments = client.privateAgentAssignment || [];
+        if (privateAssignments.length > 0) {
+          const privateAssignment = privateAssignments.find(
+            assignment => assignment.userIdentifier === userIdentifier
+          );
+          
+          if (privateAssignment && privateAssignment.agentCode) {
+            console.log(`✅ Found private agent assignment for user ${userIdentifier} (client: ${clientId}): ${privateAssignment.agentCode}`);
+            return privateAssignment.agentCode;
+          }
+        }
+
+        // Fallback to main agent code
+        if (client.ai_agent_code) {
+          return client.ai_agent_code;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error(`❌ Error getting agent for user ${userIdentifier} (client ${clientId}):`, error.message);
       return null;
     }
   }

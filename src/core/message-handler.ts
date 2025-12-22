@@ -1417,13 +1417,14 @@ export class WPPConnectMessageHandler {
 
   private async callInferenceFw(message: string, phoneNumber: string, userName: string, clientId: string): Promise<WorkflowResponse> {
     try {
-      // Get agent code for this client
-      const agentCode = await this.whatsappService.getClientAgent(clientId);
+      // Get agent code for this specific user (checks privateAgentAssignment first)
+      // For WPPConnect, userIdentifier is the phoneNumber
+      const agentCode = await this.whatsappService.getAgentForUser(clientId, phoneNumber, 'wpp');
       if (!agentCode) {
-        throw new Error(`No agent assigned to client ${clientId}`);
+        throw new Error(`No agent assigned to client ${clientId} for user ${phoneNumber}`);
       }
 
-      console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}`);
+      console.log(`🤖 Using agent code: ${agentCode} for client ${clientId}, user ${phoneNumber}`);
 
       // Use workflow endpoint - required
       const url = this.env.FW_ENDPOINT_WORKFLOW;
