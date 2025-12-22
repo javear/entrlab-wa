@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import FormData from 'form-data';
 import { MEMORY_CONFIG, getMemoryUsage, suggestGC } from '../config/memory-config';
 import { UserPauseService } from '../services/user-pause.service';
+import mongoose from 'mongoose';
 
 // ============================================
 // WPPConnect Message Handler
@@ -112,6 +113,60 @@ export class WPPConnectMessageHandler {
       }
     } catch (error) {
       console.error('❌ Error during temp file cleanup:', error);
+    }
+  }
+
+  /**
+   * Check if user is in needAttention with block/pause status
+   * @param clientId - The client ID
+   * @param userIdentifier - The user identifier (phone number for WPP)
+   * @returns true if user should be blocked/paused, false otherwise
+   */
+  private async checkNeedAttention(clientId: string, userIdentifier: string): Promise<boolean> {
+    try {
+      // Get PlatformClientAgent model from mongoose
+      const PlatformClientAgent = mongoose.model('PlatformClientAgent');
+      
+      const client = await PlatformClientAgent.findOne({
+        clientId,
+        platform: 'wpp',
+        isActive: true
+      }).lean();
+
+      if (!client) {
+        return false; // No client found, allow message
+      }
+
+      const needAttentionList = (client as any).needAttention || [];
+      
+      // Find matching userIdentifier
+      const needAttentionItem = needAttentionList.find(
+        (item: any) => item.userIdentifier === userIdentifier && (item.option === 'block' || item.option === 'pause')
+      );
+
+      if (!needAttentionItem) {
+        return false; // User not in needAttention, allow message
+      }
+
+      // Check if there's a 'to' date and if it's expired
+      if (needAttentionItem.to) {
+        const expiryDate = new Date(needAttentionItem.to);
+        const now = new Date();
+        if (now > expiryDate) {
+          // Expired, allow message
+          return false;
+        }
+      }
+
+      // User is blocked/paused and not expired
+      const option = needAttentionItem.option === 'block' ? 'blocked' : 'paused';
+      const reason = needAttentionItem.reason ? ` (reason: ${needAttentionItem.reason})` : '';
+      console.log(`🚫 [${clientId}] User ${userIdentifier} is ${option} - skipping message${reason}`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Error checking needAttention for ${userIdentifier}:`, error);
+      // On error, fail open - allow message
+      return false;
     }
   }
 
@@ -311,11 +366,18 @@ export class WPPConnectMessageHandler {
     try {
       const userKey = this.getUserKey(clientId, senderNumber);
       
+      // Check needAttention status first (before any message actions)
+      // For WPPConnect, userIdentifier is the phoneNumber (sender's number)
+      const isBlockedOrPaused = await this.checkNeedAttention(clientId, senderNumber);
+      if (isBlockedOrPaused) {
+        return; // Skip all message actions (no read, typing, reply, etc.)
+      }
+      
       // Extract and store contact information
       const contactInfo = this.extractContactInfo(message);
       this.contactInfo[userKey] = contactInfo;
       
-      // Check if user is paused
+      // Check if user is paused (legacy UserPauseService check)
       const isPaused = await this.userPauseService.isUserPaused(clientId, senderNumber);
       if (isPaused) {
         console.log(`⏸️  [${clientId}] User ${senderNumber} is paused - skipping message`);
@@ -1076,24 +1138,24 @@ export class WPPConnectMessageHandler {
 
             case 'sticker':
               if (msgObj.url) {
-                const stickerTimeout = new Promise((_, reject) =>
+                const stickerTimeout = new Promise((_, reject) => 
                   setTimeout(() => reject(new Error('Sticker timeout')), 30000)
                 );
 
                 const urlLower = msgObj.url.toLowerCase();
                 const isAnimated = urlLower.match(/\.(gif|webp)(?=\?|#|$)/i);
-
+                
                 if (isAnimated) {
-                  await Promise.race([
+                    await Promise.race([
                     client.client.sendImageAsStickerGif(formattedNumber, msgObj.url),
-                    stickerTimeout
-                  ]);
+                      stickerTimeout
+                    ]);
                   console.log(`✅ Sent animated sticker: ${msgObj.url}`);
                 } else {
-                  await Promise.race([
+                    await Promise.race([
                     client.client.sendImageAsSticker(formattedNumber, msgObj.url),
-                    stickerTimeout
-                  ]);
+                      stickerTimeout
+                    ]);
                   console.log(`✅ Sent static sticker: ${msgObj.url}`);
                 }
                 anySent = true;
@@ -1134,7 +1196,7 @@ export class WPPConnectMessageHandler {
                   
                   if (!targetMessage) {
                     console.log(`⚠️  Message with ID ${messageId} not found for reaction`);
-                  } else {
+                } else {
                     // Extract the proper message ID format from the message object
                     let validMessageId: string;
                     if (targetMessage.id) {
@@ -1142,7 +1204,7 @@ export class WPPConnectMessageHandler {
                         validMessageId = targetMessage.id._serialized;
                       } else if (typeof targetMessage.id === 'string') {
                         validMessageId = targetMessage.id;
-                      } else {
+                  } else {
                         validMessageId = messageId; // Fallback to constructed ID
                       }
                     } else {
@@ -1256,37 +1318,37 @@ export class WPPConnectMessageHandler {
           }
         } catch (error: any) {
           const errorMsg = error?.message || error;
-          const isInvalidNumber = String(errorMsg).includes('invalid wid') ||
-                                  String(errorMsg).includes('InvalidWidError') ||
-                                  String(errorMsg).includes('wid error');
-
-          if (isInvalidNumber) {
+              const isInvalidNumber = String(errorMsg).includes('invalid wid') || 
+                                      String(errorMsg).includes('InvalidWidError') ||
+                                      String(errorMsg).includes('wid error');
+              
+              if (isInvalidNumber) {
             console.warn(`⚠️  Invalid WhatsApp number detected - stopping message send`);
             return;
-          }
-
+              }
+              
           console.error(`⚠️  Error sending ${msgObj.type}:`, errorMsg);
-        }
+          }
 
         // Natural delay between messages (except for reactions which are instant)
         if (i < messageObjects.length - 1 && msgObj.type !== 'reaction') {
-          const delayMs = 1000 + Math.floor(Math.random() * 2000);
+            const delayMs = 1000 + Math.floor(Math.random() * 2000);
           console.log(`⏳ Waiting ${delayMs}ms before next workflow bubble`);
-          
+            
           // Show typing indicator during the delay
-          try {
+            try {
             await client.client.startTyping(formattedNumber);
-          } catch {}
-          
+            } catch {}
+            
           // Wait with typing indicator showing
-          await new Promise(resolve => setTimeout(resolve, delayMs));
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
         }
-      }
-
+        
       if (!anySent) {
         console.warn(`⚠️  No messages were sent successfully from workflow response`);
       }
-
+      
       // Stop typing indicator after all messages are sent
       try {
         await client.client.stopTyping(formattedNumber);
@@ -1408,8 +1470,8 @@ export class WPPConnectMessageHandler {
           }
         } catch (sendError) {
           console.error('❌ Error sending timeout message to user:', sendError);
-        }
-      } else {
+          }
+        } else {
         console.error(`❌ [${clientId}] Error in sendMessage for ${number}:`, errorMessage);
       }
     }
@@ -1548,7 +1610,7 @@ export class WPPConnectMessageHandler {
       const requestStartTime = Date.now();
       
       console.log(`⏱️  [${clientId}] Calling workflow endpoint with ${timeoutMs / 1000}s timeout...`);
-      
+
       const response = await axios.post(url, requestBody, {
         headers: {
           'Content-Type': 'application/json',

@@ -14,6 +14,15 @@ interface IPrivateAgentAssignment {
   agentCode: string;
 }
 
+interface INeedAttention {
+  userIdentifier: string;
+  option: 'pause' | 'release' | 'block';
+  from?: Date;
+  to?: Date;
+  reason?: string;
+  updatedAt?: Date;
+}
+
 interface IPlatformClientAgent extends Document {
   clientId: string;
   platform: 'wpp' | 'wa-official';
@@ -21,6 +30,7 @@ interface IPlatformClientAgent extends Document {
   phone_number_id?: string; // Plain phone_number_id for wa-official clients (for easy querying)
   configuration?: string; // Encrypted configuration
   privateAgentAssignment?: IPrivateAgentAssignment[]; // Array of user-specific agent assignments
+  needAttention?: INeedAttention[]; // Array of users needing attention (pause, block, etc.)
   assignedAt?: Date;
   updatedAt?: Date;
   isActive: boolean;
@@ -31,7 +41,7 @@ let PlatformClientAgent: mongoose.Model<IPlatformClientAgent>;
 try {
   // Try to get existing model
   PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent');
-  // If model exists, try to add the privateAgentAssignment field to its schema if it doesn't exist
+  // If model exists, try to add the privateAgentAssignment and needAttention fields to its schema if they don't exist
   try {
     const schema = PlatformClientAgent.schema;
     if (!schema.path('privateAgentAssignment')) {
@@ -44,8 +54,22 @@ try {
       });
       console.log('✅ Added privateAgentAssignment field to existing PlatformClientAgent schema');
     }
+    if (!schema.path('needAttention')) {
+      // Add the needAttention field to the existing schema
+      schema.add({
+        needAttention: [{
+          userIdentifier: { type: String, required: true },
+          option: { type: String, required: true, enum: ['pause', 'release', 'block'] },
+          from: { type: Date },
+          to: { type: Date },
+          reason: { type: String },
+          updatedAt: { type: Date, default: Date.now }
+        }]
+      });
+      console.log('✅ Added needAttention field to existing PlatformClientAgent schema');
+    }
   } catch (schemaError) {
-    console.warn('⚠️ Could not add privateAgentAssignment to existing schema:', schemaError);
+    console.warn('⚠️ Could not add fields to existing schema:', schemaError);
   }
 } catch (error) {
   const PlatformClientAgentSchema = new Schema<IPlatformClientAgent>({
@@ -81,6 +105,33 @@ try {
         agentCode: {
           type: String,
           required: true
+        }
+      }],
+      default: undefined
+    },
+    needAttention: {
+      type: [{
+        userIdentifier: {
+          type: String,
+          required: true
+        },
+        option: {
+          type: String,
+          required: true,
+          enum: ['pause', 'release', 'block']
+        },
+        from: {
+          type: Date
+        },
+        to: {
+          type: Date
+        },
+        reason: {
+          type: String
+        },
+        updatedAt: {
+          type: Date,
+          default: Date.now
         }
       }],
       default: undefined
@@ -407,16 +458,15 @@ export class PlatformController {
    */
   async getAllPlatformClients(req: Request, res: Response): Promise<void> {
     try {
-      // Get all clients from PlatformClientAgent
-      const platformClients = await PlatformClientAgent.find({ isActive: true }).sort({ updatedAt: -1 });
+      // Get all clients from PlatformClientAgent (only those with platform field)
+      const platformClients = await PlatformClientAgent.find({ 
+        isActive: true,
+        platform: { $exists: true, $ne: null } // Only clients with platform field
+      }).sort({ updatedAt: -1 });
       
-      // Get all in-memory WPPConnect clients (legacy clients)
-      const allWppClients = this.whatsappService.getAllClients();
-      
-      // Create a map to track which clients we've already included
-      const clientMap = new Map<string, any>();
+      const clients: any[] = [];
 
-      // First, add all platform clients
+      // Process each platform client
       for (const client of platformClients) {
         const clientData: any = {
           clientId: client.clientId,
@@ -425,14 +475,14 @@ export class PlatformController {
           phone_number_id: client.phone_number_id || null,
           assignedAt: client.assignedAt || null,
           updatedAt: client.updatedAt,
-          isActive: client.isActive,
-          source: 'platform' // Mark as platform client
+          isActive: client.isActive
         };
 
-        // For WPP clients, merge with in-memory client data
+        // For WPP clients, only include if they exist in both PlatformClientAgent AND in-memory whatsappService
         if (client.platform === 'wpp') {
           const wppClient = this.whatsappService.getClient(client.clientId);
           if (wppClient) {
+            // Client exists in both places - include it
             clientData.status = wppClient.status;
             clientData.isReady = wppClient.isReady;
             clientData.hasQrCode = (wppClient.isReady || wppClient.status === 'ready') ? false : !!wppClient.qrCode;
@@ -442,70 +492,23 @@ export class PlatformController {
             if (wppClient.ai_agent_code) {
               clientData.ai_agent_code = wppClient.ai_agent_code;
             }
-          } else {
-            // Client exists in DB but not in memory (not initialized or disconnected)
-            clientData.status = 'not_initialized';
-            clientData.isReady = false;
-            clientData.hasQrCode = false;
-            clientData.phoneNumber = null;
-            clientData.lastActivity = null;
+            clients.push(clientData);
           }
-        } else {
-          // WA-Official clients - no in-memory state
+          // If WPP client doesn't exist in memory, skip it (don't include in response)
+        } else if (client.platform === 'wa-official') {
+          // WA-Official clients - include all from PlatformClientAgent
           clientData.status = 'active';
           clientData.isReady = true; // WA-Official clients are always "ready" (no QR needed)
           clientData.hasQrCode = false;
           clientData.phoneNumber = null;
           clientData.lastActivity = client.updatedAt;
+          clients.push(clientData);
         }
-
-        clientMap.set(client.clientId, clientData);
+        // If platform is neither 'wpp' nor 'wa-official', skip it (shouldn't happen due to enum, but safety check)
       }
 
-      // Then, add legacy WPP clients that aren't in PlatformClientAgent
-      for (const wppClient of allWppClients) {
-        if (!clientMap.has(wppClient.clientId)) {
-          // Check if it exists in ClientAgent for agent assignment info
-          let agentCode: string | null = null;
-          let assignedAt: Date | null = null;
-          let updatedAt: Date = new Date();
-          
-          try {
-            const clientAgent = await ClientAgent.findOne({ 
-              clientId: wppClient.clientId, 
-              isActive: true 
-            });
-            if (clientAgent) {
-              agentCode = clientAgent.ai_agent_code || null;
-              assignedAt = clientAgent.assignedAt || null;
-              updatedAt = clientAgent.updatedAt || new Date();
-            }
-          } catch (error) {
-            // Silent fail - use in-memory agent code if available
-          }
-
-          const clientData: any = {
-            clientId: wppClient.clientId,
-            platform: 'wpp',
-            status: wppClient.status,
-            isReady: wppClient.isReady,
-            hasQrCode: (wppClient.isReady || wppClient.status === 'ready') ? false : !!wppClient.qrCode,
-            phoneNumber: wppClient.phoneNumber || null,
-            phone_number_id: null,
-            lastActivity: wppClient.lastActivity,
-            ai_agent_code: wppClient.ai_agent_code || agentCode || null,
-            assignedAt: assignedAt,
-            updatedAt: updatedAt,
-            isActive: true,
-            source: 'legacy' // Mark as legacy client
-          };
-
-          clientMap.set(wppClient.clientId, clientData);
-        }
-      }
-
-      // Convert map to array and sort by updatedAt (most recent first)
-      const clients = Array.from(clientMap.values()).sort((a, b) => {
+      // Sort by updatedAt (most recent first)
+      clients.sort((a, b) => {
         const dateA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
         const dateB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
         return dateB - dateA;
@@ -513,7 +516,8 @@ export class PlatformController {
 
       res.json({
         success: true,
-        clients: clients
+        clients: clients,
+        count: clients.length
       });
     } catch (error) {
       console.error('❌ Error getting all platform clients:', error);
@@ -1186,6 +1190,205 @@ export class PlatformController {
       res.status(500).json({
         success: false,
         message: 'Failed to remove private agent assignment',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Get all need attention users for a client
+   * GET /api/v1/platform/clients/{clientId}/needattention
+   */
+  async getNeedAttention(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      // Query with lean() to get raw MongoDB data including needAttention
+      const client = await PlatformClientAgent.findOne({
+        clientId,
+        isActive: true
+      }).lean();
+
+      if (!client) {
+        res.status(404).json({
+          success: false,
+          message: `Client ${clientId} not found in PlatformClientAgent collection.`
+        });
+        return;
+      }
+
+      const needAttentionList = (client.needAttention as INeedAttention[]) || [];
+
+      // Format response - only include userIdentifier (number), option, and reason
+      const formattedList = needAttentionList.map(item => ({
+        userIdentifier: item.userIdentifier,
+        option: item.option,
+        reason: item.reason || null,
+        from: item.from || null,
+        to: item.to || null,
+        updatedAt: item.updatedAt || null
+      }));
+
+      res.json({
+        success: true,
+        needAttention: formattedList,
+        count: formattedList.length
+      });
+    } catch (error) {
+      console.error('❌ Error getting need attention list:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get need attention list',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Set need attention status for a user
+   * POST /api/v1/platform/clients/{clientId}/needattention/{userIdentifier}
+   */
+  async setNeedAttention(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId, userIdentifier } = req.params;
+      const { option, from, to, reason } = req.body;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      if (!userIdentifier) {
+        res.status(400).json({
+          success: false,
+          message: 'userIdentifier is required'
+        });
+        return;
+      }
+
+      if (!option) {
+        res.status(400).json({
+          success: false,
+          message: 'option is required (pause, release, or block)'
+        });
+        return;
+      }
+
+      if (!['pause', 'release', 'block'].includes(option)) {
+        res.status(400).json({
+          success: false,
+          message: 'option must be one of: pause, release, block'
+        });
+        return;
+      }
+
+      // Query with lean() to get raw MongoDB data including needAttention
+      const existingDoc = await PlatformClientAgent.findOne({ clientId, isActive: true }).lean();
+      
+      if (!existingDoc) {
+        res.status(404).json({
+          success: false,
+          message: `Client ${clientId} not found in PlatformClientAgent collection.`
+        });
+        return;
+      }
+
+      const existingNeedAttention = (existingDoc.needAttention as INeedAttention[]) || [];
+      let updatedNeedAttention: INeedAttention[];
+
+      if (option === 'release') {
+        // Remove the user from needAttention array
+        updatedNeedAttention = existingNeedAttention.filter(
+          (item: INeedAttention) => item.userIdentifier !== userIdentifier
+        );
+        console.log(`✅ Released user ${userIdentifier} from needAttention for client ${clientId}`);
+      } else {
+        // Upsert: update if exists, add if not
+        const existingIndex = existingNeedAttention.findIndex(
+          (item: INeedAttention) => item.userIdentifier === userIdentifier
+        );
+
+        const needAttentionItem: INeedAttention = {
+          userIdentifier,
+          option: option as 'pause' | 'block',
+          updatedAt: new Date()
+        };
+
+        // Add optional fields if provided
+        if (from) {
+          needAttentionItem.from = new Date(from);
+        }
+        if (to) {
+          needAttentionItem.to = new Date(to);
+        }
+        if (reason) {
+          needAttentionItem.reason = reason;
+        }
+
+        if (existingIndex >= 0) {
+          // Update existing entry
+          existingNeedAttention[existingIndex] = needAttentionItem;
+          updatedNeedAttention = existingNeedAttention;
+          console.log(`✅ Updated needAttention for userIdentifier ${userIdentifier} to option ${option}`);
+        } else {
+          // Add new entry
+          existingNeedAttention.push(needAttentionItem);
+          updatedNeedAttention = existingNeedAttention;
+          console.log(`✅ Added needAttention for userIdentifier ${userIdentifier} with option ${option}`);
+        }
+      }
+
+      // Update the document
+      const updatedClient = await PlatformClientAgent.findOneAndUpdate(
+        { clientId, isActive: true },
+        { 
+          $set: { 
+            needAttention: updatedNeedAttention,
+            updatedAt: new Date()
+          }
+        },
+        { new: true, runValidators: false, strict: false }
+      );
+
+      if (!updatedClient) {
+        res.status(404).json({
+          success: false,
+          message: `Failed to update client ${clientId}`
+        });
+        return;
+      }
+
+      const responseMessage = option === 'release' 
+        ? `User ${userIdentifier} released from needAttention successfully`
+        : `Need attention status for user ${userIdentifier} updated successfully (option: ${option})`;
+
+      const responseData: any = {
+        success: true,
+        message: responseMessage
+      };
+
+      // Only include needAttention in response if it's not release (since release removes it)
+      if (option !== 'release') {
+        responseData.needAttention = updatedNeedAttention.find(item => item.userIdentifier === userIdentifier) || null;
+      }
+
+      res.json(responseData);
+    } catch (error) {
+      console.error('❌ Error setting need attention:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to set need attention status',
         error: error instanceof Error ? error.message : 'Unknown error'
       });
     }

@@ -15,6 +15,10 @@ export function createPlatformRoutes(platformController: PlatformController): Ro
     router.put('/clients/:clientId/agent', (req, res) => platformController.assignAgentToClient(req, res));
     router.delete('/clients/:clientId/agent', (req, res) => platformController.removeAgentFromClient(req, res));
     router.delete('/clients/:clientId/agent/:userIdentifier', (req, res) => platformController.removePrivateAgentAssignment(req, res));
+    
+    // Need Attention Routes
+    router.get('/clients/:clientId/needattention', (req, res) => platformController.getNeedAttention(req, res));
+    router.post('/clients/:clientId/needattention/:userIdentifier', (req, res) => platformController.setNeedAttention(req, res));
 
     return router;
 }

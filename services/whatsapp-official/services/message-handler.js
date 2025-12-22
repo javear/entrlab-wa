@@ -75,6 +75,60 @@ class WhatsAppOfficialMessageHandler {
   }
 
   /**
+   * Check if user is in needAttention with block/pause status
+   * @param clientId - The client ID
+   * @param userIdentifier - The user identifier (message.from for WA-Official)
+   * @returns true if user should be blocked/paused, false otherwise
+   */
+  async checkNeedAttention(clientId, userIdentifier) {
+    try {
+      await this.clientManager.initialize();
+      const ClientAgent = this.clientManager.getClientAgentModel();
+      
+      const client = await ClientAgent.findOne({
+        clientId,
+        platform: 'wa-official',
+        isActive: true
+      }).lean();
+
+      if (!client) {
+        return false; // No client found, allow message
+      }
+
+      const needAttentionList = client.needAttention || [];
+      
+      // Find matching userIdentifier
+      const needAttentionItem = needAttentionList.find(
+        item => item.userIdentifier === userIdentifier && (item.option === 'block' || item.option === 'pause')
+      );
+
+      if (!needAttentionItem) {
+        return false; // User not in needAttention, allow message
+      }
+
+      // Check if there's a 'to' date and if it's expired
+      if (needAttentionItem.to) {
+        const expiryDate = new Date(needAttentionItem.to);
+        const now = new Date();
+        if (now > expiryDate) {
+          // Expired, allow message
+          return false;
+        }
+      }
+
+      // User is blocked/paused and not expired
+      const option = needAttentionItem.option === 'block' ? 'blocked' : 'paused';
+      const reason = needAttentionItem.reason ? ` (reason: ${needAttentionItem.reason})` : '';
+      console.log(`🚫 [${clientId}] User ${userIdentifier} is ${option} - skipping message${reason}`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Error checking needAttention for ${userIdentifier}:`, error.message);
+      // On error, fail open - allow message
+      return false;
+    }
+  }
+
+  /**
    * Handle incoming message from webhook
    * Similar to WPPConnect's handleIncomingMessage
    */
@@ -82,6 +136,13 @@ class WhatsAppOfficialMessageHandler {
     try {
       const senderPhoneNumber = message.from;
       const userKey = this.getUserKey(clientId, senderPhoneNumber);
+
+      // Check needAttention status first (before any message actions)
+      // For WA-Official, userIdentifier is message.from (sender's phone number)
+      const isBlockedOrPaused = await this.checkNeedAttention(clientId, senderPhoneNumber);
+      if (isBlockedOrPaused) {
+        return; // Skip all message actions (no read, typing, reply, etc.)
+      }
 
       // Extract and store contact information
       const contactInfo = {
