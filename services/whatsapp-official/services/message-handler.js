@@ -882,6 +882,78 @@ class WhatsAppOfficialMessageHandler {
   }
 
   /**
+   * Upsert needAttention for a user (called when AI workflow returns block/pause type)
+   * @param clientId - The client ID
+   * @param userIdentifier - The user identifier (phone number)
+   * @param option - The option ('block' or 'pause')
+   * @param reason - Optional reason
+   * @param from - Optional start date
+   * @param to - Optional end date
+   */
+  async upsertNeedAttention(clientId, userIdentifier, option, reason, from, to) {
+    try {
+      await this.clientManager.initialize();
+      const ClientAgent = this.clientManager.getClientAgentModel();
+      
+      // Query with lean() to get raw MongoDB data including needAttention
+      const existingDoc = await ClientAgent.findOne({ clientId, platform: 'wa-official', isActive: true }).lean();
+      
+      if (!existingDoc) {
+        console.error(`❌ Client ${clientId} not found in PlatformClientAgent collection`);
+        return;
+      }
+
+      const existingNeedAttention = existingDoc.needAttention || [];
+      
+      // Upsert: update if exists, add if not
+      const existingIndex = existingNeedAttention.findIndex(
+        item => item.userIdentifier === userIdentifier
+      );
+
+      const needAttentionItem = {
+        userIdentifier,
+        option: option,
+        updatedAt: new Date()
+      };
+
+      // Add optional fields if provided
+      if (from) {
+        needAttentionItem.from = new Date(from);
+      }
+      if (to) {
+        needAttentionItem.to = new Date(to);
+      }
+      if (reason) {
+        needAttentionItem.reason = reason;
+      }
+
+      if (existingIndex >= 0) {
+        // Update existing entry
+        existingNeedAttention[existingIndex] = needAttentionItem;
+      } else {
+        // Add new entry
+        existingNeedAttention.push(needAttentionItem);
+      }
+
+      // Update the document
+      await ClientAgent.findOneAndUpdate(
+        { clientId, platform: 'wa-official', isActive: true },
+        { 
+          $set: { 
+            needAttention: existingNeedAttention,
+            updatedAt: new Date()
+          }
+        },
+        { new: true, runValidators: false, strict: false }
+      );
+
+      console.log(`✅ Upserted needAttention for userIdentifier ${userIdentifier} with option ${option} (AI workflow response)`);
+    } catch (error) {
+      console.error(`❌ Error upserting needAttention for ${userIdentifier}:`, error.message);
+    }
+  }
+
+  /**
    * Send workflow messages (similar to WPPConnect)
    */
   async sendWorkflowMessages(clientId, number, messageObjects) {
@@ -991,6 +1063,22 @@ class WhatsAppOfficialMessageHandler {
               console.log(`🛑 Stop response signal received. Skipping remaining ${messageObjects.length - i - 1} message(s)`);
               return; // Exit the loop, stop sending remaining messages
 
+            case 'block':
+            case 'pause':
+              // AI workflow wants to block/pause the user
+              const blockReason = msgObj.reason || `${msgObj.type}ed by AI workflow`;
+              await this.upsertNeedAttention(
+                clientId,
+                number, // userIdentifier is the sender's phone number (message.from)
+                msgObj.type, // 'block' or 'pause'
+                blockReason,
+                msgObj.from || undefined,
+                msgObj.to || undefined
+              );
+              console.log(`🚫 [${clientId}] AI workflow requested ${msgObj.type} for user ${number}: ${blockReason}`);
+              // Continue processing remaining messages (don't return early)
+              break;
+
             default:
               console.warn(`⚠️  Unknown message type: ${msgObj.type}`);
           }
@@ -998,8 +1086,8 @@ class WhatsAppOfficialMessageHandler {
           console.error(`⚠️  Error sending ${msgObj.type}:`, error.message);
         }
 
-        // Delay between messages (except for reactions and stop-response)
-        if (i < messageObjects.length - 1 && msgObj.type !== 'reaction' && msgObj.type !== 'stop-response') {
+        // Delay between messages (except for reactions, stop-response, block, and pause)
+        if (i < messageObjects.length - 1 && msgObj.type !== 'reaction' && msgObj.type !== 'stop-response' && msgObj.type !== 'block' && msgObj.type !== 'pause') {
           const delayMs = 1000 + Math.floor(Math.random() * 2000);
           await new Promise(resolve => setTimeout(resolve, delayMs));
         }

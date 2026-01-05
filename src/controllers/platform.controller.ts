@@ -603,11 +603,17 @@ export class PlatformController {
           try {
             const decryptedConfig = await decryptWithVault(platformClient.configuration);
             clientData.verifyToken = decryptedConfig.verify_token || null;
+            
+            // Construct webhook URL from environment variable
+            const webhookHost = process.env.META_WEBHOOK_HOST;
+            const webhookUrl = webhookHost ? `${webhookHost}/webhook/v1/${clientId}` : null;
+            
             // Optionally include other config details (masked for security)
             clientData.configuration = {
               access_token: decryptedConfig.access_token ? `${decryptedConfig.access_token.substring(0, 20)}...` : null,
               app_secret: decryptedConfig.app_secret ? '***' : null,
-              verify_token: decryptedConfig.verify_token || null
+              verify_token: decryptedConfig.verify_token || null,
+              webhook_url: webhookUrl
             };
           } catch (error) {
             console.error(`❌ Error decrypting configuration for client ${clientId}:`, error);
@@ -617,6 +623,13 @@ export class PlatformController {
         } else {
           clientData.verifyToken = null;
           clientData.configurationError = 'No configuration found';
+          
+          // Still include webhook_url even if configuration is missing
+          const webhookHost = process.env.META_WEBHOOK_HOST;
+          const webhookUrl = webhookHost ? `${webhookHost}/webhook/v1/${clientId}` : null;
+          clientData.configuration = {
+            webhook_url: webhookUrl
+          };
         }
       }
 

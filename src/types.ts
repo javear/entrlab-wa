@@ -87,7 +87,7 @@ export interface ChatMessage {
 
 // Workflow response message object types
 export interface WorkflowMessageObject {
-  type: 'text' | 'image' | 'video' | 'audio' | 'file' | 'sticker' | 'animated-sticker' | 'reaction' | 'location' | 'reply' | 'stop-response';
+  type: 'text' | 'image' | 'video' | 'audio' | 'file' | 'sticker' | 'animated-sticker' | 'reaction' | 'location' | 'reply' | 'stop-response' | 'block' | 'pause';
   text?: string;
   url?: string;
   caption?: string;
@@ -96,6 +96,8 @@ export interface WorkflowMessageObject {
   messageid?: string;
   emoji?: string;
   reason?: string;
+  from?: string;
+  to?: string;
 }
 
 // Workflow API response interface

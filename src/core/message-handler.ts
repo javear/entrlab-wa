@@ -1051,6 +1051,89 @@ export class WPPConnectMessageHandler {
   }
 
   /**
+   * Upsert needAttention for a user (called when AI workflow returns block/pause type)
+   * @param clientId - The client ID
+   * @param userIdentifier - The user identifier (phone number without suffix)
+   * @param option - The option ('block' or 'pause')
+   * @param reason - Optional reason
+   * @param from - Optional start date
+   * @param to - Optional end date
+   */
+  private async upsertNeedAttention(
+    clientId: string,
+    userIdentifier: string,
+    option: 'block' | 'pause',
+    reason?: string,
+    from?: string,
+    to?: string
+  ): Promise<void> {
+    try {
+      // Get PlatformClientAgent model from mongoose
+      const PlatformClientAgent = mongoose.model('PlatformClientAgent');
+      
+      // Query with lean() to get raw MongoDB data including needAttention
+      const existingDoc = await PlatformClientAgent.findOne({
+        clientId,
+        platform: 'wpp',
+        isActive: true
+      }).lean();
+
+      if (!existingDoc) {
+        console.error(`❌ Client ${clientId} not found in PlatformClientAgent collection`);
+        return;
+      }
+
+      const existingNeedAttention = (existingDoc as any).needAttention || [];
+      
+      // Upsert: update if exists, add if not
+      const existingIndex = existingNeedAttention.findIndex(
+        (item: any) => item.userIdentifier === userIdentifier
+      );
+
+      const needAttentionItem: any = {
+        userIdentifier,
+        option: option,
+        updatedAt: new Date()
+      };
+
+      // Add optional fields if provided
+      if (from) {
+        needAttentionItem.from = new Date(from);
+      }
+      if (to) {
+        needAttentionItem.to = new Date(to);
+      }
+      if (reason) {
+        needAttentionItem.reason = reason;
+      }
+
+      if (existingIndex >= 0) {
+        // Update existing entry
+        existingNeedAttention[existingIndex] = needAttentionItem;
+      } else {
+        // Add new entry
+        existingNeedAttention.push(needAttentionItem);
+      }
+
+      // Update the document
+      await PlatformClientAgent.findOneAndUpdate(
+        { clientId, platform: 'wpp', isActive: true },
+        { 
+          $set: { 
+            needAttention: existingNeedAttention,
+            updatedAt: new Date()
+          }
+        },
+        { new: true, runValidators: false, strict: false }
+      );
+
+      console.log(`✅ Upserted needAttention for userIdentifier ${userIdentifier} with option ${option} (AI workflow response)`);
+    } catch (error) {
+      console.error(`❌ Error upserting needAttention for ${userIdentifier}:`, error);
+    }
+  }
+
+  /**
    * Send messages from workflow response object array
    * Each object represents a WhatsApp message bubble with a specific type
    */
@@ -1313,6 +1396,24 @@ export class WPPConnectMessageHandler {
               // Return early - don't send any messages
               return;
 
+            case 'block':
+            case 'pause':
+              // AI workflow wants to block/pause the user
+              // Extract phone number without suffix for userIdentifier
+              const phoneNumberPart = formattedNumber.replace(/@.*$/, '');
+              const blockReason = (msgObj as any).reason || `${msgObj.type}ed by AI workflow`;
+              await this.upsertNeedAttention(
+                clientId,
+                phoneNumberPart, // userIdentifier is the phone number without suffix
+                msgObj.type as 'block' | 'pause',
+                blockReason,
+                (msgObj as any).from || undefined,
+                (msgObj as any).to || undefined
+              );
+              console.log(`🚫 [${clientId}] AI workflow requested ${msgObj.type} for user ${phoneNumberPart}: ${blockReason}`);
+              // Continue processing remaining messages (don't return early)
+              break;
+
             default:
               console.warn(`⚠️  Unknown message type: ${msgObj.type}`);
           }
@@ -1330,8 +1431,8 @@ export class WPPConnectMessageHandler {
           console.error(`⚠️  Error sending ${msgObj.type}:`, errorMsg);
           }
 
-        // Natural delay between messages (except for reactions which are instant)
-        if (i < messageObjects.length - 1 && msgObj.type !== 'reaction') {
+        // Natural delay between messages (except for reactions, stop-response, block, and pause which are instant)
+        if (i < messageObjects.length - 1 && msgObj.type !== 'reaction' && msgObj.type !== 'stop-response' && msgObj.type !== 'block' && msgObj.type !== 'pause') {
             const delayMs = 1000 + Math.floor(Math.random() * 2000);
           console.log(`⏳ Waiting ${delayMs}ms before next workflow bubble`);
             
