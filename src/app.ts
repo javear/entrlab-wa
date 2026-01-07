@@ -7,7 +7,9 @@ import { ApiController } from './controllers/api.controller';
 import { createWhatsAppRoutes } from './routes/whatsapp.routes';
 import { createApiRoutes } from './routes/api.routes';
 import { createPlatformRoutes } from './routes/platform.routes';
+import { createPubSubRoutes } from './routes/pubsub.routes';
 import { PlatformController } from './controllers/platform.controller';
+import { PubSubController } from './controllers/pubsub.controller';
 import { Environment } from './types';
 import { swaggerSpec } from './config/swagger';
 import { createAuthMiddleware } from './middleware/auth.middleware';
@@ -26,6 +28,7 @@ export class WPPConnectWhatsAppBotApp {
   private whatsappController: WPPConnectWhatsAppController;
   private apiController: ApiController;
   private platformController: PlatformController;
+  private pubSubController: PubSubController;
   private autoRestartService: AutoRestartService;
   private memoryMonitor: MemoryMonitorService;
 
@@ -154,6 +157,7 @@ export class WPPConnectWhatsAppBotApp {
     this.whatsappController = new WPPConnectWhatsAppController(this.whatsappService, this.messageHandler, env);
     this.apiController = new ApiController(this.whatsappService as any, env);
     this.platformController = new PlatformController(this.whatsappService, env);
+    this.pubSubController = new PubSubController();
     this.autoRestartService = new AutoRestartService(env, async () => { 
       await this.gracefulShutdown(); 
     });
@@ -202,6 +206,9 @@ export class WPPConnectWhatsAppBotApp {
     
     // Platform routes (v1) with authentication
     this.app.use('/api/v1/platform', authMiddleware.authenticate, createPlatformRoutes(this.platformController));
+    
+    // PubSub routes (v1) with authentication
+    this.app.use('/api/v1/pubsub', authMiddleware.authenticate, createPubSubRoutes(this.pubSubController));
     
     // Legacy routes for backward compatibility
     this.app.get('/health', (req, res) => this.apiController.healthCheck(req, res));

@@ -12,7 +12,8 @@
     "restart": "./scripts/restart.sh",
     "watch": "tsc --watch",
     "generate-token": "node scripts/generate-token.js",
-    "waofficial-dev": "node services/whatsapp-official/index.js"
+    "waofficial-dev": "node services/whatsapp-official/index.js",
+    "pubsub-dev": "node services/pubsub/index.js"
   },
   "dependencies": {
     "@types/archiver": "^6.0.3",
@@ -37,6 +38,7 @@
     "puppeteer": "^24.16.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
+    "redis": "^4.6.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1"
   },

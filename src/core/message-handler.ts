@@ -10,6 +10,50 @@ import { MEMORY_CONFIG, getMemoryUsage, suggestGC } from '../config/memory-confi
 import { UserPauseService } from '../services/user-pause.service';
 import mongoose from 'mongoose';
 
+// Stream producer for pub/sub (optional - only if VALKEY_HOST is set)
+// Lazy initialization - only initialize when first needed (after dotenv.config() has run)
+let streamProducer: any = null;
+let producerInitialized = false;
+
+function initializeStreamProducer() {
+  if (producerInitialized) {
+    return streamProducer;
+  }
+  
+  producerInitialized = true;
+  console.log('[Message Handler] Initializing stream producer (lazy)...');
+  console.log(`[Message Handler] VALKEY_HOST: ${process.env.VALKEY_HOST ? 'SET' : 'NOT SET'}`);
+  console.log(`[Message Handler] REDIS_HOST: ${process.env.REDIS_HOST ? 'SET' : 'NOT SET'}`);
+  
+  try {
+    if (process.env.VALKEY_HOST || process.env.REDIS_HOST) {
+      console.log('🔄 Initializing stream producer...');
+      // Use path relative to project root (works from both src/ and dist/)
+      const path = require('path');
+      const producerPath = path.join(process.cwd(), 'services', 'pubsub', 'client', 'producer');
+      console.log(`[Message Handler] Producer path: ${producerPath}`);
+      const { getProducer } = require(producerPath);
+      console.log('[Message Handler] Producer module loaded successfully');
+      streamProducer = getProducer();
+      console.log('[Message Handler] Producer instance created, attempting connection...');
+      streamProducer.connect().then(() => {
+        console.log('✅ Stream producer connected successfully');
+      }).catch((err: any) => {
+        console.warn('⚠️  Could not connect to stream producer (pub/sub disabled):', err.message);
+        streamProducer = null;
+      });
+    } else {
+      console.log('ℹ️  Stream producer disabled (VALKEY_HOST/REDIS_HOST not set)');
+    }
+  } catch (error: any) {
+    console.error('❌ Stream producer initialization failed:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    streamProducer = null;
+  }
+  
+  return streamProducer;
+}
+
 // ============================================
 // WPPConnect Message Handler
 // ============================================
@@ -491,6 +535,48 @@ export class WPPConnectMessageHandler {
       // This is important for non-standard IDs like @lid, @g.us, etc.
       const senderFullIdForStorage = senderFullId !== 'unknown' ? senderFullId : `${senderNumber}@c.us`;
       (this.senderFullIds as any)[userKey] = senderFullIdForStorage;
+
+      // Publish incoming message event to stream (if producer is available)
+      // Lazy initialize producer (ensures dotenv.config() has run)
+      if (!producerInitialized) {
+        initializeStreamProducer();
+      }
+      
+      console.log(`🔍 [WPP Handler] Checking streamProducer for incoming message from ${senderNumber}:`, streamProducer ? 'EXISTS' : 'NULL');
+      if (streamProducer) {
+        try {
+          // Get agent code for this user (so scoped webhooks can receive this event)
+          const agentCode = await this.whatsappService.getAgentForUser(clientId, senderNumber, 'wpp');
+          
+          console.log(`📤 [WPP Handler] Publishing incoming message to stream for ${senderNumber} (clientId: ${clientId}, agentCode: ${agentCode || 'none'})`);
+          const entryId = await streamProducer.publishIncomingMessage({
+            clientId,
+            platform: 'wpp',
+            userIdentifier: senderNumber,
+            agentCode: agentCode || null, // Include agentCode so scoped webhooks can receive this event
+            messageId: message.id || message.timestamp || Date.now().toString(),
+            messageType: message.type || 'text',
+            content: enhancedMessage || '',
+            metadata: {
+              sender: contactInfo,
+              message: {
+                from: senderFullId,
+                timestamp: message.timestamp,
+                hasMedia: isMediaMsg,
+                mediaUrls: mediaUrls || []
+              }
+            }
+          });
+          console.log(`✅ [WPP Handler] Successfully published to stream: ${entryId}`);
+        } catch (error: any) {
+          console.error('❌ [WPP Handler] Failed to publish incoming message to stream:', error.message || error);
+          console.error('❌ [WPP Handler] Error stack:', error.stack);
+        }
+      } else {
+        console.log('ℹ️  [WPP Handler] Stream producer not available (null), skipping publish');
+        console.log('ℹ️  [WPP Handler] VALKEY_HOST check:', process.env.VALKEY_HOST ? 'SET' : 'NOT SET');
+        console.log('ℹ️  [WPP Handler] REDIS_HOST check:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');
+      }
 
       // If user is already being processed, mark this message as read immediately
       if (this.processingUsers[userKey]) {
@@ -1521,6 +1607,37 @@ export class WPPConnectMessageHandler {
         const messageObjects = aiagent.result.content.object;
         console.log(`🤖 [${clientId}] Received workflow response with ${messageObjects.length} message objects`);
         
+        // Publish AI response event to stream (if producer is available)
+        // Lazy initialize producer (ensures dotenv.config() has run)
+        if (!producerInitialized) {
+          initializeStreamProducer();
+        }
+        
+        if (streamProducer) {
+          try {
+            const phoneNumber = number.replace(/@.*$/, '');
+            const userKey = this.getUserKey(clientId, phoneNumber);
+            const agentCode = await this.whatsappService.getAgentForUser(clientId, phoneNumber, 'wpp');
+            
+            await streamProducer.publishAIResponse({
+              clientId,
+              platform: 'wpp',
+              userIdentifier: phoneNumber,
+              agentCode: agentCode || 'unknown',
+              requestMessage: message,
+              response: {
+                messages: messageObjects,
+                raw: aiagent
+              },
+              metadata: {
+                processingTime: Date.now() - (aiagent.metadata?.startTime || Date.now())
+              }
+            });
+          } catch (error: any) {
+            console.warn('⚠️  Failed to publish AI response to stream:', error.message);
+          }
+        }
+        
         try {
           await this.sendWorkflowMessages(client, clientId, formattedNumber, messageObjects);
           return;
@@ -1534,6 +1651,36 @@ export class WPPConnectMessageHandler {
       if (aiagent && aiagent.result && aiagent.result.content && aiagent.result.content.text) {
         const text = aiagent.result.content.text;
         console.log(`🤖 [${clientId}] Received workflow response with text only (no object array)`);
+        
+        // Publish AI response event to stream (if producer is available)
+        // Lazy initialize producer (ensures dotenv.config() has run)
+        if (!producerInitialized) {
+          initializeStreamProducer();
+        }
+        
+        if (streamProducer) {
+          try {
+            const phoneNumber = number.replace(/@.*$/, '');
+            const agentCode = await this.whatsappService.getAgentForUser(clientId, phoneNumber, 'wpp');
+            
+            await streamProducer.publishAIResponse({
+              clientId,
+              platform: 'wpp',
+              userIdentifier: phoneNumber,
+              agentCode: agentCode || 'unknown',
+              requestMessage: message,
+              response: {
+                text,
+                raw: aiagent
+              },
+              metadata: {
+                processingTime: Date.now() - (aiagent.metadata?.startTime || Date.now())
+              }
+            });
+          } catch (error: any) {
+            console.warn('⚠️  Failed to publish AI response to stream:', error.message);
+          }
+        }
         
         try {
           await client.client.sendText(formattedNumber, text);

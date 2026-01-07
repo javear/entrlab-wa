@@ -3,6 +3,46 @@ const jwt = require('jsonwebtoken');
 const clientManager = require('./client-manager');
 const WhatsAppMessageController = require('../controllers/message.controller');
 
+// Stream producer for pub/sub (optional - only if VALKEY_HOST is set)
+// Lazy initialization - only initialize when first needed (after dotenv.config() has run)
+let streamProducer = null;
+let producerInitialized = false;
+
+function initializeStreamProducer() {
+  if (producerInitialized) {
+    return streamProducer;
+  }
+  
+  producerInitialized = true;
+  console.log('[WA Official Handler] Initializing stream producer (lazy)...');
+  console.log(`[WA Official Handler] VALKEY_HOST: ${process.env.VALKEY_HOST ? 'SET' : 'NOT SET'}`);
+  console.log(`[WA Official Handler] REDIS_HOST: ${process.env.REDIS_HOST ? 'SET' : 'NOT SET'}`);
+  
+  try {
+    if (process.env.VALKEY_HOST || process.env.REDIS_HOST) {
+      console.log('🔄 Initializing stream producer...');
+      const { getProducer } = require('../../pubsub/client/producer');
+      console.log('[WA Official Handler] Producer module loaded successfully');
+      streamProducer = getProducer();
+      console.log('[WA Official Handler] Producer instance created, attempting connection...');
+      streamProducer.connect().then(() => {
+        console.log('✅ Stream producer connected successfully');
+      }).catch((err) => {
+        console.warn('⚠️  Could not connect to stream producer (pub/sub disabled):', err.message);
+        streamProducer = null;
+      });
+    } else {
+      console.log('ℹ️  Stream producer disabled (VALKEY_HOST/REDIS_HOST not set)');
+    }
+  } catch (error) {
+    console.error('❌ Stream producer initialization failed:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    streamProducer = null;
+  }
+  
+  return streamProducer;
+}
+
 /**
  * WhatsApp Official Message Handler
  * Handles incoming messages with queueing, delay, and AI workflow processing
@@ -311,6 +351,61 @@ class WhatsAppOfficialMessageHandler {
       }
 
       const fullMessage = enhancedMessage ? `${metadataPrefix} ${enhancedMessage}` : `${metadataPrefix}`;
+
+      // Publish incoming message event to stream (if producer is available)
+      // Lazy initialize producer (ensures dotenv.config() has run)
+      if (!producerInitialized) {
+        initializeStreamProducer();
+      }
+      
+      // Ensure producer is initialized (wait for connection if needed)
+      if (streamProducer && !streamProducer.isConnected) {
+        try {
+          await streamProducer.connect();
+        } catch (error) {
+          console.error('❌ [WA Official Handler] Failed to connect stream producer:', error.message);
+        }
+      }
+      
+      console.log(`🔍 [WA Official Handler] Checking streamProducer for incoming message from ${senderPhoneNumber}:`, streamProducer ? 'EXISTS' : 'NULL');
+      if (streamProducer) {
+        try {
+          // Get agent code for this user (so scoped webhooks can receive this event)
+          const agentCode = await this.getAgentForUser(clientId, senderPhoneNumber);
+          
+          console.log(`📤 [WA Official Handler] Publishing incoming message to stream for ${senderPhoneNumber} (clientId: ${clientId}, agentCode: ${agentCode || 'none'})`);
+          await streamProducer.publishIncomingMessage({
+            clientId,
+            platform: 'wa-official',
+            userIdentifier: senderPhoneNumber,
+            agentCode: agentCode || null, // Include agentCode so scoped webhooks can receive this event
+            messageId: message.id || message.timestamp || Date.now().toString(),
+            messageType: message.type || 'text',
+            content: fullMessage || '',
+            metadata: {
+              sender: {
+                name: message.contacts?.[0]?.profile?.name,
+                phone: senderPhoneNumber
+              },
+              message: {
+                from: senderPhoneNumber,
+                timestamp: message.timestamp,
+                phoneNumberId: phoneNumberIdFromMetadata,
+                hasMedia: mediaUrls.length > 0,
+                mediaUrls: mediaUrls || []
+              }
+            }
+          });
+          console.log(`✅ [WA Official Handler] Successfully published incoming message to stream`);
+        } catch (error) {
+          console.error('❌ [WA Official Handler] Failed to publish incoming message to stream:', error.message || error);
+          console.error('❌ [WA Official Handler] Error stack:', error.stack);
+        }
+      } else {
+        console.log('ℹ️  [WA Official Handler] Stream producer not available (null), skipping publish');
+        console.log('ℹ️  [WA Official Handler] VALKEY_HOST check:', process.env.VALKEY_HOST ? 'SET' : 'NOT SET');
+        console.log('ℹ️  [WA Official Handler] REDIS_HOST check:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');
+      }
 
       // Add to message queue
       // Note: For private agent assignment, we use senderPhoneNumber (message.from) as userIdentifier
@@ -695,6 +790,51 @@ class WhatsAppOfficialMessageHandler {
         // Fallback: Use content.object if formatted.whatsapp is not available
         messageObjects = workflowResponse.result.content.object;
         console.log(`📥 [${clientId}] Using content.object: ${messageObjects.length} message(s)`);
+      }
+
+      // Publish AI response to stream (if producer is available)
+      // Lazy initialize producer (ensures dotenv.config() has run)
+      if (!producerInitialized) {
+        initializeStreamProducer();
+      }
+      
+      // Ensure producer is initialized (wait for connection if needed)
+      if (streamProducer && !streamProducer.isConnected) {
+        try {
+          await streamProducer.connect();
+        } catch (error) {
+          console.error('❌ [WA Official Handler] Failed to connect stream producer:', error.message);
+        }
+      }
+      
+      console.log(`🔍 [WA Official Handler] Checking streamProducer for AI response from ${number}:`, streamProducer ? 'EXISTS' : 'NULL');
+      if (streamProducer) {
+        try {
+          console.log(`📤 [WA Official Handler] Publishing AI response to stream for ${number} (clientId: ${clientId}, agentCode: ${agentCode || 'none'})`);
+          await streamProducer.publishAIResponse({
+            clientId,
+            platform: 'wa-official',
+            userIdentifier: number, // userIdentifier is the sender's phone number (message.from)
+            agentCode: agentCode || 'unknown',
+            requestMessage: message,
+            response: {
+              messages: messageObjects.length > 0 ? messageObjects : null,
+              text: workflowResponse?.result?.content?.text || null,
+              raw: workflowResponse
+            },
+            metadata: {
+              processingTime: Date.now() - (workflowResponse?.metadata?.startTime || Date.now())
+            }
+          });
+          console.log(`✅ [WA Official Handler] Successfully published AI response to stream`);
+        } catch (error) {
+          console.error('❌ [WA Official Handler] Failed to publish AI response to stream:', error.message || error);
+          console.error('❌ [WA Official Handler] Error stack:', error.stack);
+        }
+      } else {
+        console.log('ℹ️  [WA Official Handler] Stream producer not available (null), skipping publish');
+        console.log('ℹ️  [WA Official Handler] VALKEY_HOST check:', process.env.VALKEY_HOST ? 'SET' : 'NOT SET');
+        console.log('ℹ️  [WA Official Handler] REDIS_HOST check:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');
       }
 
       // Send response using message controller

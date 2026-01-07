@@ -1,0 +1,63 @@
+# Dockerfile for Pub/Sub Service
+# This service handles pub/sub operations using Valkey Stream for WhatsApp messages and AI responses
+
+FROM node:18-alpine
+
+# Install runtime dependencies (minimal)
+RUN apk add --no-cache \
+    dumb-init \
+    ca-certificates
+
+# Create app user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S pubsub -u 1001
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV PUBSUB_PORT=3005
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies (including pubsub service dependencies)
+RUN npm install --only=production && \
+    npm cache clean --force
+
+# Copy Pub/Sub service files
+COPY services/pubsub/ ./services/pubsub/
+
+# Create startup script
+RUN echo '#!/bin/sh' > /usr/src/app/start.sh && \
+    echo 'set -e' >> /usr/src/app/start.sh && \
+    echo 'cd /usr/src/app/services/pubsub' >> /usr/src/app/start.sh && \
+    echo 'exec dumb-init node index.js' >> /usr/src/app/start.sh && \
+    chmod +x /usr/src/app/start.sh
+
+# Note: Environment variables should be provided at runtime via the deployment platform
+# Required env vars:
+#   - VALKEY_HOST or REDIS_HOST (default: localhost)
+#   - VALKEY_PORT or REDIS_PORT (default: 6379)
+#   - VALKEY_PASSWORD or REDIS_PASSWORD (optional)
+#   - VALKEY_DB or REDIS_DB (optional, defaults to 0)
+#   - VALKEY_STREAM_NAME (optional, defaults to 'whatsapp:events')
+#   - PUBSUB_PORT (optional, defaults to 3005)
+
+# Set proper ownership
+RUN chown -R root:root /usr/src/app
+
+# Keep running as root for Railway/managed platform compatibility
+# USER pubsub  # Commented out for Railway compatibility
+
+# Expose the service port
+EXPOSE 3005
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
+    CMD node -e "const port = process.env.PUBSUB_PORT || '3005'; require('http').get('http://localhost:' + port + '/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+
+# Use the startup script
+CMD ["/usr/src/app/start.sh"]
+
