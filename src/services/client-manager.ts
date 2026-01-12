@@ -40,6 +40,7 @@ export class WPPConnectClientManager {
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private sessionBackupInterval: NodeJS.Timeout | null = null;
   private retryAttempts: Map<string, number> = new Map();
+  private restoreAttempts: Map<string, number> = new Map(); // Track MongoDB restore attempts per client
 
   constructor(config: WPPConnectClientManagerConfig) {
     this.config = config;
@@ -80,13 +81,15 @@ export class WPPConnectClientManager {
 
     // CRITICAL: Check if local session folder exists with valid data FIRST
     // MongoDB backup's purpose is to restore to tokens/{clientId} folder
-    // If folder already exists with valid data, use it directly - no restore needed!
+    // IMPORTANT: Always check if MongoDB backup is newer than local session to prevent using stale sessions
     const sessionPath = path.join(process.cwd(), 'tokens', clientId);
     const defaultPath = path.join(sessionPath, 'Default');
     const indexedDBPath = path.join(defaultPath, 'IndexedDB');
     const localStoragePath = path.join(defaultPath, 'Local Storage', 'leveldb');
     
     let hasLocalSession = false;
+    let localSessionAge = 0; // Age of local session in milliseconds
+    
     if (fs.existsSync(sessionPath) && fs.existsSync(defaultPath)) {
       // Check if session folder has valid authentication data
       const hasIndexedDB = fs.existsSync(indexedDBPath);
@@ -94,7 +97,17 @@ export class WPPConnectClientManager {
       
       if (hasIndexedDB || hasLocalStorage) {
         hasLocalSession = true;
-        console.log(`✅ [${clientId}] Local session folder exists with valid data - using it directly`);
+        
+        // Get the modification time of the session folder to determine its age
+        try {
+          const sessionStats = fs.statSync(sessionPath);
+          localSessionAge = Date.now() - sessionStats.mtimeMs;
+          const ageHours = (localSessionAge / (1000 * 60 * 60)).toFixed(1);
+          console.log(`📁 [${clientId}] Local session folder exists (age: ${ageHours} hours)`);
+        } catch (error) {
+          console.warn(`⚠️  [${clientId}] Could not get local session age:`, error);
+        }
+        
         console.log(`📁 [${clientId}] Session folder: ${sessionPath}`);
         if (hasIndexedDB) {
           console.log(`✅ [${clientId}] IndexedDB found - session data ready`);
@@ -107,21 +120,49 @@ export class WPPConnectClientManager {
       }
     }
 
-    // Only restore from MongoDB if:
-    // 1. Not skipping restore
-    // 2. No valid local session exists
+    // WPPConnect's native way is to preserve tokens in local session folder
+    // MongoDB backup is only used as a fallback if local session doesn't exist or is corrupted
+    // Always prefer local session if it exists (this is the native WPPConnect behavior)
+    let shouldRestoreFromMongo = false;
+    
     if (!skipRestore && !hasLocalSession) {
-      console.log(`📥 [${clientId}] No valid local session found - restoring from MongoDB...`);
-      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
-      if (!restored) {
-        console.warn(`⚠️  [${clientId}] No MongoDB backup found - client will require QR code scan`);
-      } else {
-        console.log(`✅ [${clientId}] Session restored from MongoDB, creating client...`);
+      // No local session exists - restore from MongoDB backup if available
+      try {
+        const backups = await this.sessionBackup!.listWhatsAppBackups(clientId);
+        if (backups.length > 0) {
+          const latestBackup = backups[0];
+          if (latestBackup.uploadDate) {
+            const backupAgeHours = ((Date.now() - new Date(latestBackup.uploadDate).getTime()) / (1000 * 60 * 60)).toFixed(1);
+            console.log(`📦 [${clientId}] MongoDB backup found (age: ${backupAgeHours} hours) - restoring as fallback`);
+          }
+          shouldRestoreFromMongo = true;
+        } else {
+          console.log(`⚠️  [${clientId}] No local session and no MongoDB backup - will require QR code scan`);
+        }
+      } catch (error) {
+        console.warn(`⚠️  [${clientId}] Error checking MongoDB backup:`, error);
       }
     } else if (hasLocalSession) {
-      console.log(`✅ [${clientId}] Using existing local session folder (skip MongoDB restore)`);
-    } else if (skipRestore) {
-      console.log(`⏱️  [${clientId}] Skip restore flag set - using existing session if available`);
+      // Local session exists - use it (WPPConnect's native way)
+      // MongoDB TokenStore will be used by WPPConnect to load/save tokens
+      console.log(`✅ [${clientId}] Using existing local session folder (WPPConnect's native preservation method)`);
+      console.log(`ℹ️  [${clientId}] MongoDB TokenStore will handle token persistence automatically`);
+    }
+
+    // Restore from MongoDB if needed (only when no local session exists)
+    if (shouldRestoreFromMongo) {
+      console.log(`📥 [${clientId}] Restoring from MongoDB backup (local session not found)...`);
+      const restored = await this.sessionBackup!.restoreWhatsAppSession(clientId);
+      if (!restored) {
+        console.warn(`⚠️  [${clientId}] MongoDB restore failed - client will require QR code scan`);
+      } else {
+        console.log(`✅ [${clientId}] Session restored from MongoDB, creating client...`);
+        hasLocalSession = true; // After restore, we have a local session
+      }
+    } else if (hasLocalSession && skipRestore) {
+      console.log(`✅ [${clientId}] Using existing local session folder (skip restore flag set)`);
+    } else if (!hasLocalSession && skipRestore) {
+      console.log(`⏱️  [${clientId}] Skip restore flag set - no local session available`);
     }
 
     // Add placeholder client info immediately so it's queryable
@@ -137,10 +178,13 @@ export class WPPConnectClientManager {
     // Create message handler function BEFORE client creation
     // This ensures we can register it immediately after client is created
     const messageHandler = async (message: any) => {
+      // DEBUG: Log ALL incoming messages to verify handler is being called
+      console.log(`🔔 [${clientId}] onMessage handler CALLED - type: ${message.type || 'unknown'}, from: ${message.from || 'unknown'}, fromMe: ${message.fromMe || false}`);
+      
       // CRITICAL: Filter out messages sent by the bot itself to prevent infinite loops
       // This must be checked FIRST before any processing
       if (message.fromMe === true) {
-        // Silently ignore - don't even log to reduce noise
+        console.log(`🔕 [${clientId}] Ignoring bot's own message (fromMe=true)`);
         return; // Exit early - don't process bot's own messages
       }
       
@@ -159,7 +203,7 @@ export class WPPConnectClientManager {
       const msgType = message.type || '';
       const ignoredTypes = ['ack', 'status', 'notification', 'protocol', 'e2e_notification'];
       if (ignoredTypes.includes(msgType.toLowerCase())) {
-        // Silently ignore status/ACK events
+        console.log(`🔕 [${clientId}] Ignoring non-message event type: ${msgType}`);
         return; // Exit early - these are status updates, not messages
       }
       
@@ -252,6 +296,8 @@ export class WPPConnectClientManager {
               clientInfo.isReady = true;
               clientInfo.status = 'ready';
               clientInfo.qrCode = undefined; // Clear QR code when authenticated
+              // Reset restore attempts counter on successful connection
+              this.restoreAttempts.delete(clientId);
               console.log(`✅ [${clientId}] Client marked as ready (isLogged status)`);
             }
           } else if (statusSession === 'qrReadSuccess') {
@@ -265,13 +311,60 @@ export class WPPConnectClientManager {
             }
           } else if (statusSession === 'inChat') {
             console.log(`✅ [${session}] Session is active and in chat`);
-            // Mark as ready when in chat
+            // Mark as ready when in chat, BUT verify actual connection
             const clientInfo = this.clients.get(clientId);
-            if (clientInfo) {
-              clientInfo.isReady = true;
-              clientInfo.status = 'ready';
-              clientInfo.qrCode = undefined; // Clear QR code when ready
-              console.log(`✅ [${clientId}] Client marked as ready (inChat status)`);
+            if (clientInfo && clientInfo.client) {
+              // CRITICAL: Verify client is actually connected by checking phone number
+              // If getWid() fails or returns null, the session is stale and needs re-authentication
+              clientInfo.client.getWid().then(async (wid: string) => {
+                if (wid) {
+                  console.log(`✅ [${clientId}] Verified connection - WID: ${wid}`);
+                  
+                  // Additional verification: Try to get connection state
+                  try {
+                    const state = await clientInfo.client.getConnectionState();
+                    console.log(`🔍 [${clientId}] Connection state: ${state}`);
+                    
+                    // SocketState can be: 'close' | 'connecting' | 'open'
+                    // Check if state is a string and indicates disconnection
+                    const stateStr = String(state);
+                    if (stateStr === 'close' || stateStr === 'connecting') {
+                      console.warn(`⚠️  [${clientId}] Session shows inChat but connection state is ${stateStr} - session may be stale`);
+                      // Don't mark as ready if connection state indicates disconnection
+                      return;
+                    }
+                  } catch (stateError: any) {
+                    console.warn(`⚠️  [${clientId}] Could not verify connection state:`, stateError.message);
+                    // Continue anyway - getWid() succeeded which is a good sign
+                  }
+                  
+                  clientInfo.isReady = true;
+                  clientInfo.status = 'ready';
+                  clientInfo.qrCode = undefined;
+                  
+                  // Reset restore attempts counter on successful connection (after delay to ensure stability)
+                  setTimeout(() => {
+                    const clientInfo = this.clients.get(clientId);
+                    if (clientInfo && clientInfo.isReady) {
+                      this.restoreAttempts.delete(clientId);
+                      console.log(`✅ [${clientId}] Restore counter reset - client inChat and stable`);
+                    }
+                  }, 5000);
+                  console.log(`✅ [${clientId}] Client marked as ready (inChat status)`);
+                } else {
+                  console.warn(`⚠️  [${clientId}] inChat status but WID is null - client may not be fully connected`);
+                  console.warn(`⚠️  [${clientId}] Session may be stale - consider deleting session folder and re-scanning QR`);
+                  // Don't mark as ready if WID is null
+                }
+              }).catch((err: any) => {
+                console.error(`❌ [${clientId}] Failed to verify connection (inChat status but getWid failed):`, err.message);
+                console.error(`❌ [${clientId}] Session appears stale - client will not be marked as ready`);
+                console.error(`❌ [${clientId}] To fix: Delete tokens/${clientId} folder and restart to force QR scan`);
+                // Don't mark as ready if we can't verify connection
+              });
+              
+              // Don't mark as ready immediately - wait for getWid() verification
+              // This prevents marking stale sessions as ready
             }
           } else {
             console.log(`ℹ️  [${session}] Status: ${statusSession}`);
@@ -314,16 +407,50 @@ export class WPPConnectClientManager {
 
       console.log(`✅ WPPConnect client created: ${clientId}`);
       
-      // Store handler reference for potential retry
+      // Store handler reference - CRITICAL: Store the exact function reference
       const clientInfoForStorage = this.clients.get(clientId);
       if (clientInfoForStorage) {
         (clientInfoForStorage as any)._messageHandler = messageHandler;
         (clientInfoForStorage as any)._messageHandlerRegistered = false;
+        // Debug: Verify handler is stored correctly
+        console.log(`🔍 [${clientId}] Handler stored - type: ${typeof messageHandler}, clientId in closure: ${clientId}`);
       }
       
-      // Register message handler - must wait until onMessage is exposed
-      // WPPConnect exposes onMessage after wapi.js injection, so we'll register in CONNECTED state
-      console.log(`📋 [${clientId}] Message handler function created (will register when wapi.js exposes onMessage)`);
+      // Register message handler - poll until onMessage is exposed
+      // WPPConnect exposes onMessage after wapi.js injection
+      // CRITICAL: Register IMMEDIATELY when onMessage is available, not wait for CONNECTED
+      // This ensures we catch messages that arrive right after connection
+      console.log(`📋 [${clientId}] Message handler function created - will register as soon as onMessage is exposed`);
+      
+      const tryRegisterWhenReady = (attempt: number = 1, maxAttempts: number = 30) => {
+        const currentClientInfo = this.clients.get(clientId);
+        if (!currentClientInfo) {
+          return; // Client was removed
+        }
+        
+        // Check if already registered
+        if ((currentClientInfo as any)._messageHandlerRegistered) {
+          return; // Already registered
+        }
+        
+        // Check if onMessage is available
+        if (typeof client.onMessage === 'function') {
+          try {
+            console.log(`📝 [${clientId}] Registering client.onMessage() handler (immediate registration when exposed, attempt ${attempt})...`);
+            client.onMessage(messageHandler);
+            (currentClientInfo as any)._messageHandlerRegistered = true;
+            console.log(`✅ [${clientId}] client.onMessage() registered successfully (immediate registration)`);
+          } catch (regError) {
+            console.error(`❌ [${clientId}] Error registering handler immediately:`, regError instanceof Error ? regError.message : regError);
+          }
+        } else if (attempt < maxAttempts) {
+          // Retry after 500ms
+          setTimeout(() => tryRegisterWhenReady(attempt + 1, maxAttempts), 500);
+        }
+      };
+      
+      // Start polling immediately - don't wait for CONNECTED state
+      setTimeout(() => tryRegisterWhenReady(), 1000); // Wait 1 second for client to initialize
 
       // Check for QR code manually (catchQR callback sometimes doesn't fire)
       setImmediate(async () => {
@@ -420,12 +547,29 @@ export class WPPConnectClientManager {
             clientInfo.status = 'ready';
             clientInfo.isReady = true;
             clientInfo.lastActivity = new Date();
-            
-            // ALWAYS re-register handlers when CONNECTED - even if registered earlier
-            // Handlers registered in UNPAIRED state may not work properly after connection
-            // Wait 3 seconds after CONNECTED to ensure everything is fully ready and stable
+            // Reset restore attempts counter on successful connection
+            // Only reset if we actually connected (not just if state changed)
+            // Wait a bit to ensure connection is stable before resetting
             setTimeout(() => {
-              console.log(`📋 [${clientId}] Re-registering message handlers in CONNECTED state (ensures proper registration)...`);
+              const clientInfo = this.clients.get(clientId);
+              if (clientInfo && clientInfo.isReady && clientInfo.status === 'ready') {
+                this.restoreAttempts.delete(clientId);
+                console.log(`✅ [${clientId}] Restore counter reset - client successfully connected and stable`);
+              }
+            }, 5000); // Wait 5 seconds to ensure connection is stable
+            
+            // Re-register handlers in CONNECTED state if not already registered
+            // This is a fallback in case immediate registration failed
+            setTimeout(async () => {
+              const currentClientInfo = this.clients.get(clientId);
+              const alreadyRegistered = currentClientInfo && (currentClientInfo as any)._messageHandlerRegistered;
+              
+              if (alreadyRegistered) {
+                console.log(`✅ [${clientId}] Handler already registered (from immediate registration), skipping CONNECTED state registration`);
+                return;
+              }
+              
+              console.log(`📋 [${clientId}] Re-registering message handlers in CONNECTED state (immediate registration may have failed)...`);
               
               // Verify onMessage exists
               if (typeof client.onMessage !== 'function') {
@@ -493,8 +637,154 @@ export class WPPConnectClientManager {
         if (state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
           const clientInfo = this.clients.get(clientId);
           if (clientInfo) {
+            const wasReady = clientInfo.isReady; // Track if client was previously ready
+            const clientAge = Date.now() - clientInfo.lastActivity.getTime(); // How long since client was created
             clientInfo.status = 'disconnected';
             clientInfo.isReady = false;
+            
+            // Check if we should trigger MongoDB backup fallback:
+            // 1. Client was previously ready (connected) and now unpaired, OR
+            // 2. Client is unpaired immediately after creation (< 60 seconds) - indicates stale local session
+            // BUT: Don't trigger if client was just recreated (< 30 seconds) - give it time to connect
+            const isImmediatelyUnpaired = !wasReady && clientAge < 60000; // Unpaired within 60 seconds of creation
+            const isJustRecreated = clientAge < 30000; // Client was just created/recreated (< 30 seconds) - grace period
+            const shouldTryFallback = (wasReady || (isImmediatelyUnpaired && !isJustRecreated)) && this.sessionBackup;
+            
+            // Log why restore is/isn't being attempted
+            if (!shouldTryFallback && this.sessionBackup) {
+              if (isJustRecreated) {
+                console.log(`⏸️  [${clientId}] Client just recreated (${Math.round(clientAge/1000)}s ago) - waiting before restore attempt (grace period)`);
+              } else if (!wasReady && !isImmediatelyUnpaired) {
+                console.log(`⏸️  [${clientId}] Client unpaired but not immediately after creation (${Math.round(clientAge/1000)}s old) - not attempting restore`);
+              }
+            }
+            
+            // Check restore attempt count (max 3 attempts)
+            const currentRestoreAttempts = this.restoreAttempts.get(clientId) || 0;
+            const maxRestoreAttempts = 3;
+            const canAttemptRestore = currentRestoreAttempts < maxRestoreAttempts;
+            
+            // Debug: Log counter state
+            console.log(`🔍 [${clientId}] Restore attempt check: current=${currentRestoreAttempts}, max=${maxRestoreAttempts}, canAttempt=${canAttemptRestore}`);
+            
+            if (shouldTryFallback && canAttemptRestore) {
+              const nextAttempt = currentRestoreAttempts + 1;
+              if (isImmediatelyUnpaired) {
+                console.log(`⚠️  [${clientId}] Session is unpaired immediately after creation (local session appears stale) - attempting MongoDB backup fallback (attempt ${nextAttempt}/${maxRestoreAttempts})...`);
+              } else {
+                console.log(`⚠️  [${clientId}] Session became unpaired after being connected - attempting MongoDB backup fallback (attempt ${nextAttempt}/${maxRestoreAttempts})...`);
+              }
+              
+              // Increment restore attempt counter BEFORE async operation
+              this.restoreAttempts.set(clientId, nextAttempt);
+              console.log(`🔢 [${clientId}] Restore counter incremented to: ${nextAttempt}`);
+              
+              // Restore in background and immediately reconnect
+              setImmediate(async () => {
+                try {
+                  if (this.sessionBackup) {
+                    // Check if MongoDB backup exists before attempting restore
+                    const backups = await this.sessionBackup.listWhatsAppBackups(clientId);
+                    if (backups.length > 0) {
+                      console.log(`📦 [${clientId}] MongoDB backup found - restoring as fallback...`);
+                      
+                      // CRITICAL: Close existing client FIRST before restore
+                      // This releases file handles so the directory can be deleted
+                      const existingClientInfo = this.clients.get(clientId);
+                      if (existingClientInfo && existingClientInfo.client) {
+                        try {
+                          console.log(`🔄 [${clientId}] Closing existing client with stale session before restore...`);
+                          // Ensure client is fully closed - wait for close to complete
+                          await existingClientInfo.client.close().catch(err => {
+                            console.warn(`⚠️  [${clientId}] Error closing existing client:`, err.message);
+                          });
+                          
+                          // Wait a bit more to ensure all Puppeteer contexts are cleaned up
+                          await new Promise(resolve => setTimeout(resolve, 1000));
+                        } catch (closeError) {
+                          console.warn(`⚠️  [${clientId}] Error closing client:`, closeError);
+                        }
+                      }
+                      
+                      // Remove from clients map
+                      this.clients.delete(clientId);
+                      
+                      // Wait for file handles to be released and browser contexts to fully close
+                      console.log(`⏳ [${clientId}] Waiting for file handles and browser contexts to be released...`);
+                      await new Promise(resolve => setTimeout(resolve, 5000)); // Increased wait time for Puppeteer cleanup
+                      
+                      // Now restore from MongoDB
+                      const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
+                      if (restored) {
+                        const currentAttempts = this.restoreAttempts.get(clientId) || 0;
+                        console.log(`✅ [${clientId}] Session restored from MongoDB backup (attempt ${currentAttempts}/${maxRestoreAttempts}) - reconnecting immediately...`);
+                        
+                        // DO NOT reset counter here - wait for actual connection success
+                        // Counter will be reset when client successfully connects (CONNECTED state)
+                        
+                        // Recreate client with restored session
+                        console.log(`🔄 [${clientId}] Recreating client with restored session...`);
+                        try {
+                          // Add extra delay to ensure browser contexts are fully cleaned up
+                          await new Promise(resolve => setTimeout(resolve, 2000));
+                          await this.createClient(clientId, true); // skipRestore=true since we already restored
+                          console.log(`✅ [${clientId}] Client recreated successfully with restored session`);
+                          // Note: If session is still unpaired, it will trigger another restore attempt
+                          // Counter is preserved, so next attempt will be currentAttempts + 1
+                        } catch (recreateError: any) {
+                          // Handle Puppeteer protocol errors gracefully
+                          // These errors occur when WPPConnect tries to inject wapi.js while the page is still loading/navigating
+                          const errorMsg = recreateError?.message || String(recreateError);
+                          const isPuppeteerProtocolError = errorMsg.includes('Protocol error') || 
+                                                           errorMsg.includes('Cannot find context') ||
+                                                           errorMsg.includes('Execution context was destroyed') ||
+                                                           errorMsg.includes('No node with given id found') ||
+                                                           errorMsg.includes('DOM.resolveNode') ||
+                                                           errorMsg.includes('DOM.describeNode') ||
+                                                           errorMsg.includes('wapi.js failed');
+                          
+                          if (isPuppeteerProtocolError) {
+                            // These are non-fatal - WPPConnect has built-in retry logic
+                            console.warn(`⚠️  [${clientId}] Puppeteer protocol error during initialization (expected during page load):`, errorMsg.substring(0, 80) + '...');
+                            console.log(`ℹ️  [${clientId}] WPPConnect will automatically retry - this is normal during client initialization`);
+                            console.log(`ℹ️  [${clientId}] Client creation continuing...`);
+                          } else {
+                            console.error(`❌ [${clientId}] Error recreating client after restore:`, recreateError);
+                          }
+                          // Don't reset counter if recreation fails - it will try again
+                        }
+                      } else {
+                        const attempts = this.restoreAttempts.get(clientId) || 0;
+                        if (attempts >= maxRestoreAttempts) {
+                          console.warn(`⚠️  [${clientId}] MongoDB backup restore failed after ${maxRestoreAttempts} attempts - stopping restore attempts, will require QR code scan`);
+                          console.log(`ℹ️  [${clientId}] Client will remain in UNPAIRED state - waiting for QR code scan. Process continues running normally.`);
+                          this.restoreAttempts.delete(clientId); // Clean up counter
+                        } else {
+                          console.warn(`⚠️  [${clientId}] MongoDB backup restore failed (attempt ${attempts}/${maxRestoreAttempts}) - will try again if session becomes unpaired`);
+                        }
+                      }
+                    } else {
+                      console.log(`ℹ️  [${clientId}] No MongoDB backup available - will require QR code scan`);
+                      this.restoreAttempts.delete(clientId); // Clean up counter if no backup exists
+                    }
+                  }
+                } catch (error) {
+                  const attempts = this.restoreAttempts.get(clientId) || 0;
+                  console.error(`❌ [${clientId}] Error restoring from MongoDB backup after unpairing (attempt ${attempts}/${maxRestoreAttempts}):`, error);
+                  
+                  if (attempts >= maxRestoreAttempts) {
+                    console.warn(`⚠️  [${clientId}] Max restore attempts (${maxRestoreAttempts}) reached - stopping restore attempts, will require QR code scan`);
+                    console.log(`ℹ️  [${clientId}] Client will remain in UNPAIRED state - waiting for QR code scan. Process continues running normally.`);
+                    this.restoreAttempts.delete(clientId); // Clean up counter
+                  }
+                }
+              });
+            } else if (shouldTryFallback && !canAttemptRestore) {
+              // Max attempts reached - stop trying and use QR scan
+              console.warn(`⚠️  [${clientId}] Max MongoDB restore attempts (${maxRestoreAttempts}) reached - will require QR code scan`);
+              console.log(`ℹ️  [${clientId}] Client will remain in UNPAIRED state - waiting for QR code scan. Process continues running normally.`);
+              this.restoreAttempts.delete(clientId); // Clean up counter
+            }
             
             // Register handlers now (onMessage is exposed even in UNPAIRED state)
             // This ensures handlers are ready when QR is scanned and state becomes CONNECTED
@@ -506,7 +796,11 @@ export class WPPConnectClientManager {
                 const messageHandler = (clientInfo as any)._messageHandler;
                 if (messageHandler) {
                   try {
-                    client.onMessage(messageHandler);
+                    const dispose = client.onMessage(messageHandler);
+                    // Store dispose function for cleanup
+                    if (dispose && typeof dispose === 'function') {
+                      (clientInfo as any)._messageHandlerDispose = dispose;
+                    }
                     // NOTE: onAnyMessage is NOT registered to prevent duplicate message processing
                     (clientInfo as any)._messageHandlerRegistered = true;
                     console.log(`✅ [${clientId}] Handler registered (waiting for QR scan to connect)`);
@@ -555,11 +849,28 @@ export class WPPConnectClientManager {
         return clientInfo;
       }
 
-    } catch (error) {
+    } catch (error: any) {
+      // Check if it's a Puppeteer protocol error (non-fatal during initialization)
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isPuppeteerProtocolError = errorMessage.includes('Protocol error') || 
+                                       errorMessage.includes('Cannot find context') ||
+                                       errorMessage.includes('Execution context was destroyed') ||
+                                       errorMessage.includes('No node with given id found') ||
+                                       errorMessage.includes('DOM.resolveNode') ||
+                                       errorMessage.includes('DOM.describeNode') ||
+                                       errorMessage.includes('wapi.js failed');
+      
+      if (isPuppeteerProtocolError) {
+        // These are usually non-fatal - WPPConnect handles them internally with retry logic
+        console.warn(`⚠️  [${clientId}] Puppeteer protocol error during client creation (expected during page load):`, errorMessage.substring(0, 80) + '...');
+        console.log(`ℹ️  [${clientId}] WPPConnect will retry automatically - this is normal during initialization`);
+        // Still throw so the caller knows, but with better context
+        throw error;
+      }
+      
       console.error(`❌ Failed to create WPPConnect client ${clientId}:`, error);
       
       // Check if error is due to browser already running or profile locked
-      const errorMessage = error instanceof Error ? error.message : String(error);
       const isBrowserLockError = errorMessage.includes('browser is already running') || 
                                  errorMessage.includes('userDataDir') ||
                                  errorMessage.includes('profile appears to be in use') ||
@@ -601,15 +912,10 @@ export class WPPConnectClientManager {
           const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
-          const tokensPath = path.join(process.cwd(), 'tokens');
+          const clientTokensPath = path.join(process.cwd(), 'tokens', clientId);
           
-          // CRITICAL: Delete the entire tokens folder to force clean slate for all clients
-          // This prevents any stale files from interfering with fresh downloads
-          console.log(`🗑️  Removing entire tokens folder for clean extraction: ${tokensPath}`);
-          if (fs.existsSync(tokensPath)) {
-            fs.rmSync(tokensPath, { recursive: true, force: true });
-            console.log(`✅ Tokens folder removed successfully`);
-          }
+          // STEP 1: Try to kill any Chromium processes using this profile FIRST
+          // This is less destructive than deleting the folder
           
           // Extract PID from error message if available
           const pidMatch = errorMessage.match(/process \((\d+)\)/);
@@ -631,8 +937,11 @@ export class WPPConnectClientManager {
           }
           
           // Kill any local Chromium processes using this profile
+          let processesKilled = false;
           try {
-            const grepCmd = `ps aux | grep -i "[c]hromium.*${clientId}" | awk '{print $2}'`;
+            const sessionPath = path.join(process.cwd(), 'tokens', clientId);
+            // Try to find Chromium processes by userDataDir path
+            const grepCmd = `ps aux | grep -i "[c]hromium" | grep "${sessionPath}" | awk '{print $2}'`;
             const pids = execSync(grepCmd, { encoding: 'utf8', timeout: 5000 }).trim();
             if (pids) {
               const pidList = pids.split('\n').filter(Boolean);
@@ -640,17 +949,71 @@ export class WPPConnectClientManager {
                 try {
                   execSync(`kill -9 ${pid}`, { stdio: 'ignore', timeout: 5000 });
                   console.log(`💀 Killed Chromium process using ${clientId}: ${pid}`);
+                  processesKilled = true;
                 } catch (e) {
                   // Process already gone
                 }
               }
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              if (processesKilled) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
             }
           } catch (grepError) {
             console.log(`ℹ️  No local Chromium processes found for ${clientId}`);
           }
           
-          console.log(`✅ Cleanup completed, retrying with fresh download...`);
+          // STEP 2: Clean lock files ONLY as a last resort and ONLY if we killed processes
+          // Lock files should be automatically released when processes are killed
+          // Only clean them manually if processes were killed but lock files still exist after a delay
+          if (processesKilled) {
+            console.log(`ℹ️  Processes were killed - waiting for OS to release lock files...`);
+            await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds for OS to clean up
+            
+            // Only check for remaining lock files after delay
+            if (fs.existsSync(clientTokensPath)) {
+              const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'lockfile'];
+              let stillLocked = false;
+              for (const lockFile of lockFiles) {
+                const lockPath = path.join(clientTokensPath, lockFile);
+                if (fs.existsSync(lockPath)) {
+                  stillLocked = true;
+                  break;
+                }
+              }
+              
+              if (stillLocked && retryCount >= 2) {
+                // Only clean lock files on 2nd retry if processes were killed
+                console.log(`🔍 Cleaning remaining lock files after process kill...`);
+                let cleanedCount = 0;
+                for (const lockFile of lockFiles) {
+                  const lockPath = path.join(clientTokensPath, lockFile);
+                  try {
+                    if (fs.existsSync(lockPath)) {
+                      fs.unlinkSync(lockPath);
+                      cleanedCount++;
+                    }
+                  } catch (e) {
+                    // Ignore - lock file might be in active use
+                  }
+                }
+                if (cleanedCount > 0) {
+                  console.log(`🧹 Cleaned ${cleanedCount} remaining lock file(s) from ${clientId} folder`);
+                }
+              }
+            }
+          }
+          
+          // STEP 3: Only delete the specific client's folder if processes couldn't be killed
+          // and this is the second attempt
+          if (retryCount >= 2 && !processesKilled) {
+            console.log(`⚠️  Could not kill processes, deleting ${clientId} folder as last resort...`);
+            if (fs.existsSync(clientTokensPath)) {
+              fs.rmSync(clientTokensPath, { recursive: true, force: true });
+              console.log(`🗑️  Removed ${clientId} folder - will restore from MongoDB`);
+            }
+          }
+          
+          console.log(`✅ Cleanup completed, retrying...`);
           
           // Remove the failed placeholder
           this.clients.delete(clientId);
@@ -712,6 +1075,8 @@ export class WPPConnectClientManager {
           clientInfo.status = 'ready';
           clientInfo.isReady = true;
           clientInfo.qrCode = undefined; // Clear QR code when ready (no longer needed)
+          // Reset restore attempts counter on successful connection
+          this.restoreAttempts.delete(clientId);
           console.log(`✅ WPPConnect client ${clientId} status: ${status} → ready`);
           
           // WPPConnect automatically handles session saving via tokenStore
@@ -1134,27 +1499,26 @@ export class WPPConnectClientManager {
             continue;
           }
 
-          // If local folder exists, use it directly (skip MongoDB restore)
-          // Otherwise, restore from MongoDB backup
+          // Use local session if it exists (WPPConnect's native way)
+          // MongoDB backup is only used as fallback if local session doesn't exist
           const hasLocalSession = localSessionFolders.includes(clientId);
           
           if (hasLocalSession) {
-            console.log(`📁 [${clientId}] Using existing local session folder (no MongoDB restore needed)`);
+            console.log(`📁 [${clientId}] Using existing local session folder (WPPConnect's native preservation method)`);
             // Create client directly - it will use the existing local session folder
-            // Skip restore since we already have the folder
+            // MongoDB TokenStore will handle token persistence automatically
             await this.createClient(clientId, true);
             console.log(`✅ [${clientId}] Client created from local session, waiting 2s before next session...`);
             await new Promise(resolve => setTimeout(resolve, 2000));
           } else {
-            // Restore the WhatsApp session from MongoDB first, then create client
-            console.log(`📥 [${clientId}] Restoring WhatsApp session from MongoDB...`);
+            // No local session - restore from MongoDB backup if available
+            console.log(`📥 [${clientId}] No local session found - restoring from MongoDB backup...`);
             const restored = await this.sessionBackup.restoreWhatsAppSession(clientId);
             
             if (restored) {
-              console.log(`✅ [${clientId}] Session restored successfully`);
+              console.log(`✅ [${clientId}] Session restored successfully from MongoDB`);
               
               // Create client with skipRestore=true since we already restored
-              // The createClient method will handle the appropriate wait time
               console.log(`🚀 [${clientId}] Creating WPPConnect client...`);
               
               await this.createClient(clientId, true);
@@ -1359,7 +1723,7 @@ export class WPPConnectClientManager {
     }
   }
 
-  public async cleanup(): Promise<void> {
+  public   async cleanup(): Promise<void> {
     console.log('🔄 Starting WPPConnect client manager cleanup...');
     
     if (this.healthCheckInterval) {
@@ -1370,6 +1734,15 @@ export class WPPConnectClientManager {
     if (this.sessionBackupInterval) {
       clearTimeout(this.sessionBackupInterval);
       console.log('✅ Session backup scheduled task cleared');
+    }
+
+    // Wait for in-progress backups to complete before disconnecting clients
+    if (this.sessionBackup) {
+      try {
+        await this.sessionBackup.waitForBackupsToComplete(10000); // Wait up to 10 seconds
+      } catch (error) {
+        console.warn(`⚠️  Error waiting for backups:`, error);
+      }
     }
 
     // Disconnect all clients
