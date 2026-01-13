@@ -12,6 +12,60 @@ import { Environment } from './types';
 // Load environment variables
 dotenv.config();
 
+// ============================================
+// Suppress expected Puppeteer protocol errors from WPPConnect
+// These errors occur during wapi.js injection when pages are loading/navigating
+// They are handled by WPPConnect's internal retry logic and are non-fatal
+// ============================================
+const originalConsoleError = console.error;
+const originalConsoleWarn = console.warn;
+
+// Filter out expected Puppeteer protocol errors
+const shouldSuppressError = (message: string): boolean => {
+  if (typeof message !== 'string') return false;
+  
+  const suppressedPatterns = [
+    'Protocol error (DOM.describeNode): Cannot find context',
+    'Protocol error (DOM.resolveNode): No node with given id found',
+    'Execution context was destroyed, most likely because of a navigation',
+    'wapi.js failed',
+    'Cannot find context with specified id',
+    'No node with given id found'
+  ];
+  
+  return suppressedPatterns.some(pattern => message.includes(pattern));
+};
+
+console.error = (...args: any[]) => {
+  // Check all arguments for suppressed patterns (handle both strings and Error objects)
+  const message = args.map(arg => {
+    if (arg instanceof Error) return arg.message || arg.toString();
+    return String(arg);
+  }).join(' ');
+  
+  // Suppress expected Puppeteer errors from WPPConnect
+  if (shouldSuppressError(message)) {
+    // Optionally log at debug level (commented out to reduce noise)
+    // originalConsoleWarn('🔇 Suppressed expected Puppeteer error:', message.substring(0, 80));
+    return;
+  }
+  originalConsoleError.apply(console, args);
+};
+
+console.warn = (...args: any[]) => {
+  // Check all arguments for suppressed patterns (handle both strings and Error objects)
+  const message = args.map(arg => {
+    if (arg instanceof Error) return arg.message || arg.toString();
+    return String(arg);
+  }).join(' ');
+  
+  // Suppress expected Puppeteer warnings from WPPConnect
+  if (shouldSuppressError(message)) {
+    return;
+  }
+  originalConsoleWarn.apply(console, args);
+};
+
 // PID file path - use Railway volume if available, otherwise current directory
 const PID_FILE = process.env.RAILWAY_VOLUME_PATH 
   ? path.join(process.env.RAILWAY_VOLUME_PATH, '.wppconnect.pid')

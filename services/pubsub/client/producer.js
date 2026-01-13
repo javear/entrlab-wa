@@ -27,8 +27,20 @@ class StreamProducer {
    * Connect to Valkey/Redis
    */
   async connect() {
-    if (this.isConnected && this.client) {
+    // Check if already connected and ready
+    if (this.isConnected && this.client && this.client.isReady) {
       return;
+    }
+
+    // If client exists but not ready, close it first
+    if (this.client && !this.client.isReady) {
+      try {
+        await this.client.quit().catch(() => {}); // Ignore errors on close
+      } catch (e) {
+        // Ignore
+      }
+      this.client = null;
+      this.isConnected = false;
     }
 
     try {
@@ -76,12 +88,28 @@ class StreamProducer {
       this.client = redis.createClient(connectionOptions);
 
       this.client.on('error', (err) => {
-        console.error('❌ Stream producer connection error:', err);
+        console.error('❌ Stream producer connection error:', err.message || err);
         this.isConnected = false;
       });
 
+      this.client.on('connect', () => {
+        console.log('🔌 Stream producer connecting...');
+        this.isConnected = false; // Not ready yet
+      });
+
       this.client.on('ready', () => {
+        console.log('✅ Stream producer ready');
         this.isConnected = true;
+      });
+
+      this.client.on('reconnecting', () => {
+        console.log('🔄 Stream producer reconnecting...');
+        this.isConnected = false;
+      });
+
+      this.client.on('end', () => {
+        console.log('🔌 Stream producer connection ended');
+        this.isConnected = false;
       });
 
       await this.client.connect();
@@ -98,47 +126,67 @@ class StreamProducer {
    * @returns {Promise<string>} - Stream entry ID
    */
   async publishIncomingMessage(messageData) {
-    console.log(`🔄 [Producer] publishIncomingMessage called, isConnected: ${this.isConnected}, hasClient: ${!!this.client}`);
-    if (!this.isConnected || !this.client) {
-      console.log(`🔄 [Producer] Connecting to stream...`);
-      await this.connect();
-      console.log(`✅ [Producer] Connection established, isConnected: ${this.isConnected}`);
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Check connection state - both flag and actual client state
+        const isReallyConnected = this.isConnected && 
+                                 this.client && 
+                                 this.client.isReady;
+        
+        if (!isReallyConnected) {
+          console.log(`🔄 [Producer] Not connected (attempt ${attempt}/${maxRetries}), reconnecting...`);
+          await this.connect();
+          // Wait a bit for connection to stabilize
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!this.client || !this.client.isReady) {
+          throw new Error('Stream producer client not ready');
+        }
+
+        const entryData = {
+          eventType: 'message:incoming',
+          timestamp: new Date().toISOString(),
+          ...messageData
+        };
+
+        const streamEntry = this.prepareStreamEntry(entryData);
+        console.log(`📤 [Producer] Publishing to stream: ${this.config.streamName}`);
+        const entryId = await this.client.xAdd(
+          this.config.streamName,
+          '*',
+          streamEntry
+        );
+
+        console.log(`📤 [Producer] Published incoming message to stream: ${entryId} (stream: ${this.config.streamName})`);
+        return entryId;
+      } catch (error) {
+        lastError = error;
+        const isConnectionError = error.code === 'ECONNRESET' || 
+                                 error.code === 'EPIPE' || 
+                                 error.message?.includes('Connection') ||
+                                 error.message?.includes('closed');
+        
+        if (isConnectionError && attempt < maxRetries) {
+          console.log(`⚠️  [Producer] Connection error on attempt ${attempt}, will retry:`, error.message);
+          this.isConnected = false;
+          // Wait before retry with exponential backoff
+          await new Promise(resolve => setTimeout(resolve, attempt * 200));
+          continue;
+        }
+        
+        // If not a connection error or last attempt, throw
+        if (!isConnectionError || attempt === maxRetries) {
+          console.error('❌ Error publishing incoming message:', error.message || error);
+          throw error;
+        }
+      }
     }
 
-    if (!this.client) {
-      throw new Error('Stream producer client not available after connection attempt');
-    }
-
-    try {
-      const entryData = {
-        eventType: 'message:incoming',
-        timestamp: new Date().toISOString(),
-        ...messageData
-      };
-
-      const streamEntry = this.prepareStreamEntry(entryData);
-      const entryId = await this.client.xAdd(
-        this.config.streamName,
-        '*',
-        streamEntry
-      );
-
-      console.log(`📤 [Producer] Published incoming message to stream: ${entryId}`);
-      console.log(`📋 [Producer] Message data:`, JSON.stringify({
-        clientId: messageData.clientId,
-        platform: messageData.platform,
-        userIdentifier: messageData.userIdentifier,
-        agentCode: messageData.agentCode || null,
-        messageType: messageData.messageType,
-        contentPreview: messageData.content ? messageData.content.substring(0, 100) : '',
-        messageId: messageData.messageId
-      }, null, 2));
-
-      return entryId;
-    } catch (error) {
-      console.error('❌ Error publishing incoming message:', error);
-      throw error;
-    }
+    throw lastError;
   }
 
   /**
@@ -147,47 +195,67 @@ class StreamProducer {
    * @returns {Promise<string>} - Stream entry ID
    */
   async publishAIResponse(responseData) {
-    console.log(`🔄 [Producer] publishAIResponse called, isConnected: ${this.isConnected}, hasClient: ${!!this.client}`);
-    if (!this.isConnected || !this.client) {
-      console.log(`🔄 [Producer] Connecting to stream...`);
-      await this.connect();
-      console.log(`✅ [Producer] Connection established, isConnected: ${this.isConnected}`);
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Check connection state - both flag and actual client state
+        const isReallyConnected = this.isConnected && 
+                                 this.client && 
+                                 this.client.isReady;
+        
+        if (!isReallyConnected) {
+          console.log(`🔄 [Producer] Not connected (attempt ${attempt}/${maxRetries}), reconnecting...`);
+          await this.connect();
+          // Wait a bit for connection to stabilize
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!this.client || !this.client.isReady) {
+          throw new Error('Stream producer client not ready');
+        }
+
+        const entryData = {
+          eventType: 'ai:response',
+          timestamp: new Date().toISOString(),
+          ...responseData
+        };
+
+        const streamEntry = this.prepareStreamEntry(entryData);
+        console.log(`📤 [Producer] Publishing AI response to stream: ${this.config.streamName}`);
+        const entryId = await this.client.xAdd(
+          this.config.streamName,
+          '*',
+          streamEntry
+        );
+
+        console.log(`📤 [Producer] Published AI response to stream: ${entryId} (stream: ${this.config.streamName})`);
+        return entryId;
+      } catch (error) {
+        lastError = error;
+        const isConnectionError = error.code === 'ECONNRESET' || 
+                                 error.code === 'EPIPE' || 
+                                 error.message?.includes('Connection') ||
+                                 error.message?.includes('closed');
+        
+        if (isConnectionError && attempt < maxRetries) {
+          console.log(`⚠️  [Producer] Connection error on attempt ${attempt}, will retry:`, error.message);
+          this.isConnected = false;
+          // Wait before retry with exponential backoff
+          await new Promise(resolve => setTimeout(resolve, attempt * 200));
+          continue;
+        }
+        
+        // If not a connection error or last attempt, throw
+        if (!isConnectionError || attempt === maxRetries) {
+          console.error('❌ Error publishing AI response:', error.message || error);
+          throw error;
+        }
+      }
     }
 
-    if (!this.client) {
-      throw new Error('Stream producer client not available after connection attempt');
-    }
-
-    try {
-      const entryData = {
-        eventType: 'ai:response',
-        timestamp: new Date().toISOString(),
-        ...responseData
-      };
-
-      const streamEntry = this.prepareStreamEntry(entryData);
-      const entryId = await this.client.xAdd(
-        this.config.streamName,
-        '*',
-        streamEntry
-      );
-
-      console.log(`📤 [Producer] Published AI response to stream: ${entryId}`);
-      console.log(`📋 [Producer] Response data:`, JSON.stringify({
-        clientId: responseData.clientId,
-        platform: responseData.platform,
-        userIdentifier: responseData.userIdentifier,
-        agentCode: responseData.agentCode,
-        requestPreview: responseData.requestMessage ? responseData.requestMessage.substring(0, 100) : '',
-        responseType: responseData.response?.messages ? `${responseData.response.messages.length} message(s)` : responseData.response?.text ? 'text' : 'unknown',
-        processingTime: responseData.metadata?.processingTime
-      }, null, 2));
-
-      return entryId;
-    } catch (error) {
-      console.error('❌ Error publishing AI response:', error);
-      throw error;
-    }
+    throw lastError;
   }
 
   /**
@@ -214,7 +282,12 @@ class StreamProducer {
    */
   async disconnect() {
     if (this.client) {
-      await this.client.quit();
+      try {
+        await this.client.quit().catch(() => {}); // Ignore errors
+      } catch (e) {
+        // Ignore
+      }
+      this.client = null;
       this.isConnected = false;
     }
   }

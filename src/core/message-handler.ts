@@ -131,6 +131,7 @@ export class WPPConnectMessageHandler {
       const files = fs.readdirSync(this.tempDir);
       const now = Date.now();
       let cleanedCount = 0;
+      let skippedCount = 0;
 
       for (const file of files) {
         const filePath = path.join(this.tempDir, file);
@@ -138,22 +139,75 @@ export class WPPConnectMessageHandler {
           const stats = fs.statSync(filePath);
           const age = now - stats.mtime.getTime();
           
-          // Delete files older than configured max age
+          // Delete files/directories older than configured max age
           if (age > MEMORY_CONFIG.TEMP_FILE_MAX_AGE) {
-            fs.unlinkSync(filePath);
-            cleanedCount++;
+            // Check if it's a directory or file
+            if (stats.isDirectory()) {
+              // Use rmSync for directories (with retry logic)
+              try {
+                fs.rmSync(filePath, { recursive: true, force: true, maxRetries: 3 });
+                cleanedCount++;
+              } catch (rmError: any) {
+                // If file is locked/in use, skip silently (common for recently created temp files)
+                if (rmError.code === 'EPERM' || rmError.code === 'EACCES' || rmError.code === 'EBUSY') {
+                  skippedCount++;
+                  // Only log if file is very old (over 30 minutes)
+                  if (age > 30 * 60 * 1000) {
+                    console.warn(`⚠️ Skipped locked temp directory ${file} (age: ${Math.round(age / 1000 / 60)} min)`);
+                  }
+                } else {
+                  throw rmError;
+                }
+              }
+            } else {
+              // Use unlinkSync for files
+              try {
+                fs.unlinkSync(filePath);
+                cleanedCount++;
+              } catch (unlinkError: any) {
+                // If file is locked/in use, try chmod and retry, or skip
+                if (unlinkError.code === 'EPERM' || unlinkError.code === 'EACCES') {
+                  try {
+                    fs.chmodSync(filePath, 0o666);
+                    fs.unlinkSync(filePath);
+                    cleanedCount++;
+                  } catch (retryError: any) {
+                    // File still locked - skip silently if recent, log if old
+                    skippedCount++;
+                    if (age > 30 * 60 * 1000) {
+                      console.warn(`⚠️ Skipped locked temp file ${file} (age: ${Math.round(age / 1000 / 60)} min)`);
+                    }
+                  }
+                } else if (unlinkError.code === 'EBUSY') {
+                  skippedCount++;
+                  if (age > 30 * 60 * 1000) {
+                    console.warn(`⚠️ Skipped busy temp file ${file} (age: ${Math.round(age / 1000 / 60)} min)`);
+                  }
+                } else {
+                  throw unlinkError;
+                }
+              }
+            }
           }
-        } catch (error) {
-          console.error(`⚠️ Error cleaning up temp file ${file}:`, error);
+        } catch (error: any) {
+          // Only log unexpected errors (not permission/busy errors which are expected)
+          if (error.code !== 'EPERM' && error.code !== 'EACCES' && error.code !== 'EBUSY') {
+            console.error(`⚠️ Error checking temp file ${file}:`, error.message || error);
+          } else {
+            skippedCount++;
+          }
         }
       }
 
       if (cleanedCount > 0) {
-        console.log(`🧹 Cleaned up ${cleanedCount} old temporary files`);
+        console.log(`🧹 Cleaned up ${cleanedCount} old temporary files${skippedCount > 0 ? ` (${skippedCount} skipped - in use)` : ''}`);
         
         // Force GC after cleaning temp files to free memory
         const { suggestGC } = require('../config/memory-config');
         suggestGC();
+      } else if (skippedCount > 0) {
+        // Only log skipped count if nothing was cleaned (to avoid noise)
+        // console.log(`ℹ️  ${skippedCount} temp files skipped (still in use)`);
       }
     } catch (error) {
       console.error('❌ Error during temp file cleanup:', error);
@@ -538,13 +592,34 @@ export class WPPConnectMessageHandler {
 
       // Publish incoming message event to stream (if producer is available)
       // Lazy initialize producer (ensures dotenv.config() has run)
+      console.log(`🔔 [WPP Handler] About to initialize/check producer for ${senderNumber} (producerInitialized: ${producerInitialized})`);
       if (!producerInitialized) {
+        console.log(`🔄 [WPP Handler] Initializing producer (first time)...`);
         initializeStreamProducer();
       }
       
       console.log(`🔍 [WPP Handler] Checking streamProducer for incoming message from ${senderNumber}:`, streamProducer ? 'EXISTS' : 'NULL');
       if (streamProducer) {
         try {
+          // Wait for producer to be ready (with timeout)
+          const producerAny = streamProducer as any;
+          let attempts = 0;
+          const maxAttempts = 10; // Wait up to 2 seconds (10 * 200ms)
+          
+          while (attempts < maxAttempts && (!producerAny.isConnected || !producerAny.client?.isReady)) {
+            if (attempts === 0) {
+              // Only log on first attempt to avoid spam
+              console.log(`⏳ [WPP Handler] Waiting for stream producer to be ready...`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 200));
+            attempts++;
+          }
+          
+          if (!producerAny.isConnected || !producerAny.client?.isReady) {
+            console.warn(`⚠️  [WPP Handler] Stream producer not ready after ${maxAttempts} attempts, skipping publish`);
+            return; // Skip publishing if producer isn't ready
+          }
+          
           // Get agent code for this user (so scoped webhooks can receive this event)
           const agentCode = await this.whatsappService.getAgentForUser(clientId, senderNumber, 'wpp');
           
@@ -569,8 +644,11 @@ export class WPPConnectMessageHandler {
           });
           console.log(`✅ [WPP Handler] Successfully published to stream: ${entryId}`);
         } catch (error: any) {
-          console.error('❌ [WPP Handler] Failed to publish incoming message to stream:', error.message || error);
-          console.error('❌ [WPP Handler] Error stack:', error.stack);
+          // Only log error if it's not the "not ready" error (we already handled that)
+          if (!error.message?.includes('not ready')) {
+            console.error('❌ [WPP Handler] Failed to publish incoming message to stream:', error.message || error);
+            console.error('❌ [WPP Handler] Error stack:', error.stack);
+          }
         }
       } else {
         console.log('ℹ️  [WPP Handler] Stream producer not available (null), skipping publish');

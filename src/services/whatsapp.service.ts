@@ -357,21 +357,21 @@ export class WPPConnectWhatsAppService {
 
       // Load from ClientAgent (for backward compatibility)
       if (ClientAgent) {
-        const assignments = await ClientAgent.find({ isActive: true });
+      const assignments = await ClientAgent.find({ isActive: true });
         console.log(`📋 Loaded ${assignments.length} agent assignment(s) from ClientAgent collection`);
 
-        for (const assignment of assignments) {
-          const clientInfo = this.clientManager.getClient(assignment.clientId);
+      for (const assignment of assignments) {
+        const clientInfo = this.clientManager.getClient(assignment.clientId);
           if (clientInfo && assignment.ai_agent_code) {
-            // Set the ai_agent_code on the client object (matching main branch behavior)
-            clientInfo.ai_agent_code = assignment.ai_agent_code;
-            console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId}: ${assignment.ai_agent_code}`);
+          // Set the ai_agent_code on the client object (matching main branch behavior)
+          clientInfo.ai_agent_code = assignment.ai_agent_code;
+          console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId}: ${assignment.ai_agent_code}`);
             totalLoaded++;
           } else if (!clientInfo) {
             console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);
           }
         }
-      } else {
+        } else {
         console.warn('⚠️ ClientAgent model not found');
       }
 
@@ -392,7 +392,7 @@ export class WPPConnectWhatsAppService {
             console.log(`🤖 Loaded agent assignment for WPPConnect client ${assignment.clientId} from PlatformClientAgent: ${assignment.ai_agent_code}`);
             totalLoaded++;
           } else if (!clientInfo) {
-            console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);
+          console.log(`⚠️ WPPConnect client ${assignment.clientId} not found in active clients`);
           }
         }
       }

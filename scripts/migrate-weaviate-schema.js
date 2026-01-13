@@ -1,0 +1,202 @@
+#!/usr/bin/env node
+
+/**
+ * Migrate Weaviate Schema - Add content field to ChatEvent
+ * 
+ * This script adds the 'content' field to the existing ChatEvent schema
+ * while keeping the 'payload' field for backward compatibility
+ * 
+ * Usage:
+ *   node scripts/migrate-weaviate-schema.js
+ */
+
+require('dotenv').config();
+
+// Try to load weaviate-ts-client from multiple possible locations
+let weaviateModule;
+try {
+  weaviateModule = require('weaviate-ts-client');
+} catch (e) {
+  try {
+    weaviateModule = require('../services/pubsub/node_modules/weaviate-ts-client');
+  } catch (e2) {
+    console.error('❌ Error: weaviate-ts-client not found');
+    console.error('   Please run: cd services/pubsub && npm install');
+    process.exit(1);
+  }
+}
+
+const weaviate = weaviateModule.default || weaviateModule;
+
+// Initialize Weaviate client
+function initializeClient() {
+  const weaviateUrl = process.env.WEAVIATE_URL || 'http://localhost:8080';
+  
+  let scheme = 'http';
+  let host = '';
+  let port = 8080;
+
+  if (weaviateUrl.startsWith('http://') || weaviateUrl.startsWith('https://')) {
+    const url = new URL(weaviateUrl);
+    scheme = url.protocol === 'https:' ? 'https' : 'http';
+    host = url.hostname;
+    port = url.port ? parseInt(url.port) : (scheme === 'https' ? 443 : 8080);
+  } else {
+    const parts = weaviateUrl.split(':');
+    host = parts[0];
+    if (parts.length > 1) {
+      port = parseInt(parts[1]) || 8080;
+    } else {
+      if (weaviateUrl.includes('railway') || weaviateUrl.includes('.up.') || weaviateUrl.includes('.app')) {
+        scheme = 'https';
+        port = 443;
+      }
+    }
+  }
+
+  const clientConfig = {
+    scheme,
+    host,
+  };
+
+  if ((scheme === 'http' && port !== 8080) || (scheme === 'https' && port !== 443)) {
+    clientConfig.port = port;
+  }
+
+  if (process.env.WEAVIATE_API_KEY) {
+    clientConfig.headers = {
+      'Authorization': `Bearer ${process.env.WEAVIATE_API_KEY}`
+    };
+  }
+
+  if (process.env.OPENAI_API_KEY) {
+    if (!clientConfig.headers) clientConfig.headers = {};
+    clientConfig.headers['X-OpenAI-Api-Key'] = process.env.OPENAI_API_KEY;
+  }
+
+  return weaviate.client(clientConfig);
+}
+
+// Main function
+async function main() {
+  try {
+    console.log('🔍 Connecting to Weaviate...');
+    const client = initializeClient();
+
+    // Test connection
+    await client.misc.metaGetter().do();
+    console.log('✅ Connected to Weaviate\n');
+
+    // Get current ChatEvent schema
+    console.log('📋 Checking ChatEvent schema...');
+    const chatEventSchema = await client.schema.classGetter().withClassName('ChatEvent').do();
+    
+    const chatEventProperties = (chatEventSchema.properties || []).map(p => p.name);
+    console.log(`   ChatEvent properties: ${chatEventProperties.join(', ')}\n`);
+
+    // Add content field to ChatEvent if it doesn't exist
+    if (!chatEventProperties.includes('content')) {
+      console.log('➕ Adding content field to ChatEvent schema...');
+      await client.schema
+        .propertyCreator()
+        .withClassName('ChatEvent')
+        .withProperty({
+          name: 'content',
+          dataType: ['text'],
+          description: 'Formatted message content as JSON array (e.g., [{"type":"text","text":"Hello"}])',
+          indexInverted: false
+        })
+        .do();
+      console.log('✅ Successfully added content field to ChatEvent schema\n');
+    } else {
+      console.log('✅ Content field already exists in ChatEvent schema\n');
+    }
+
+    // Get current Conversation schema
+    console.log('📋 Checking Conversation schema...');
+    const conversationSchema = await client.schema.classGetter().withClassName('Conversation').do();
+    
+    const conversationProperties = (conversationSchema.properties || []).map(p => p.name);
+    console.log(`   Conversation properties: ${conversationProperties.join(', ')}\n`);
+
+    // Add client_id field to Conversation if it doesn't exist
+    if (!conversationProperties.includes('client_id')) {
+      console.log('➕ Adding client_id field to Conversation schema...');
+      await client.schema
+        .propertyCreator()
+        .withClassName('Conversation')
+        .withProperty({
+          name: 'client_id',
+          dataType: ['string'],
+          description: 'Client identifier (e.g., "javear-client-wpp")',
+          indexInverted: true
+        })
+        .do();
+      console.log('✅ Successfully added client_id field to Conversation schema\n');
+    } else {
+      console.log('✅ client_id field already exists in Conversation schema\n');
+    }
+
+    // Add platform field to Conversation if it doesn't exist
+    if (!conversationProperties.includes('platform')) {
+      console.log('➕ Adding platform field to Conversation schema...');
+      await client.schema
+        .propertyCreator()
+        .withClassName('Conversation')
+        .withProperty({
+          name: 'platform',
+          dataType: ['string'],
+          description: 'Platform type: "wpp" (WPPConnect) or "wa-official" (WhatsApp Official)',
+          indexInverted: true
+        })
+        .do();
+      console.log('✅ Successfully added platform field to Conversation schema\n');
+    } else {
+      console.log('✅ platform field already exists in Conversation schema\n');
+    }
+
+    // Add last event fields to Conversation if they don't exist
+    const lastEventFields = [
+      { name: 'last_event_id', dataType: ['string'], description: 'ID of the last event in the conversation', indexInverted: false },
+      { name: 'last_event_type', dataType: ['string'], description: 'Type of the last event (message:incoming, ai:response)', indexInverted: true },
+      { 
+        name: 'last_event_content', 
+        dataType: ['text'], 
+        description: 'Content of the last event (formatted message array as JSON string, e.g., [{"type":"text","text":"Hello"}])',
+        indexInverted: false 
+      },
+      { name: 'last_sender_type', dataType: ['string'], description: 'Type of the last sender (user, ai:agent)', indexInverted: true },
+      { name: 'last_sender_id', dataType: ['string'], description: 'ID of the last sender', indexInverted: false },
+      { name: 'last_sender_display_name', dataType: ['string'], description: 'Display name of the last sender', indexInverted: false }
+    ];
+
+    for (const field of lastEventFields) {
+      if (!conversationProperties.includes(field.name)) {
+        console.log(`➕ Adding ${field.name} field to Conversation schema...`);
+        await client.schema
+          .propertyCreator()
+          .withClassName('Conversation')
+          .withProperty(field)
+          .do();
+        console.log(`✅ Successfully added ${field.name} field to Conversation schema\n`);
+      } else {
+        console.log(`✅ ${field.name} field already exists in Conversation schema\n`);
+      }
+    }
+
+    console.log('✨ Migration complete!');
+    console.log('   Note: The payload field in ChatEvent is kept for backward compatibility.');
+    console.log('   New events will use the content field.');
+    console.log('   New conversations will include client_id, platform, and last event fields.');
+
+  } catch (error) {
+    console.error('❌ Error:', error.message);
+    if (error.response) {
+      console.error('Response:', JSON.stringify(error.response, null, 2));
+    }
+    process.exit(1);
+  }
+}
+
+main();
+

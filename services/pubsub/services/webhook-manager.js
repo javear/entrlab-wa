@@ -21,6 +21,11 @@ class WebhookManager {
     this.webhookDb = parseInt(process.env.VALKEY_WEBHOOK_DB || process.env.REDIS_WEBHOOK_DB || '1');
     this.webhookKeyPrefix = 'webhook:';
     this.webhookIndexKey = 'webhooks:index'; // SET to track all webhook IDs
+    this.retryCountKeyPrefix = 'webhook-retry:'; // Track retry counts per message ID
+    
+    // Retry configuration
+    this.maxRetries = parseInt(process.env.WEBHOOK_MAX_RETRIES || '10'); // Default: 10 retries
+    this.retryDelayMs = parseInt(process.env.WEBHOOK_RETRY_DELAY_MS || '5000'); // Default: 5 seconds between retries
   }
 
   /**
@@ -172,10 +177,10 @@ class WebhookManager {
   async consumeLoop() {
     while (this.isConsuming) {
       try {
-        // Check if stream service is connected before attempting to read
-        const streamConnected = this.streamService.getConnectionStatus ? 
-          this.streamService.getConnectionStatus() : 
-          (this.streamService.isConnected === true);
+        // Check both the flag and the actual Redis client state
+        const streamConnected = this.streamService.isConnected && 
+                               this.streamService.client && 
+                               this.streamService.client.isReady;
         
         if (!streamConnected) {
           console.log('⏳ [Webhook Manager] Waiting for stream service to connect...');
@@ -195,6 +200,51 @@ class WebhookManager {
         if (entries && entries.length > 0) {
           for (const entry of entries) {
             try {
+              // Check if this is a retry (pending message) and get retry count
+              // We track retry counts in Redis to avoid timing issues with XPENDING
+              let retryCount = 0;
+              const retryKey = `${this.retryCountKeyPrefix}${entry.id}`;
+              
+              if (entry.isPending) {
+                // This is a retry - increment and get the retry count from Redis
+                // First retry: count goes 0 -> 1
+                // Second retry: count goes 1 -> 2
+                // etc.
+                retryCount = await this.redisClient.incr(retryKey);
+                
+                // Set expiration on the retry key (cleanup after 24 hours)
+                await this.redisClient.expire(retryKey, 86400);
+                
+                // Check if we've exceeded max retries
+                if (retryCount > this.maxRetries) {
+                  console.error(`❌ [Webhook Manager] Message ${entry.id} exceeded max retries (${retryCount}/${this.maxRetries}). Acknowledging to prevent infinite loop.`);
+                  // Clean up retry counter
+                  await this.redisClient.del(retryKey);
+                  await this.streamService.acknowledge(
+                    this.consumerGroupName,
+                    entry.id
+                  );
+                  continue; // Skip to next message
+                }
+                
+                // Wait before retrying (exponential backoff)
+                // For retryCount=1 (first retry), delay = 0
+                // For retryCount=2 (second retry), delay = retryDelayMs
+                // For retryCount=3 (third retry), delay = 2*retryDelayMs, etc.
+                const delayMs = this.retryDelayMs * Math.max(0, retryCount - 1);
+                if (delayMs > 0) {
+                  await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+              } else {
+                // First attempt - initialize retry counter to 0
+                // We don't need to set it, but we'll check if it exists from a previous attempt
+                const existingCount = await this.redisClient.get(retryKey);
+                if (existingCount) {
+                  // This shouldn't happen, but if it does, use the existing count
+                  retryCount = parseInt(existingCount) || 0;
+                }
+              }
+              
               const eventData = entry.data; // Already parsed by readGroup
               const deliveryResults = await this.deliverToWebhooks(eventData);
               
@@ -204,19 +254,53 @@ class WebhookManager {
                                   deliveryResults.every(result => result.success !== false);
               
               if (allSucceeded) {
+                // Clean up retry counter on success
+                const retryKey = `${this.retryCountKeyPrefix}${entry.id}`;
+                await this.redisClient.del(retryKey);
+                
                 await this.streamService.acknowledge(
                   this.consumerGroupName,
                   entry.id
                 );
-                console.log(`✅ [Webhook Manager] Acknowledged message ${entry.id} - all webhooks succeeded`);
               } else {
                 const failedCount = deliveryResults.filter(r => !r.success).length;
-                console.log(`⚠️  [Webhook Manager] Not acknowledging message ${entry.id} - ${failedCount} webhook(s) failed. Will retry.`);
-                // Message will be retried on next readGroup call
+                // Log failure with accurate retry count
+                if (entry.isPending) {
+                  // This is a retry - log as "Retry X/5"
+                  console.warn(`⚠️  [Webhook Manager] Webhook delivery failed for ${entry.id} - ${failedCount} webhook(s) failed. Retry ${retryCount}/${this.maxRetries}.`);
+                } else {
+                  // First failure - log as "Will retry" or "Attempt 1"
+                  console.warn(`⚠️  [Webhook Manager] Webhook delivery failed for ${entry.id} - ${failedCount} webhook(s) failed. Will retry (attempt 1/${this.maxRetries}).`);
+                  
+                  // Initialize retry counter if this is the first failure (not a retry)
+                  // Set retry counter to 0 for first attempt
+                  await this.redisClient.set(retryKey, '0', 'EX', 86400); // Expire after 24 hours
+                }
+                // Message will be retried on next readGroup call (as pending)
+                // Retry counter will be incremented on next retry (when entry.isPending = true)
               }
             } catch (error) {
               console.error('❌ Error processing stream message:', error);
-              // Don't acknowledge on error - will retry
+              // Don't acknowledge on error - will retry (unless max retries exceeded)
+              // Only check retry count for pending messages
+              if (entry.isPending) {
+                try {
+                  const pendingInfo = await this.streamService.getPendingInfo(
+                    this.consumerGroupName,
+                    entry.id
+                  );
+                  const retryCount = pendingInfo ? pendingInfo.deliveryCount : 0;
+                  if (retryCount >= this.maxRetries) {
+                    console.error(`❌ [Webhook Manager] Message ${entry.id} exceeded max retries due to error. Acknowledging.`);
+                    await this.streamService.acknowledge(
+                      this.consumerGroupName,
+                      entry.id
+                    );
+                  }
+                } catch (ackError) {
+                  // Ignore ack errors
+                }
+              }
             }
           }
         }
@@ -257,11 +341,7 @@ class WebhookManager {
       // Get all webhook IDs from the index
       const webhookIds = await this.redisClient.sMembers(this.webhookIndexKey);
       
-      console.log(`🔍 [Webhook Manager] Checking webhooks for event ${eventType} (agentCode: ${eventAgentCode || 'null'}), found ${webhookIds.length} webhook ID(s) in index (Redis DB: ${this.webhookDb}, key: ${this.webhookIndexKey})`);
-      
-      if (webhookIds.length > 0) {
-        console.log(`   📋 Webhook IDs: ${webhookIds.join(', ')}`);
-      }
+      // Removed verbose webhook checking logs
       
       if (webhookIds.length === 0) {
         console.log(`ℹ️  [Webhook Manager] No webhooks registered (checked DB ${this.webhookDb}, key: ${this.webhookIndexKey})`);
@@ -289,21 +369,18 @@ class WebhookManager {
         // Check if webhook subscribes to this event type
         const eventTypes = JSON.parse(webhook.eventTypes || '[]');
         if (!eventTypes.includes(eventType)) {
-          console.log(`   ⏭️  Webhook ${webhook.id} does not subscribe to ${eventType} (subscribes to: ${JSON.stringify(eventTypes)})`);
-          continue;
+          continue; // Webhook doesn't subscribe to this event type
         }
 
         // Check agentCode scope
         if (webhook.agentCode) {
           // Webhook is scoped to an agentCode - only receive events for that agentCode
           if (eventAgentCode !== webhook.agentCode) {
-            console.log(`   ⏭️  Webhook ${webhook.id} scoped to agentCode "${webhook.agentCode}", but event has "${eventAgentCode}"`);
             continue; // Event doesn't match webhook's agentCode
           }
         }
         // Global webhooks (no agentCode) receive ALL events (with or without agentCode)
 
-        console.log(`   ✅ Webhook ${webhook.id} matches (eventType: ${eventType}, agentCode: ${eventAgentCode || 'null'})`);
         matchingWebhooks.push(webhook);
       }
 
@@ -312,7 +389,7 @@ class WebhookManager {
         return []; // Return empty array - no matching webhooks, consider it success
       }
 
-      console.log(`📤 [Webhook Manager] Delivering ${eventType} to ${matchingWebhooks.length} webhook(s)${eventAgentCode ? ` (agentCode: ${eventAgentCode})` : ''}`);
+      // Removed delivery start log
 
       // Deliver to all matching webhooks in parallel
       const deliveries = matchingWebhooks.map(webhook => 
@@ -326,9 +403,8 @@ class WebhookManager {
         const webhook = matchingWebhooks[index];
         if (result.status === 'fulfilled') {
           const deliveryResult = result.value;
-          if (deliveryResult.success) {
-            console.log(`✅ [Webhook Manager] Delivered to ${webhook.url} (status: ${deliveryResult.statusCode})`);
-          } else {
+          // Only log failures, not successes
+          if (!deliveryResult.success) {
             console.log(`⚠️  [Webhook Manager] Failed to deliver to ${webhook.url} (status: ${deliveryResult.statusCode})`);
           }
           return deliveryResult;

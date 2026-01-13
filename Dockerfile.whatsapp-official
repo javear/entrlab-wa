@@ -31,6 +31,10 @@ RUN npm install --only=production && \
 # Copy WhatsApp Official service files
 COPY services/whatsapp-official/ ./services/whatsapp-official/
 
+# Copy pubsub client (required for stream producer)
+COPY services/pubsub/client/ ./services/pubsub/client/
+COPY services/pubsub/package.json ./services/pubsub/package.json
+
 # Copy startup script
 COPY scripts/start-whatsapp-official.sh /usr/src/app/start.sh
 RUN chmod +x /usr/src/app/start.sh

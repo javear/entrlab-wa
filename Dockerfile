@@ -101,6 +101,10 @@ RUN npm install --only=production && npm cache clean --force
 # Copy built application from builder stage
 COPY --from=builder /usr/src/app/dist ./dist
 
+# Copy services directory (required by pubsub.controller for stream.service)
+# The compiled code requires '../../services/pubsub/services/stream.service'
+COPY services/ ./services/
+
 # Copy public assets (CSS, etc.)
 COPY public/ ./public/
 

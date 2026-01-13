@@ -21,7 +21,11 @@ function initializeStreamProducer() {
   try {
     if (process.env.VALKEY_HOST || process.env.REDIS_HOST) {
       console.log('🔄 Initializing stream producer...');
-      const { getProducer } = require('../../pubsub/client/producer');
+      // Use absolute path from project root (works from both local and Docker)
+      const path = require('path');
+      const producerPath = path.join(process.cwd(), 'services', 'pubsub', 'client', 'producer');
+      console.log(`[WA Official Handler] Producer path: ${producerPath}`);
+      const { getProducer } = require(producerPath);
       console.log('[WA Official Handler] Producer module loaded successfully');
       streamProducer = getProducer();
       console.log('[WA Official Handler] Producer instance created, attempting connection...');
@@ -176,6 +180,9 @@ class WhatsAppOfficialMessageHandler {
     try {
       const senderPhoneNumber = message.from;
       const userKey = this.getUserKey(clientId, senderPhoneNumber);
+      
+      // Extract phoneNumberId from metadata (passed from webhook controller)
+      const phoneNumberId = metadata?.phone_number_id || null;
 
       // Check needAttention status first (before any message actions)
       // For WA-Official, userIdentifier is message.from (sender's phone number)
@@ -390,7 +397,7 @@ class WhatsAppOfficialMessageHandler {
               message: {
                 from: senderPhoneNumber,
                 timestamp: message.timestamp,
-                phoneNumberId: phoneNumberIdFromMetadata,
+                phoneNumberId: phoneNumberId || null,
                 hasMedia: mediaUrls.length > 0,
                 mediaUrls: mediaUrls || []
               }
@@ -815,7 +822,7 @@ class WhatsAppOfficialMessageHandler {
             clientId,
             platform: 'wa-official',
             userIdentifier: number, // userIdentifier is the sender's phone number (message.from)
-            agentCode: agentCode || 'unknown',
+            agentCode: agentCode || null, // Use null instead of 'unknown' to match WPPConnect behavior
             requestMessage: message,
             response: {
               messages: messageObjects.length > 0 ? messageObjects : null,

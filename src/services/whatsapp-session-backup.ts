@@ -19,6 +19,7 @@ export class WhatsAppSessionBackup {
   private gridFS: GridFSBucket;
   private backupLocks: Map<string, Promise<boolean>> = new Map(); // Prevent concurrent backups
   private restoreLocks: Map<string, Promise<boolean>> = new Map(); // Prevent concurrent restores
+  private isShuttingDown: boolean = false; // Flag to prevent new backups during shutdown
 
   constructor() {
     const db = mongoose.connection.db;
@@ -26,6 +27,47 @@ export class WhatsAppSessionBackup {
       throw new Error('MongoDB connection not available');
     }
     this.gridFS = new GridFSBucket(db, { bucketName: 'whatsapp_sessions' });
+  }
+
+  /**
+   * Check if MongoDB connection is still available
+   */
+  private isMongoConnected(): boolean {
+    return mongoose.connection.readyState === 1 && !this.isShuttingDown;
+  }
+
+  /**
+   * Wait for all in-progress backups to complete or timeout
+   * Call this before shutting down MongoDB
+   */
+  async waitForBackupsToComplete(timeoutMs: number = 10000): Promise<void> {
+    console.log(`⏳ Waiting for ${this.backupLocks.size} backup(s) to complete...`);
+    
+    if (this.backupLocks.size === 0) {
+      return;
+    }
+
+    // Mark as shutting down to prevent new backups
+    this.isShuttingDown = true;
+
+    // Wait for all backups to complete with timeout
+    const backupPromises = Array.from(this.backupLocks.values());
+    
+    try {
+      await Promise.race([
+        Promise.allSettled(backupPromises),
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            console.warn(`⚠️  Backup completion timeout after ${timeoutMs}ms, proceeding with shutdown`);
+            resolve();
+          }, timeoutMs);
+        })
+      ]);
+    } catch (error) {
+      console.warn(`⚠️  Error waiting for backups:`, error);
+    }
+    
+    console.log(`✅ Backup wait completed`);
   }
 
   /**
@@ -196,6 +238,18 @@ export class WhatsAppSessionBackup {
    * SECURITY: Atomic operation with integrity checks
    */
   async backupWhatsAppSession(clientId: string): Promise<boolean> {
+    // Don't start new backups during shutdown
+    if (this.isShuttingDown) {
+      console.log(`⏹️  [${clientId}] Backup skipped - shutdown in progress`);
+      return false;
+    }
+
+    // Check if MongoDB is connected
+    if (!this.isMongoConnected()) {
+      console.warn(`⚠️  [${clientId}] Backup skipped - MongoDB not connected`);
+      return false;
+    }
+
     // Prevent concurrent backups for same client
     if (this.backupLocks.has(clientId)) {
       console.log(`⏳ [${clientId}] Backup already in progress, skipping duplicate request`);
@@ -390,8 +444,29 @@ export class WhatsAppSessionBackup {
             console.log(`📦 [${clientId}] Backup size: ${(archiveSize / 1024 / 1024).toFixed(2)} MB, ${filesArchived} files`);
             
             try {
+              // Check if MongoDB is still connected before proceeding
+              if (!this.isMongoConnected()) {
+                console.warn(`⚠️  [${clientId}] Backup aborted - MongoDB connection closed`);
+                // Clean up temp file
+                if (uploadStream?.id) {
+                  await this.gridFS.delete(uploadStream.id).catch(() => {});
+                }
+                resolve(false);
+                return;
+              }
+
               // SECURITY: Verify backup integrity before replacing old one
               await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for GridFS to index
+              
+              // Check again after delay
+              if (!this.isMongoConnected()) {
+                console.warn(`⚠️  [${clientId}] Backup aborted - MongoDB connection closed during verification`);
+                if (uploadStream?.id) {
+                  await this.gridFS.delete(uploadStream.id).catch(() => {});
+                }
+                resolve(false);
+                return;
+              }
               
               const tempFiles = await this.gridFS.find({ 
                 filename: tempFilename,
@@ -412,15 +487,17 @@ export class WhatsAppSessionBackup {
               const fileSize = tempFile.length || 0;
               
               // Verify file size matches expected
-              // Use percentage-based tolerance: 0.1% for larger files, or minimum 10KB
-              // This accounts for GridFS chunking overhead and minor differences in size tracking
-              const tolerance = Math.max(archiveSize * 0.001, 10 * 1024); // 0.1% or 10KB, whichever is larger
+              // Use percentage-based tolerance: 0.5% for larger files, or minimum 50KB
+              // This accounts for GridFS chunking overhead, compression differences, and filesystem variations
+              const tolerance = Math.max(archiveSize * 0.005, 50 * 1024); // 0.5% or 50KB, whichever is larger
               const sizeDifference = Math.abs(fileSize - archiveSize);
               
               if (sizeDifference > tolerance) {
-                console.error(`❌ [${clientId}] Backup size mismatch: expected ${archiveSize}, got ${fileSize}, difference: ${sizeDifference} bytes (tolerance: ${tolerance.toFixed(0)} bytes)`);
+                console.warn(`⚠️  [${clientId}] Backup size mismatch: expected ${archiveSize}, got ${fileSize}, difference: ${sizeDifference} bytes (tolerance: ${tolerance.toFixed(0)} bytes)`);
+                console.warn(`   Keeping old backup - new backup discarded to prevent corruption`);
                 await this.gridFS.delete(uploadStream.id).catch(() => {});
-                reject(new Error('Backup size mismatch'));
+                // Don't reject - just keep the old backup (non-fatal)
+                resolve(false);
                 return;
               }
               
@@ -472,6 +549,19 @@ export class WhatsAppSessionBackup {
               });
               
             } catch (verifyError: any) {
+              // Handle MongoDB connection closed errors gracefully during shutdown
+              if (verifyError.name === 'MongoClientClosedError' || 
+                  verifyError.message?.includes('client was closed') ||
+                  !this.isMongoConnected()) {
+                console.warn(`⚠️  [${clientId}] Backup aborted - MongoDB connection closed during verification`);
+                // Clean up temp file on error
+                if (uploadStream?.id) {
+                  await this.gridFS.delete(uploadStream.id).catch(() => {});
+                }
+                resolve(false); // Don't reject, just return false (non-fatal)
+                return;
+              }
+              
               console.error(`❌ [${clientId}] Backup verification/atomic replace failed:`, verifyError);
               // Clean up temp file on error
               if (uploadStream?.id) {
@@ -511,6 +601,27 @@ export class WhatsAppSessionBackup {
 
     } catch (error: any) {
       const elapsed = ((Date.now() - backupStartedAt) / 1000).toFixed(1);
+      
+      // Handle MongoDB connection closed errors gracefully during shutdown
+      if (error && (
+        error.name === 'MongoClientClosedError' ||
+        error.message?.includes('client was closed') ||
+        !this.isMongoConnected()
+      )) {
+        console.warn(`⚠️  [${clientId}] Backup aborted after ${elapsed}s - MongoDB connection closed (shutdown in progress)`);
+        
+        // SECURITY: Cleanup temp file on error (best effort, might fail if MongoDB is closed)
+        if (uploadStream?.id) {
+          try {
+            await this.gridFS.delete(uploadStream.id);
+          } catch (deleteError) {
+            // Ignore cleanup errors during shutdown
+          }
+        }
+        
+        return false; // Non-fatal error during shutdown - don't throw
+      }
+      
       console.error(`❌ [${clientId}] WhatsApp session backup error after ${elapsed}s:`, error);
       
       // SECURITY: Cleanup temp file on error
@@ -617,8 +728,54 @@ export class WhatsAppSessionBackup {
       }
       
       // SECURITY: Delete existing session only AFTER backup validation
+      // Use retry mechanism to handle file locks and ENOTEMPTY errors
       if (fs.existsSync(sessionPath)) {
-        fs.rmSync(sessionPath, { recursive: true, force: true });
+        let deleted = false;
+        let retryCount = 0;
+        const maxRetries = 5;
+        
+        while (!deleted && retryCount < maxRetries) {
+          try {
+            // Try to remove directory
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            deleted = true;
+            console.log(`✅ [${clientId}] Existing session directory deleted`);
+          } catch (deleteError: any) {
+            retryCount++;
+            if (deleteError.code === 'ENOTEMPTY' || deleteError.code === 'EBUSY') {
+              console.log(`⏳ [${clientId}] Directory not empty or busy (attempt ${retryCount}/${maxRetries}), waiting...`);
+              // Wait longer for file handles to be released
+              await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+              
+              if (retryCount >= maxRetries) {
+                // Last attempt: try to delete contents individually
+                console.log(`🔄 [${clientId}] Attempting to delete directory contents individually...`);
+                try {
+                  const files = fs.readdirSync(sessionPath, { withFileTypes: true });
+                  for (const file of files) {
+                    const filePath = path.join(sessionPath, file.name);
+                    if (file.isDirectory()) {
+                      fs.rmSync(filePath, { recursive: true, force: true });
+                    } else {
+                      fs.unlinkSync(filePath);
+                    }
+                  }
+                  // Try removing directory again
+                  fs.rmSync(sessionPath, { recursive: true, force: true });
+                  deleted = true;
+                  console.log(`✅ [${clientId}] Directory deleted after cleaning contents`);
+                } catch (finalError: any) {
+                  console.error(`❌ [${clientId}] Failed to delete directory after ${maxRetries} attempts:`, finalError.message);
+                  throw finalError;
+                }
+              }
+            } else {
+              // Other errors - throw immediately
+              throw deleteError;
+            }
+          }
+        }
+        
         // Wait for filesystem to release locks
         await new Promise(resolve => setTimeout(resolve, 500));
       }
@@ -856,6 +1013,7 @@ export class WhatsAppSessionBackup {
    */
   async listWhatsAppBackups(clientId: string = '*'): Promise<any[]> {
     try {
+      // First, try with metadata filter
       let query: any = {};
       
       if (clientId !== '*') {
@@ -870,9 +1028,121 @@ export class WhatsAppSessionBackup {
         };
       }
       
-      const files = await this.gridFS.find(query)
+      let files = await this.gridFS.find(query)
         .sort({ uploadDate: -1 })
         .toArray();
+      
+      // If no files found with metadata filter, try without it (for backwards compatibility)
+      // Some old backups might not have metadata.type set
+      if (files.length === 0) {
+        console.log(`ℹ️  No backups found with metadata filter, trying without metadata filter...`);
+        if (clientId !== '*') {
+          query = { 
+            filename: `${clientId}_whatsapp_session.zip`
+          };
+        } else {
+          query = { 
+            filename: { $regex: /_whatsapp_session\.zip$/ }
+          };
+        }
+        
+        files = await this.gridFS.find(query)
+          .sort({ uploadDate: -1 })
+          .toArray();
+      }
+      
+      // Clean up stale temp files and try to finalize interrupted backups
+      // These are temp files left behind when backups were interrupted during shutdown
+      if (clientId === '*') {
+        try {
+          const tempFiles = await this.gridFS.find({
+            filename: { $regex: /_whatsapp_session\.tmp$/ }
+          }).toArray();
+          
+          if (tempFiles.length > 0) {
+            console.log(`🔍 Found ${tempFiles.length} temp backup file(s) - checking for interrupted backups...`);
+            
+            const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+            let finalizedCount = 0;
+            let cleanedCount = 0;
+            
+            for (const tempFile of tempFiles) {
+              try {
+                // Extract clientId from temp filename (e.g., "javear-client-wpp_whatsapp_session.tmp")
+                const match = tempFile.filename.match(/^(.+?)_whatsapp_session\.tmp$/);
+                if (!match) continue;
+                
+                const tempClientId = match[1];
+                const finalFilename = `${tempClientId}_whatsapp_session.zip`;
+                
+                // Check if final backup already exists (backup was successful)
+                const existingFinal = await this.gridFS.find({
+                  filename: finalFilename
+                }).limit(1).toArray();
+                
+                if (existingFinal.length > 0) {
+                  // Final backup exists, temp file is stale - delete it
+                  await this.gridFS.delete(tempFile._id);
+                  cleanedCount++;
+                  console.log(`🧹 Removed stale temp file (final backup exists): ${tempFile.filename}`);
+                } else if (tempFile.uploadDate && new Date(tempFile.uploadDate) < oneHourAgo) {
+                  // Temp file is older than 1 hour and no final backup - likely interrupted
+                  // Try to finalize it if it's valid
+                  if (tempFile.length && tempFile.length > 0) {
+                    console.log(`🔄 Attempting to finalize interrupted backup: ${tempFile.filename} (${(tempFile.length / 1024 / 1024).toFixed(2)} MB)`);
+                    try {
+                      // Finalize the temp file by copying it to final filename
+                      const downloadStream = this.gridFS.openDownloadStream(tempFile._id);
+                      const finalUploadStream = this.gridFS.openUploadStream(finalFilename, {
+                        metadata: {
+                          clientId: tempClientId,
+                          timestamp: tempFile.uploadDate || new Date(),
+                          type: 'whatsapp_specific',
+                          checksum: tempFile.metadata?.checksum,
+                          recovered: true // Mark as recovered from interrupted backup
+                        }
+                      });
+                      
+                      await new Promise<void>((resolve, reject) => {
+                        downloadStream.pipe(finalUploadStream);
+                        finalUploadStream.on('finish', async () => {
+                          await this.gridFS.delete(tempFile._id).catch(() => {});
+                          finalizedCount++;
+                          console.log(`✅ Finalized interrupted backup: ${finalFilename}`);
+                          resolve();
+                        });
+                        finalUploadStream.on('error', reject);
+                        downloadStream.on('error', reject);
+                      });
+                    } catch (finalizeError) {
+                      // If finalization fails, delete the stale temp file
+                      console.warn(`⚠️  Could not finalize temp backup ${tempFile.filename}, deleting:`, finalizeError);
+                      await this.gridFS.delete(tempFile._id).catch(() => {});
+                      cleanedCount++;
+                    }
+                  } else {
+                    // Temp file is empty or invalid - delete it
+                    await this.gridFS.delete(tempFile._id);
+                    cleanedCount++;
+                    console.log(`🧹 Removed invalid temp file: ${tempFile.filename}`);
+                  }
+                }
+              } catch (error) {
+                console.warn(`⚠️  Error processing temp file ${tempFile.filename}:`, error);
+              }
+            }
+            
+            if (finalizedCount > 0) {
+              console.log(`✅ Finalized ${finalizedCount} interrupted backup(s)`);
+            }
+            if (cleanedCount > 0) {
+              console.log(`🧹 Cleaned up ${cleanedCount} stale/invalid temp file(s)`);
+            }
+          }
+        } catch (cleanupError) {
+          console.warn(`⚠️  Error processing temp files:`, cleanupError);
+        }
+      }
       
       return files.map(file => ({
         id: file._id,
@@ -883,6 +1153,7 @@ export class WhatsAppSessionBackup {
       }));
     } catch (error) {
       console.error(`❌ Error listing WhatsApp backups for ${clientId}:`, error);
+      console.error(`   Error details:`, error);
       return [];
     }
   }

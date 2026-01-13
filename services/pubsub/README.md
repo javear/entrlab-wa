@@ -7,6 +7,7 @@ Pub/Sub service using Valkey Stream for WhatsApp messages and AI responses. This
 - **Event Streaming**: Publishes incoming WhatsApp messages and AI responses to Valkey Stream
 - **Webhook Subscriptions**: Register webhooks to receive events in real-time
 - **Stream Consumption**: Direct stream consumption via consumer groups
+- **Weaviate Storage**: Automatically stores chat events in Weaviate for semantic search and chat replay
 - **Scalable**: Supports multiple consumers and webhook endpoints
 
 ## Architecture
@@ -27,6 +28,8 @@ Pub/Sub service using Valkey Stream for WhatsApp messages and AI responses. This
          │
          ├───► Webhook Manager ───► HTTP Webhooks
          │
+         ├───► Weaviate Consumer ───► Weaviate (Chat History + RAG)
+         │
          └───► Stream Consumers ───► Custom Applications
 ```
 
@@ -45,6 +48,14 @@ VALKEY_WEBHOOK_DB=1  # Optional, defaults to 1 if not set
 
 # Service Port
 PUBSUB_PORT=3005
+
+# Weaviate Storage (Optional)
+WEAVIATE_ENABLED=true  # Set to true to enable Weaviate storage
+WEAVIATE_URL=http://localhost:8080
+WEAVIATE_API_KEY=  # Optional API key
+OPENAI_API_KEY=sk-...  # Required for text2vec-openai vectorizer
+WEAVIATE_CONSUMER_GROUP=weaviate-consumer  # Optional, defaults to 'weaviate-consumer'
+WEAVIATE_CONSUMER_NAME=weaviate-consumer-1  # Optional, auto-generated if not set
 ```
 
 ## API Endpoints
@@ -206,6 +217,37 @@ await producer.publishAIResponse({
 });
 ```
 
+## Weaviate Storage
+
+The service can automatically store chat events in Weaviate for semantic search and chat replay. When enabled, a consumer reads events from the Redis Stream and persists them to Weaviate.
+
+### Features
+
+- **Multi-tenancy**: Events are stored per `agent_code` (tenant)
+- **Idempotent**: Events are deduplicated by `event_id`
+- **Automatic Schema**: Creates `Conversation` and `ChatEvent` schemas on startup
+- **Vector Search**: Supports semantic search when embeddings are provided
+- **Chat Replay**: Retrieve complete conversation history
+
+### Schemas
+
+- **Conversation**: Stores conversation metadata (participants, status, timestamps)
+- **ChatEvent**: Stores individual events (messages, AI responses) with optional vectors
+
+### Usage
+
+1. Set `WEAVIATE_ENABLED=true` or provide `WEAVIATE_URL`
+2. Ensure Weaviate is running and accessible
+3. The consumer will automatically start and begin storing events
+
+### Query Examples
+
+See [docs/WEAVIATE_QUERIES.md](./docs/WEAVIATE_QUERIES.md) for detailed query examples including:
+- Chat replay queries
+- Semantic search (RAG)
+- Conversation metadata retrieval
+- Event filtering
+
 ## Deployment
 
 Use the provided `Dockerfile.pubsub` for deployment:
@@ -217,5 +259,8 @@ docker run -p 3005:3005 \
   -e VALKEY_PORT=6379 \
   -e VALKEY_PASSWORD=password \
   -e PUBSUB_PORT=3005 \
+  -e WEAVIATE_ENABLED=true \
+  -e WEAVIATE_URL=http://weaviate:8080 \
+  -e OPENAI_API_KEY=sk-... \
   pubsub-service
 ```

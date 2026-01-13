@@ -6,7 +6,9 @@ FROM node:18-alpine
 # Install runtime dependencies (minimal)
 RUN apk add --no-cache \
     dumb-init \
-    ca-certificates
+    ca-certificates \
+    wget \
+    curl
 
 # Create app user for security
 RUN addgroup -g 1001 -S nodejs && \
@@ -14,7 +16,8 @@ RUN addgroup -g 1001 -S nodejs && \
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV PUBSUB_PORT=3005
+# Note: Railway sets PORT automatically - don't override PUBSUB_PORT here
+# PUBSUB_PORT is only used if PORT is not set
 
 # Set working directory
 WORKDIR /usr/src/app
@@ -22,12 +25,20 @@ WORKDIR /usr/src/app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies (including pubsub service dependencies)
+# Install root dependencies (only if needed, minimal)
 RUN npm install --only=production && \
     npm cache clean --force
 
 # Copy Pub/Sub service files
 COPY services/pubsub/ ./services/pubsub/
+
+# Install pubsub service dependencies (including weaviate-ts-client)
+WORKDIR /usr/src/app/services/pubsub
+RUN npm install --only=production && \
+    npm cache clean --force
+
+# Return to app root
+WORKDIR /usr/src/app
 
 # Create startup script
 RUN echo '#!/bin/sh' > /usr/src/app/start.sh && \
@@ -55,8 +66,11 @@ RUN chown -R root:root /usr/src/app
 EXPOSE 3005
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
-    CMD node -e "const port = process.env.PUBSUB_PORT || '3005'; require('http').get('http://localhost:' + port + '/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+# Use curl (more reliable) with fallback to wget
+# start-period allows time for async initialization
+# Increased start-period to 120s to allow for npm install and service startup
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:3005/health 2>/dev/null || wget --quiet --spider http://localhost:3005/health || exit 1
 
 # Use the startup script
 CMD ["/usr/src/app/start.sh"]

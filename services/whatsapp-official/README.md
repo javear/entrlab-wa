@@ -30,14 +30,25 @@ VAULT_KEY_NAME=automark-key  # Optional, defaults to 'automark-key'
 # WhatsApp Business API Global Settings (optional, used for webhook signature verification)
 WA_APP_SECRET=your_app_secret_here  # Optional, for webhook signature verification
 WA_API_VERSION=v21.0
+
+# Global Webhook Verify Token (for /webhook/v1 - all clients)
+# This token is used when webhook URL is set to /webhook/v1 without clientId
+WA_WEBHOOK_VERIFY_TOKEN=your_secure_verify_token_here
 ```
 
 **Note:** Client-specific credentials (access_token, phone_number_id, verify_token, app_secret) are stored encrypted in MongoDB and retrieved per-request. Create clients using the `/api/v1/platform/clients` endpoint. The `app_secret` is required for webhook signature verification (HMAC-SHA256) per Meta's security requirements.
 
 ### Webhook Configuration (Multi-Client)
 
-The service supports multiple WhatsApp Business API clients. Each client has its own webhook endpoint.
+The service supports multiple WhatsApp Business API clients. You can use either a global webhook endpoint or client-specific endpoints.
 
+**Option 1: Global Webhook (Recommended for All Clients)**
+- URL: `https://your-domain.com/webhook/v1` (no clientId)
+- Verify Token: The value of `WA_WEBHOOK_VERIFY_TOKEN` from your `.env` file
+- The system will auto-detect the client from `phone_number_id` in webhook metadata
+- Subscribe to: `messages` and `message_status` fields
+
+**Option 2: Client-Specific Webhook**
 1. Create a client first using `/api/v1/platform/clients` endpoint (from main API)
 2. Set up your webhook URL in Meta App Dashboard for each client:
    - URL: `https://your-domain.com/webhook/v1/{clientId}`
@@ -61,10 +72,13 @@ All endpoints require a `clientId` parameter that identifies which WhatsApp Busi
 
 ### Webhook (Multi-Client)
 
-- `GET /webhook/v1/:clientId` - Webhook verification (Meta calls this during setup)
-- `POST /webhook/v1/:clientId` - Receive incoming messages and status updates
+- `GET /webhook/v1/:clientId?` - Webhook verification (Meta calls this during setup)
+  - With `clientId`: Uses client-specific verify token from database
+  - Without `clientId`: Uses `WA_WEBHOOK_VERIFY_TOKEN` from environment (for all clients)
+- `POST /webhook/v1/:clientId?` - Receive incoming messages and status updates
+  - `clientId` is optional - system auto-detects client from `phone_number_id` in webhook metadata
 
-The `clientId` must match a client created via `/api/v1/platform/clients` with platform `wa-official`.
+**Note:** When using `/webhook/v1` without `clientId`, ensure `WA_WEBHOOK_VERIFY_TOKEN` is set in your `.env` file.
 
 ### Messaging (Multi-Client)
 

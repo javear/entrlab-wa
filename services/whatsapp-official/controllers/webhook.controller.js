@@ -18,7 +18,9 @@ class WhatsAppWebhookController {
   /**
    * Verify webhook endpoint (GET)
    * Meta calls this to verify your webhook URL during setup
-   * Route: /webhook/v1/:clientId
+   * Route: /webhook/v1/:clientId? (clientId is optional)
+   * - If clientId provided: uses client-specific verify token from database
+   * - If clientId NOT provided: uses WA_WEBHOOK_VERIFY_TOKEN from env (for all clients)
    */
   async verify(req, res) {
     try {
@@ -27,36 +29,49 @@ class WhatsAppWebhookController {
       const token = req.query['hub.verify_token'];
       const challenge = req.query['hub.challenge'];
 
-      if (!clientId) {
-        return res.status(400).json({
-          success: false,
-          error: 'clientId is required'
-        });
+      let verifyToken;
+      let verificationContext;
+
+      if (clientId) {
+        // Client-specific verification: use token from database
+        // Check if client exists
+        const clientExists = await this.clientManager.clientExists(clientId);
+        if (!clientExists) {
+          console.error(`❌ Client ${clientId} not found`);
+          return res.status(404).json({
+            success: false,
+            error: `Client ${clientId} not found or not active`
+          });
+        }
+
+        // Get verify token from decrypted configuration
+        verifyToken = await this.clientManager.getVerifyToken(clientId);
+        verificationContext = `client ${clientId}`;
+      } else {
+        // Global verification for /webhook/v1 (all clients): use env variable
+        verifyToken = process.env.WA_WEBHOOK_VERIFY_TOKEN;
+        
+        if (!verifyToken) {
+          console.error(`❌ WA_WEBHOOK_VERIFY_TOKEN not set in environment`);
+          return res.status(500).json({
+            success: false,
+            error: 'Webhook verification not configured. Please set WA_WEBHOOK_VERIFY_TOKEN environment variable.'
+          });
+        }
+        
+        verificationContext = 'all clients (global)';
       }
 
-      // Check if client exists
-      const clientExists = await this.clientManager.clientExists(clientId);
-      if (!clientExists) {
-        console.error(`❌ Client ${clientId} not found`);
-        return res.status(404).json({
-          success: false,
-          error: `Client ${clientId} not found or not active`
-        });
-      }
-
-      // Get verify token from decrypted configuration
-      const verifyToken = await this.clientManager.getVerifyToken(clientId);
-
-      console.log(`🔍 Webhook verification attempt for ${clientId} - mode: ${mode}, token match: ${token === verifyToken}`);
+      console.log(`🔍 Webhook verification attempt for ${verificationContext} - mode: ${mode}, token match: ${token === verifyToken}`);
 
       // Per Meta's documentation: If the values match, respond with HTTP status 200 and hub.challenge value
       // If invalid, respond with a 400-level HTTP status code
       if (mode === 'subscribe' && token === verifyToken) {
-        console.log(`✅ Webhook verified for client ${clientId}`);
+        console.log(`✅ Webhook verified for ${verificationContext}`);
         // Return 200 with challenge value as plain text (not JSON)
         res.status(200).send(challenge);
       } else {
-        console.error(`❌ Webhook verification failed for client ${clientId} - mode: ${mode}, token match: ${token === verifyToken}`);
+        console.error(`❌ Webhook verification failed for ${verificationContext} - mode: ${mode}, token match: ${token === verifyToken}`);
         // Return 403 (Forbidden) for invalid verification
         res.sendStatus(403);
       }
@@ -142,69 +157,40 @@ class WhatsAppWebhookController {
           if (!appSecret) {
             console.warn(`⚠️ App secret not configured for client ${clientId}, skipping signature verification`);
           } else {
-            // Log request details before verification
             const rawBodyString = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody;
-            const bodyPreview = rawBodyString.length > 200 ? rawBodyString.substring(0, 200) + '...' : rawBodyString;
-            
-            console.log(`🔍 [${clientId}] Verifying webhook signature:`);
-            console.log(`   Received Signature: ${signature}`);
-            console.log(`   App Secret: ${appSecret ? `${appSecret.substring(0, 8)}...` : 'MISSING'}`);
-            console.log(`   Request Headers:`, JSON.stringify(relevantHeaders, null, 2));
-            console.log(`   Raw Body Length: ${rawBodyString.length} bytes`);
-            console.log(`   Raw Body Preview: ${bodyPreview}`);
-            console.log(`   Body Structure:`, {
-              object: body?.object,
-              entryCount: body?.entry?.length || 0,
-              hasMessages: !!body?.entry?.[0]?.changes?.[0]?.value?.messages,
-              hasStatuses: !!body?.entry?.[0]?.changes?.[0]?.value?.statuses
-            });
-            
             const isValid = this.verifySignature(rawBody, body, signature, appSecret);
             if (!isValid) {
-              // Log detailed signature verification failure info
+              // Log detailed signature verification failure info (only on failure)
               const expectedSignature = 'sha256=' + crypto
                 .createHmac('sha256', appSecret)
                 .update(rawBodyString)
                 .digest('hex');
               
-              // Also calculate what it would be with stringified (for comparison)
-              const stringifiedSignature = 'sha256=' + crypto
-                .createHmac('sha256', appSecret)
-                .update(JSON.stringify(body))
-                .digest('hex');
-              
-              console.error(`❌ [${clientId}] Invalid webhook signature:`);
-              console.error(`   Received: ${signature}`);
-              console.error(`   Expected (raw body): ${expectedSignature}`);
-              console.error(`   Expected (stringified): ${stringifiedSignature}`);
-              console.error(`   Using raw body: ${signature === expectedSignature}`);
-              console.error(`   Using stringified: ${signature === stringifiedSignature}`);
-              console.error(`   Raw Body (first 500 chars): ${rawBodyString.substring(0, 500)}`);
-              console.error(`   Parsed Body:`, JSON.stringify(body, null, 2));
+              console.error(`❌ [${clientId}] Invalid webhook signature`);
+              console.error(`   Received: ${signature.substring(0, 20)}...`);
+              console.error(`   Expected: ${expectedSignature.substring(0, 20)}...`);
+              console.error(`   Body length: ${rawBodyString.length} bytes`);
               return res.sendStatus(403);
             } else {
-              console.log(`✅ Webhook signature verified for client ${clientId}`);
+              console.log(`✅ [${clientId}] Webhook signature verified`);
             }
           }
         } catch (error) {
-          console.error(`❌ Error verifying webhook signature for client ${clientId}:`, error.message);
-          console.error(`   Error Stack:`, error.stack);
-          console.error(`   Request Headers:`, JSON.stringify(relevantHeaders, null, 2));
-          console.error(`   Body:`, JSON.stringify(body, null, 2));
+          console.error(`❌ [${clientId}] Error verifying webhook signature:`, error.message);
           return res.sendStatus(403);
         }
       } else {
-        console.warn(`⚠️ No X-Hub-Signature-256 header found for client ${clientId}, skipping signature verification`);
-        console.warn(`   Available headers:`, JSON.stringify(relevantHeaders, null, 2));
+        console.warn(`⚠️ [${clientId}] No X-Hub-Signature-256 header found, skipping signature verification`);
       }
 
       // Extract phone_number_id from metadata for logging
       const phoneNumberIdFromMetadata = body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
-      if (phoneNumberIdFromMetadata) {
-        console.log(`📨 Received webhook for client ${clientId} (phone_number_id: ${phoneNumberIdFromMetadata}):`, JSON.stringify(body, null, 2));
-      } else {
-        console.log(`📨 Received webhook for client ${clientId}:`, JSON.stringify(body, null, 2));
-      }
+      const field = body?.entry?.[0]?.changes?.[0]?.field || 'unknown';
+      const hasMessages = !!body?.entry?.[0]?.changes?.[0]?.value?.messages;
+      const hasStatuses = !!body?.entry?.[0]?.changes?.[0]?.value?.statuses;
+      
+      // Log only essential info instead of full body
+      console.log(`📨 [${clientId}] Webhook received - field: ${field}, hasMessages: ${hasMessages}, hasStatuses: ${hasStatuses}${phoneNumberIdFromMetadata ? `, phone_number_id: ${phoneNumberIdFromMetadata}` : ''}`);
 
       // Meta sends a 200 response immediately, then processes the webhook
       res.sendStatus(200);
@@ -219,7 +205,6 @@ class WhatsAppWebhookController {
               // Check if this is actually a status update (has statuses array) or incoming message (has messages array)
               if (change.value?.statuses && Array.isArray(change.value.statuses)) {
                 // Status update sent via messages field
-                console.log(`📊 Status update received in 'messages' field for client ${clientId}`);
                 this.handleStatusChange(clientId, change.value);
               } else if (change.value?.messages && Array.isArray(change.value.messages)) {
                 // Actual incoming message
@@ -283,29 +268,19 @@ class WhatsAppWebhookController {
     
     if (statuses.length > 0) {
       statuses.forEach((status) => {
-        console.log(`📊 Status update for client ${clientId}:`, {
-          messageId: status.id,
-          status: status.status,
-          recipientId: status.recipient_id,
-          timestamp: status.timestamp,
-          errors: status.errors || []
-        });
-
-        // Log error details if message failed
-        if (status.status === 'failed' && status.errors && status.errors.length > 0) {
-          status.errors.forEach((error) => {
-            console.error(`❌ Message ${status.id} failed for client ${clientId}:`, {
-              code: error.code,
-              title: error.title,
-              message: error.message,
-              details: error.error_data?.details
+        // Only log failed statuses, other statuses are too verbose
+        if (status.status === 'failed') {
+          console.log(`❌ [${clientId}] Message failed: ${status.id.substring(0, 20)}... (recipient: ${status.recipient_id})`);
+          if (status.errors && status.errors.length > 0) {
+            status.errors.forEach((error) => {
+              console.error(`   Error: ${error.code} - ${error.title || error.message}`);
             });
-          });
+          }
         }
+        // Only log status summary for non-failed statuses (read, delivered, sent)
+        // Uncomment if you need to see all status updates:
+        // console.log(`📊 [${clientId}] ${status.status}: ${status.id.substring(0, 20)}...`);
       });
-    } else {
-      // Fallback: log the entire value if structure is different
-      console.log(`📊 Status update for client ${clientId}:`, JSON.stringify(value, null, 2));
     }
     // Handle status updates (sent, delivered, read, failed)
     // Note: Status updates are informational only - no reply needed
