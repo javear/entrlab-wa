@@ -16,7 +16,7 @@ class WhatsAppOfficialApp {
     this.messageController = null;
   }
 
-  initialize() {
+  async initialize() {
     // Important: Capture raw body for webhook signature verification
     // Meta's signature is calculated on the RAW body string, not the parsed JSON
     // This middleware must run BEFORE express.json() to capture the raw body
@@ -37,18 +37,24 @@ class WhatsAppOfficialApp {
     this.app.use(express.json());
     this.app.use(express.urlencoded({ extended: true }));
 
-    // Health check
-    this.app.get('/health', (req, res) => {
-      res.json({ 
-        status: 'ok', 
-        service: 'whatsapp-official',
-        timestamp: new Date().toISOString()
-      });
-    });
+    // Note: Health check endpoint is registered in index.js BEFORE initialize() is called
+    // This ensures health checks work even if initialization fails
 
     // Initialize controllers
     this.webhookController = new WhatsAppWebhookController();
     this.messageController = new WhatsAppMessageController();
+
+    // Initialize outgoing message consumer (listens for message:outgoing events)
+    this.outgoingMessageConsumer = null;
+    try {
+      const OutgoingMessageConsumer = require('./services/outgoing-message-consumer');
+      this.outgoingMessageConsumer = new OutgoingMessageConsumer();
+      this.outgoingMessageConsumer.start().catch(error => {
+        console.warn('⚠️  Failed to start outgoing message consumer (will retry):', error);
+      });
+    } catch (error) {
+      console.warn('⚠️  Could not initialize outgoing message consumer:', error);
+    }
 
     // Routes
     this.app.use('/webhook', createWebhookRoutes(this.webhookController));

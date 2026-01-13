@@ -8,8 +8,12 @@ import { createWhatsAppRoutes } from './routes/whatsapp.routes';
 import { createApiRoutes } from './routes/api.routes';
 import { createPlatformRoutes } from './routes/platform.routes';
 import { createPubSubRoutes } from './routes/pubsub.routes';
+import { createChatRoutes } from './routes/chat.routes';
 import { PlatformController } from './controllers/platform.controller';
 import { PubSubController } from './controllers/pubsub.controller';
+import { ChatController } from './controllers/chat.controller';
+import { WeaviateService } from './services/weaviate.service';
+import { OutgoingMessageConsumerService } from './services/outgoing-message-consumer.service';
 import { Environment } from './types';
 import { swaggerSpec } from './config/swagger';
 import { createAuthMiddleware } from './middleware/auth.middleware';
@@ -29,6 +33,9 @@ export class WPPConnectWhatsAppBotApp {
   private apiController: ApiController;
   private platformController: PlatformController;
   private pubSubController: PubSubController;
+  private chatController: ChatController;
+  private weaviateService: WeaviateService;
+  private outgoingMessageConsumer: OutgoingMessageConsumerService;
   private autoRestartService: AutoRestartService;
   private memoryMonitor: MemoryMonitorService;
 
@@ -158,6 +165,9 @@ export class WPPConnectWhatsAppBotApp {
     this.apiController = new ApiController(this.whatsappService as any, env);
     this.platformController = new PlatformController(this.whatsappService, env);
     this.pubSubController = new PubSubController();
+    this.weaviateService = new WeaviateService(this.whatsappService);
+    this.chatController = new ChatController(this.weaviateService, this.whatsappService);
+    this.outgoingMessageConsumer = new OutgoingMessageConsumerService(this.whatsappService);
     this.autoRestartService = new AutoRestartService(env, async () => { 
       await this.gracefulShutdown(); 
     });
@@ -209,6 +219,9 @@ export class WPPConnectWhatsAppBotApp {
     
     // PubSub routes (v1) with authentication
     this.app.use('/api/v1/pubsub', authMiddleware.authenticate, createPubSubRoutes(this.pubSubController));
+    
+    // Chat routes (v1) with authentication
+    this.app.use('/api/v1/platform/chat', authMiddleware.authenticate, createChatRoutes(this.chatController));
     
     // Legacy routes for backward compatibility
     this.app.get('/health', (req, res) => this.apiController.healthCheck(req, res));
@@ -352,6 +365,15 @@ export class WPPConnectWhatsAppBotApp {
       await this.whatsappService.initialize();
       console.log('✅ WPPConnect WhatsApp service initialized');
       
+      // Start outgoing message consumer (listens for message:outgoing events)
+      try {
+        await this.outgoingMessageConsumer.start();
+        console.log('✅ Outgoing message consumer started');
+      } catch (error) {
+        console.warn('⚠️  Failed to start outgoing message consumer (will retry):', error);
+        // Don't fail initialization - consumer will retry
+      }
+
       // Restore existing sessions from MongoDB (NON-BLOCKING - runs in background)
       setImmediate(() => {
         this.whatsappService.restoreExistingSessions()
@@ -401,6 +423,9 @@ export class WPPConnectWhatsAppBotApp {
     try {
       // Stop auto-restart service
       this.autoRestartService.stop();
+      
+      // Stop outgoing message consumer
+      await this.outgoingMessageConsumer.stop();
       
       // Stop memory monitor
       this.memoryMonitor.stop();

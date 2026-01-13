@@ -26,12 +26,18 @@ async function generateToken() {
         // Parse command line arguments
         const args = process.argv.slice(2);
         const clientId = args[0] || 'test-client';
-        const agentCode = args[1] || 'ginka-transaction-agent';
+        const agentCode = args[1] || 'Herbakof';
 
         // Generate payload for WhatsApp API
         const payload = {
             clientId: clientId,
             agentCode: agentCode,
+            sender: {
+                senderId: "agent-123",
+                senderDisplayName: "John Doe",
+                senderRoleLabel: "senior-agent",
+                senderAvatarUrl: "https://example.com/avatar.jpg"
+            },
             iat: Math.floor(Date.now() / 1000),
             exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60), // 24 hours
             role: 'admin',

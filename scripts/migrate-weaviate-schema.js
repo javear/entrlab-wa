@@ -184,7 +184,29 @@ async function main() {
       }
     }
 
-    console.log('✨ Migration complete!');
+    // Check participant_ids property configuration
+    console.log('\n📋 Checking participant_ids property configuration...');
+    const participantIdsProperty = conversationSchema.properties?.find((p: any) => p.name === 'participant_ids');
+    if (participantIdsProperty) {
+      console.log(`   Current participant_ids config:`, {
+        indexInverted: participantIdsProperty.indexInverted,
+        indexFilterable: participantIdsProperty.indexFilterable
+      });
+      
+      if (!participantIdsProperty.indexFilterable && !participantIdsProperty.indexInverted) {
+        console.log('\n⚠️  WARNING: participant_ids is not filterable!');
+        console.log('   This will cause errors when querying by participant_ids.');
+        console.log('   To fix this, you need to:');
+        console.log('   1. Delete the participant_ids property (THIS WILL DELETE DATA)');
+        console.log('   2. Recreate it with indexFilterable: true');
+        console.log('   3. Re-import all conversation data');
+        console.log('\n   For now, the service will use in-memory filtering as a workaround.');
+      } else {
+        console.log('✅ participant_ids is filterable');
+      }
+    }
+
+    console.log('\n✨ Migration complete!');
     console.log('   Note: The payload field in ChatEvent is kept for backward compatibility.');
     console.log('   New events will use the content field.');
     console.log('   New conversations will include client_id, platform, and last event fields.');

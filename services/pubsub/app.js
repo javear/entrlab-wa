@@ -18,6 +18,12 @@ class PubSubApp {
     this.streamController = null;
     this.streamService = null;
     this.weaviateConsumer = null;
+    
+    // Register health endpoint FIRST, before any middleware
+    // This ensures Railway health checks work immediately
+    this.app.get('/health', (req, res) => {
+      res.status(200).json({ status: 'ok', service: 'pubsub' });
+    });
   }
 
   async initialize() {

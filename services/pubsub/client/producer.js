@@ -259,6 +259,144 @@ class StreamProducer {
   }
 
   /**
+   * Publish agent response event (for API-initiated messages)
+   * @param {Object} responseData - Agent response data
+   * @returns {Promise<string>} - Stream entry ID
+   */
+  async publishAgentResponse(responseData) {
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Check connection state - both flag and actual client state
+        const isReallyConnected = this.isConnected && 
+                                 this.client && 
+                                 this.client.isReady;
+        
+        if (!isReallyConnected) {
+          console.log(`🔄 [Producer] Not connected (attempt ${attempt}/${maxRetries}), reconnecting...`);
+          await this.connect();
+          // Wait a bit for connection to stabilize
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!this.client || !this.client.isReady) {
+          throw new Error('Stream producer client not ready');
+        }
+
+        const entryData = {
+          eventType: 'agent:response',
+          timestamp: new Date().toISOString(),
+          ...responseData
+        };
+
+        const streamEntry = this.prepareStreamEntry(entryData);
+        console.log(`📤 [Producer] Publishing agent response to stream: ${this.config.streamName}`);
+        const entryId = await this.client.xAdd(
+          this.config.streamName,
+          '*',
+          streamEntry
+        );
+
+        console.log(`📤 [Producer] Published agent response to stream: ${entryId} (stream: ${this.config.streamName})`);
+        return entryId;
+      } catch (error) {
+        lastError = error;
+        const isConnectionError = error.code === 'ECONNRESET' || 
+                                 error.code === 'EPIPE' || 
+                                 error.message?.includes('Connection') ||
+                                 error.message?.includes('closed');
+        
+        if (isConnectionError && attempt < maxRetries) {
+          console.log(`⚠️  [Producer] Connection error on attempt ${attempt}, will retry:`, error.message);
+          this.isConnected = false;
+          // Wait before retry with exponential backoff
+          await new Promise(resolve => setTimeout(resolve, attempt * 200));
+          continue;
+        }
+        
+        // If not a connection error or last attempt, throw
+        if (!isConnectionError || attempt === maxRetries) {
+          console.error('❌ Error publishing agent response:', error.message || error);
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Publish outgoing message event (API-initiated messages)
+   * @param {Object} messageData - Outgoing message data
+   * @returns {Promise<string>} - Stream entry ID
+   */
+  async publishOutgoingMessage(messageData) {
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Check connection state - both flag and actual client state
+        const isReallyConnected = this.isConnected && 
+                                 this.client && 
+                                 this.client.isReady;
+        
+        if (!isReallyConnected) {
+          console.log(`🔄 [Producer] Not connected (attempt ${attempt}/${maxRetries}), reconnecting...`);
+          await this.connect();
+          // Wait a bit for connection to stabilize
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!this.client || !this.client.isReady) {
+          throw new Error('Stream producer client not ready');
+        }
+
+        const entryData = {
+          eventType: 'message:outgoing',
+          timestamp: new Date().toISOString(),
+          ...messageData
+        };
+
+        const streamEntry = this.prepareStreamEntry(entryData);
+        console.log(`📤 [Producer] Publishing outgoing message to stream: ${this.config.streamName}`);
+        const entryId = await this.client.xAdd(
+          this.config.streamName,
+          '*',
+          streamEntry
+        );
+
+        console.log(`📤 [Producer] Published outgoing message to stream: ${entryId} (stream: ${this.config.streamName})`);
+        return entryId;
+      } catch (error) {
+        lastError = error;
+        const isConnectionError = error.code === 'ECONNRESET' || 
+                                 error.code === 'EPIPE' || 
+                                 error.message?.includes('Connection') ||
+                                 error.message?.includes('closed');
+        
+        if (isConnectionError && attempt < maxRetries) {
+          console.log(`⚠️  [Producer] Connection error on attempt ${attempt}, will retry:`, error.message);
+          this.isConnected = false;
+          // Wait before retry with exponential backoff
+          await new Promise(resolve => setTimeout(resolve, attempt * 200));
+          continue;
+        }
+        
+        // If not a connection error or last attempt, throw
+        if (!isConnectionError || attempt === maxRetries) {
+          console.error('❌ Error publishing outgoing message:', error.message || error);
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
    * Prepare stream entry (convert all values to strings)
    * @param {Object} data - Data to prepare
    * @returns {Object} - Prepared stream entry
@@ -310,5 +448,9 @@ function getProducer(options = {}) {
 
 module.exports = {
   StreamProducer,
-  getProducer
+  getProducer,
+  publishAgentResponse: (responseData) => {
+    const producer = getProducer();
+    return producer.publishAgentResponse(responseData);
+  }
 };

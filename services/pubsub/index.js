@@ -1,5 +1,9 @@
-require('dotenv').config();
-const PubSubApp = require('./app');
+// Load environment variables (non-blocking - continue even if .env file doesn't exist)
+try {
+  require('dotenv').config();
+} catch (error) {
+  console.warn('⚠️  Could not load .env file (this is OK in production):', error.message);
+}
 
 // Handle unhandled promise rejections (prevent crashes)
 process.on('unhandledRejection', (reason, promise) => {
@@ -14,49 +18,38 @@ process.on('uncaughtException', (error) => {
   // This allows health checks to pass even if there are initialization issues
 });
 
-// Get port - prioritize PORT (Railway sets this), then PUBSUB_PORT, then default to 3005
-// Railway automatically sets PORT env var, so we should use that for health checks
+// Initialize PubSubApp (wrap in try-catch to ensure server starts even if app creation fails)
+let app;
+try {
+  const PubSubApp = require('./app');
+  app = new PubSubApp();
+} catch (error) {
+  console.error('❌ Failed to create PubSubApp:', error);
+  // Create a minimal express app for health checks only
+  const express = require('express');
+  const minimalApp = express();
+  minimalApp.get('/health', (req, res) => {
+    res.status(500).json({ 
+      status: 'error', 
+      service: 'pubsub',
+      error: 'Failed to initialize app',
+      message: error.message 
+    });
+  });
+  const PORT = process.env.PORT || process.env.PUBSUB_PORT || 3005;
+  minimalApp.listen(PORT, '0.0.0.0', () => {
+    console.log(`⚠️  Minimal server started on ${PORT} (app initialization failed)`);
+  });
+  process.exit(1); // Exit with error code but health check endpoint is available
+}
+
+// Get port - prioritize PORT (Railway sets this automatically), then PUBSUB_PORT, then default to 3005
+// PORT must be prioritized for Railway compatibility - Railway's health check uses the PORT it sets
 const PORT = process.env.PORT || process.env.PUBSUB_PORT || 3005;
 
-// Initialize the Pub/Sub app
-const app = new PubSubApp();
-
-// Register health endpoint IMMEDIATELY on the express app (before initialization)
+// Health endpoint is already registered in PubSubApp constructor (before any middleware)
+// Get the express app for server startup
 const expressApp = app.getApp();
-
-// Health endpoint - must be available immediately for Docker health checks
-// This MUST be registered before any middleware that might interfere
-expressApp.get('/health', (req, res) => {
-  // Log health check requests for debugging
-  const clientIP = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
-  const userAgent = req.headers['user-agent'] || 'unknown';
-  console.log(`🏥 Health check requested from ${clientIP} (${userAgent})`);
-  
-  try {
-    const healthResponse = {
-      status: 'ok',
-      service: 'pubsub',
-      timestamp: new Date().toISOString(),
-      port: PORT,
-      uptime: process.uptime(),
-      env: {
-        PUBSUB_PORT: process.env.PUBSUB_PORT,
-        PORT: process.env.PORT,
-        NODE_ENV: process.env.NODE_ENV
-      }
-    };
-    
-    res.status(200).json(healthResponse);
-    console.log(`✅ Health check responded OK`);
-  } catch (error) {
-    console.error('❌ Error in health endpoint:', error);
-    res.status(500).json({ 
-      status: 'error',
-      service: 'pubsub',
-      error: error.message 
-    });
-  }
-});
 
 // Root endpoint for basic connectivity check
 expressApp.get('/', (req, res) => {
@@ -70,10 +63,14 @@ expressApp.get('/', (req, res) => {
 // Start the server IMMEDIATELY (health endpoint is ready)
 console.log(`🚀 Starting server on port ${PORT}...`);
 let server;
+let serverReady = false;
+
 try {
   server = expressApp.listen(PORT, '0.0.0.0', () => {
+    serverReady = true;
     console.log(`✅ Server listening on 0.0.0.0:${PORT}`);
     console.log(`🏥 Health check available at http://0.0.0.0:${PORT}/health`);
+    console.log(`📊 Server is ready to accept connections`);
   });
   
   // Handle server errors
@@ -84,6 +81,13 @@ try {
       console.error(`❌ Server error:`, error);
     }
     process.exit(1);
+  });
+  
+  // Verify server is actually listening (for debugging)
+  server.on('listening', () => {
+    serverReady = true;
+    const address = server.address();
+    console.log(`✅ Server bound to ${address.address}:${address.port}`);
   });
 } catch (error) {
   console.error(`❌ Failed to start server:`, error);

@@ -7,7 +7,9 @@ FROM node:18-alpine
 # Install runtime dependencies (minimal - no Chromium needed)
 RUN apk add --no-cache \
     dumb-init \
-    ca-certificates
+    ca-certificates \
+    wget \
+    curl
 
 # Create app user for security
 RUN addgroup -g 1001 -S nodejs && \
@@ -31,9 +33,15 @@ RUN npm install --only=production && \
 # Copy WhatsApp Official service files
 COPY services/whatsapp-official/ ./services/whatsapp-official/
 
-# Copy pubsub client (required for stream producer)
-COPY services/pubsub/client/ ./services/pubsub/client/
-COPY services/pubsub/package.json ./services/pubsub/package.json
+# Copy pubsub services (required for stream service and producer)
+COPY services/pubsub/ ./services/pubsub/
+
+# Install pubsub service dependencies (if it has its own package.json)
+WORKDIR /usr/src/app/services/pubsub
+RUN if [ -f package.json ]; then npm install --only=production && npm cache clean --force; fi
+
+# Return to app root
+WORKDIR /usr/src/app
 
 # Copy startup script
 COPY scripts/start-whatsapp-official.sh /usr/src/app/start.sh
@@ -61,9 +69,12 @@ RUN chown -R root:root /usr/src/app
 EXPOSE 3004
 
 # Health check against the service's /health endpoint
-# Uses PORT env var if available, otherwise defaults to 3004
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=5 \
-    CMD node -e "const port = process.env.PORT || process.env.WA_OFFICIAL_PORT || '3004'; require('http').get('http://localhost:' + port + '/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+# Use curl (more reliable) with fallback to wget
+# start-period allows time for async initialization
+# Increased start-period to 120s to allow for npm install and service startup
+# Note: Using fixed port 3004 (default) - PORT env var can override at runtime
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:3004/health 2>/dev/null || wget --quiet --spider http://localhost:3004/health || exit 1
 
 # Use the startup script (which handles environment setup and uses dumb-init)
 CMD ["/usr/src/app/start.sh"]

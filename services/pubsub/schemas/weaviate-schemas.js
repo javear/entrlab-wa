@@ -32,95 +32,87 @@ const CONVERSATION_SCHEMA = {
       name: 'conversation_id',
       dataType: ['string'],
       description: 'Unique identifier for the conversation',
-      indexInverted: true
+      indexFilterable: true
     },
     {
       name: 'client_id',
       dataType: ['string'],
       description: 'Client identifier (e.g., "javear-client-wpp")',
-      indexInverted: true
+      indexFilterable: true
     },
     {
       name: 'platform',
       dataType: ['string'],
       description: 'Platform type: "wpp" (WPPConnect) or "wa-official" (WhatsApp Official)',
-      indexInverted: true
+      indexFilterable: true
     },
     {
       name: 'title',
       dataType: ['string'],
-      description: 'Optional title for the conversation',
-      indexInverted: false
+      description: 'Optional title for the conversation'
     },
     {
       name: 'participant_ids',
       dataType: ['string[]'],
       description: 'Array of participant identifiers',
-      indexInverted: false
+      indexFilterable: true
     },
     {
       name: 'created_at',
       dataType: ['date'],
-      description: 'When the conversation was created',
-      indexInverted: false
+      description: 'When the conversation was created'
     },
     {
       name: 'last_event_at',
       dataType: ['date'],
-      description: 'Timestamp of the last event in the conversation',
-      indexInverted: false
+      description: 'Timestamp of the last event in the conversation'
     },
     {
       name: 'last_event_id',
       dataType: ['string'],
-      description: 'ID of the last event in the conversation',
-      indexInverted: false
+      description: 'ID of the last event in the conversation'
     },
     {
       name: 'last_event_type',
       dataType: ['string'],
       description: 'Type of the last event (message:incoming, ai:response)',
-      indexInverted: true
+      indexFilterable: true
     },
     {
       name: 'last_event_content',
       dataType: ['text'],
-      description: 'Content of the last event (formatted message array as JSON string, e.g., [{"type":"text","text":"Hello"}])',
-      indexInverted: false
+      description: 'Content of the last event (formatted message array as JSON string, e.g., [{"type":"text","text":"Hello"}])'
     },
     {
       name: 'last_sender_type',
       dataType: ['string'],
       description: 'Type of the last sender (user, ai:agent)',
-      indexInverted: true
+      indexFilterable: true
     },
     {
       name: 'last_sender_id',
       dataType: ['string'],
-      description: 'ID of the last sender',
-      indexInverted: false
+      description: 'ID of the last sender'
     },
     {
       name: 'last_sender_display_name',
       dataType: ['string'],
-      description: 'Display name of the last sender',
-      indexInverted: false
+      description: 'Display name of the last sender'
     },
     {
       name: 'status',
       dataType: ['string'],
       description: 'Conversation status: open or closed',
-      indexInverted: true
+      indexFilterable: true
     },
     {
       name: 'metadata',
       dataType: ['text'],
-      description: 'Additional metadata about the conversation (stored as JSON string for flexibility)',
+      description: 'Additional metadata about the conversation (stored as JSON string for flexibility)'
       // Note: Using 'text' type instead of 'object' because:
       // 1. Weaviate 'object' type requires nested properties to be defined upfront
       // 2. Our metadata is completely flexible/arbitrary JSON structure
       // 3. 'text' type allows storing any JSON structure as a string
-      indexInverted: false
     }
   ]
 };

@@ -16,8 +16,8 @@ RUN addgroup -g 1001 -S nodejs && \
 
 # Set environment variables
 ENV NODE_ENV=production
-# Note: Railway sets PORT automatically - don't override PUBSUB_PORT here
-# PUBSUB_PORT is only used if PORT is not set
+# Note: Railway sets PORT automatically - service will use PORT first, then PUBSUB_PORT, then 3005
+# PORT is prioritized for Railway compatibility
 
 # Set working directory
 WORKDIR /usr/src/app
@@ -41,8 +41,8 @@ RUN npm install --only=production && \
 WORKDIR /usr/src/app
 
 # Create startup script
+# Note: Removed 'set -e' to allow server to start even if there are non-critical errors
 RUN echo '#!/bin/sh' > /usr/src/app/start.sh && \
-    echo 'set -e' >> /usr/src/app/start.sh && \
     echo 'cd /usr/src/app/services/pubsub' >> /usr/src/app/start.sh && \
     echo 'exec dumb-init node index.js' >> /usr/src/app/start.sh && \
     chmod +x /usr/src/app/start.sh
@@ -62,15 +62,17 @@ RUN chown -R root:root /usr/src/app
 # Keep running as root for Railway/managed platform compatibility
 # USER pubsub  # Commented out for Railway compatibility
 
-# Expose the service port
+# Expose the service port (Railway will set PORT env var, but we expose 3005 as default)
 EXPOSE 3005
 
 # Health check
 # Use curl (more reliable) with fallback to wget
 # start-period allows time for async initialization
 # Increased start-period to 120s to allow for npm install and service startup
+# Note: Railway sets PORT automatically, but service uses PUBSUB_PORT || PORT || 3005
+# Health check uses PORT if set, otherwise defaults to 3005
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
-    CMD curl -f http://localhost:3005/health 2>/dev/null || wget --quiet --spider http://localhost:3005/health || exit 1
+    CMD sh -c 'port=${PORT:-3005}; curl -f http://127.0.0.1:$port/health 2>/dev/null || wget --quiet --spider http://127.0.0.1:$port/health || exit 1'
 
 # Use the startup script
 CMD ["/usr/src/app/start.sh"]

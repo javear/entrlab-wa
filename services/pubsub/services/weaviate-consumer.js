@@ -364,6 +364,12 @@ class WeaviateConsumer {
       throw new Error('Event data missing eventType');
     }
 
+    // Skip message:outgoing events - these are internal routing events, not chat events
+    if (eventData.eventType === 'message:outgoing') {
+      console.log(`⏭️  [Weaviate Consumer] Skipping message:outgoing event (entryId: ${entryId}) - internal routing event`);
+      return;
+    }
+
     if (!eventData.agentCode) {
       console.log(`⚠️  [Weaviate Consumer] Event missing agentCode, skipping (entryId: ${entryId}, eventType: ${eventData.eventType})`);
       return; // Skip events without agentCode (no tenant)
@@ -506,6 +512,23 @@ class WeaviateConsumer {
       roleLabel = 'assistant';
       // For AI agents, use agentCode as display name if not available
       displayName = eventData.agentCode || senderId;
+    } else if (eventType === 'agent:response') {
+      senderType = 'agent'; // Human agent or API-initiated
+      
+      // Extract sender information from metadata (from JWT) if available
+      if (eventData.metadata && eventData.metadata.sender) {
+        const sender = eventData.metadata.sender;
+        senderId = sender.senderId || sender.id || eventData.agentCode || eventData.metadata?.postedBy || 'unknown';
+        displayName = sender.senderDisplayName || sender.displayName || sender.name || eventData.metadata?.postedBy || eventData.agentCode || senderId;
+        roleLabel = sender.senderRoleLabel || sender.roleLabel || 'agent';
+        avatarUrl = sender.senderAvatarUrl || sender.avatarUrl || null;
+      } else {
+        // Fallback to default values if sender info not provided
+        senderId = eventData.agentCode || eventData.metadata?.postedBy || 'unknown';
+        displayName = eventData.metadata?.postedBy || eventData.agentCode || senderId;
+        roleLabel = 'agent';
+        avatarUrl = null;
+      }
     } else if (eventType === 'message:incoming') {
       senderType = 'user';
       senderId = eventData.userIdentifier || 'unknown';
@@ -549,7 +572,7 @@ class WeaviateConsumer {
     
     // Include agent if it's an AI response (agent is a participant when it responds)
     // Note: For message:incoming events, we don't include the agent yet (only when they respond)
-    if (eventData.eventType === 'ai:response' && eventData.agentCode) {
+    if ((eventData.eventType === 'ai:response' || eventData.eventType === 'agent:response') && eventData.agentCode) {
       participants.add(String(eventData.agentCode));
     }
     
@@ -564,13 +587,13 @@ class WeaviateConsumer {
    * Extract and format message content based on event type
    * 
    * @param {Object} eventData - Event data
-   * @param {string} eventType - Event type (message:incoming or ai:response)
+   * @param {string} eventType - Event type (message:incoming, ai:response, or agent:response)
    * @returns {string} JSON stringified array of formatted messages
    */
   extractFormattedContent(eventData, eventType) {
     try {
-      if (eventType === 'ai:response') {
-        // Extract formatted messages from AI response
+      if (eventType === 'ai:response' || eventType === 'agent:response') {
+        // Extract formatted messages from AI/agent response
         // Try response.messages first (already formatted)
         if (eventData.response && eventData.response.messages && Array.isArray(eventData.response.messages)) {
           return JSON.stringify(eventData.response.messages);
@@ -584,7 +607,23 @@ class WeaviateConsumer {
           return JSON.stringify(eventData.response.formatted.whatsapp);
         }
         
+        // For agent:response, also try content field directly (fallback for API messages)
+        if (eventType === 'agent:response' && eventData.content) {
+          // If content is a string, format it as a text message
+          if (typeof eventData.content === 'string') {
+            return JSON.stringify([{
+              type: eventData.messageType || 'text',
+              text: eventData.content
+            }]);
+          }
+          // If content is already an array, stringify it
+          if (Array.isArray(eventData.content)) {
+            return JSON.stringify(eventData.content);
+          }
+        }
+        
         // Fallback: empty array
+        console.warn(`⚠️  [Weaviate Consumer] No content found for ${eventType} event (entryId: ${eventData.messageId || 'unknown'})`);
         return JSON.stringify([]);
       } else if (eventType === 'message:incoming') {
         // Format incoming message as text type
