@@ -320,10 +320,20 @@ class StreamService {
 
   /**
    * Read from stream using consumer group
+   * 
+   * Best Practice Implementation:
+   * 1. Read pending messages first (id: '0') - messages that were read but not ACKed (retries)
+   * 2. If no pending, read new messages (id: '>') - messages published after group's lastDeliveredId
+   * 
+   * This ensures:
+   * - No message loss: Pending messages are retried before processing new ones
+   * - No duplicate processing: '>' only reads messages after the group's position
+   * - Graceful failure handling: Failed messages remain pending and can be retried
+   * 
    * @param {string} groupName - Consumer group name
    * @param {string} consumerName - Consumer name
    * @param {Object} options - Read options
-   * @returns {Promise<Array>} - Stream entries
+   * @returns {Promise<Array>} - Stream entries with isPending flag
    */
   async readGroup(groupName, consumerName, options = {}) {
     if (!this.isConnected || !this.client) {
@@ -333,14 +343,15 @@ class StreamService {
     try {
       const {
         count = 10,
-        block = 5000 // Default 5 seconds blocking
+        block = 5000 // Default 5 seconds blocking for new messages
       } = options;
 
-      // First check for pending messages (retries) - these should be prioritized
-      // '0' reads pending messages for this consumer (messages read but not ACKed)
       let entries = null;
       let isPending = false;
-      
+
+      // STEP 1: Read pending messages first (id: '0')
+      // These are messages that were read but not ACKed - they need to be retried
+      // This ensures no message loss if a consumer crashed or failed to ACK
       try {
         entries = await this.client.xReadGroup(
           groupName,
@@ -351,14 +362,15 @@ class StreamService {
             BLOCK: 0 // Non-blocking - don't wait for pending messages
           }
         );
-        isPending = true; // Messages from '0' are pending/retries
-        // Check if we actually got any messages (not just empty streams)
+        
+        // Check if we actually got any messages
         if (entries && entries.length > 0) {
           const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
           if (messageCount > 0) {
-            console.log(`🔄 [Stream Service] Found ${messageCount} pending message(s) for ${groupName}`);
+            isPending = true; // Mark as pending/retry messages
+            console.log(`🔄 [Stream Service] Found ${messageCount} pending message(s) for ${groupName} (retries)`);
           } else {
-            entries = null; // No actual messages, treat as empty
+            entries = null; // No actual messages
           }
         } else {
           entries = null; // No entries at all
@@ -366,145 +378,51 @@ class StreamService {
       } catch (err) {
         // xReadGroup with id '0' returns empty/null when no pending messages
         // This is expected, not an error - just continue to read new messages
-        if (err.message && !err.message.includes('timeout')) {
-          // Only log if it's an actual error (not a timeout/empty result)
+        if (err.message && !err.message.includes('timeout') && !err.message.includes('NOGROUP')) {
+          // Only log actual errors (not timeouts or missing groups)
           console.error(`❌ [Stream Service] Error checking pending messages:`, err.message);
         }
         entries = null;
       }
 
-      // If no pending messages, check for new messages
+      // STEP 2: If no pending messages, read new messages (id: '>')
+      // '>' reads messages published AFTER the group's lastDeliveredId
+      // This ensures we only process messages we haven't seen yet
       if (!entries || entries.length === 0) {
-        // Try to read new messages with '>'
-        // Note: '>' only reads messages published AFTER the consumer group was created
-        // However, if the group's lastDeliveredId is '0-0', we should try reading from there first
         try {
-          // Check group info to see if we need to read from beginning
-          const groupInfo = await this.getConsumerGroupInfo(groupName);
-          let readId = '>'; // Default: read new messages only
+          entries = await this.client.xReadGroup(
+            groupName,
+            consumerName,
+            [{ key: this.config.streamName, id: '>' }],
+            {
+              COUNT: count,
+              BLOCK: block // Block for new messages (use provided block time)
+            }
+          );
           
-          // Check if we need to catch up on existing messages
-          if (groupInfo) {
-            const lastDeliveredId = String(groupInfo.lastDeliveredId || '0-0');
-            const pendingCount = parseInt(groupInfo.pending || 0);
-            const isAtStart = lastDeliveredId === '0-0' || lastDeliveredId === '0' || lastDeliveredId.startsWith('0-0');
-            
-            if (isAtStart && pendingCount === 0) {
-              // Group is at the beginning with no pending - try reading from start to catch up
-              // When lastDeliveredId is 0-0, the group hasn't read anything yet
-              // We need to use a special approach to read existing messages
-              
-              // Group is at the beginning - try to catch up on existing messages
-              try {
-                const streamLength = await this.client.xLen(this.config.streamName);
-                
-                if (streamLength > 0) {
-                  // Try reading with '0' - this should claim all undelivered messages for this consumer
-                  entries = await this.client.xReadGroup(
-                    groupName,
-                    consumerName,
-                    [{ key: this.config.streamName, id: '0' }],
-                    {
-                      COUNT: count,
-                      BLOCK: 0 // Non-blocking
-                    }
-                  );
-                  
-                  if (entries && entries.length > 0) {
-                    isPending = false; // These are new to this consumer, not retries
-                    const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
-                    if (messageCount > 0) {
-                      console.log(`✅ [Stream Service] Caught up: Read ${messageCount} message(s) from ${this.config.streamName} (stream had ${streamLength} messages)`);
-                    } else {
-                      entries = null;
-                    }
-                  }
-                  
-                  // If '0' didn't work, try XRANGE to get the first message
-                  if (!entries || entries.length === 0) {
-                    const firstMessages = await this.client.xRange(this.config.streamName, '-', '+', { COUNT: 1 });
-                    if (firstMessages && firstMessages.length > 0) {
-                      const firstId = firstMessages[0].id;
-                      
-                      // Now try reading from this first ID
-                      entries = await this.client.xReadGroup(
-                        groupName,
-                        consumerName,
-                        [{ key: this.config.streamName, id: firstId }],
-                        {
-                          COUNT: count,
-                          BLOCK: 0
-                        }
-                      );
-                      
-                      if (entries && entries.length > 0) {
-                        isPending = false;
-                        const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
-                        if (messageCount > 0) {
-                          console.log(`✅ [Stream Service] Caught up: Read ${messageCount} message(s) from first ID ${firstId} (stream had ${streamLength} messages)`);
-                        } else {
-                          entries = null;
-                        }
-                      }
-                    }
-                  }
-                }
-              } catch (catchUpError) {
-                if (!catchUpError.message || !catchUpError.message.includes('timeout')) {
-                  console.error(`❌ [Stream Service] Catch-up error: ${catchUpError.message}`);
-                }
-              }
+          isPending = false; // Messages from '>' are new, not retries
+          
+          // Log successful reads
+          if (entries && entries.length > 0) {
+            const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
+            if (messageCount > 0) {
+              console.log(`✅ [Stream Service] Read ${messageCount} new message(s) for ${groupName} from ${this.config.streamName}`);
             }
           }
-          
-          // If still no entries, read new messages with '>'
-          if (!entries || entries.length === 0) {
-            try {
-              // Use '>' to read new messages that haven't been delivered to any consumer in this group
-              // This will read messages published after the group's lastDeliveredId
-              entries = await this.client.xReadGroup(
-                groupName,
-                consumerName,
-                [{ key: this.config.streamName, id: '>' }], // Always use '>' for new messages
-                {
-                  COUNT: count,
-                  BLOCK: block // Block for new messages (use provided block time)
-                }
-              );
-              
-              isPending = false; // Messages from '>' are new
-              
-              // Log successful reads with consumer group info for debugging
-              if (entries && entries.length > 0) {
-                const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
-                if (messageCount > 0) {
-                  // Log with consumer group name to identify which consumer is reading
-                  console.log(`✅ [Stream Service] Read ${messageCount} new message(s) for ${groupName} from ${this.config.streamName}`);
-                }
-              }
-            } catch (readError) {
-              // Handle timeout gracefully - it's expected when no new messages
-              if (readError.message && readError.message.includes('timeout')) {
-                // This is normal - no new messages available
-                entries = null;
-              } else {
-                // Log actual errors
-                console.error(`❌ [Stream Service] Error reading with '>':`, readError.message || readError);
-                entries = null;
-              }
-            }
+        } catch (readError) {
+          // Handle timeout gracefully - it's expected when no new messages
+          if (readError.message && readError.message.includes('timeout')) {
+            // This is normal - no new messages available
+            entries = null;
+          } else {
+            // Log actual errors
+            console.error(`❌ [Stream Service] Error reading new messages:`, readError.message || readError);
+            entries = null;
           }
-        } catch (error) {
-          // If error occurs, log it but don't throw - return empty array
-          if (error.message && !error.message.includes('timeout')) {
-            console.error(`❌ [Stream Service] Error reading new messages:`, error.message);
-          }
-              entries = null; // Will return empty array
         }
-      } else if (entries && entries.length > 0) {
-        // Already logged above when we found pending messages
       }
 
+      // Return empty array if no messages
       if (!entries || entries.length === 0) {
         return [];
       }

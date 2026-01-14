@@ -12,6 +12,8 @@
     "restart": "./scripts/restart.sh",
     "watch": "tsc --watch",
     "generate-token": "node scripts/generate-token.js",
+    "reset-outgoing-consumer": "node scripts/reset-outgoing-consumer-group.js",
+    "reset-weaviate-consumer-position": "node scripts/reset-weaviate-consumer-position.js",
     "waofficial-dev": "node services/whatsapp-official/index.js",
     "pubsub-dev": "node services/pubsub/index.js"
   },

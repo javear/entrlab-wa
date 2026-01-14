@@ -13,8 +13,10 @@ class WebhookManager {
     this.redisClient = null; // Separate Redis client for webhook storage
     this.isConnected = false;
     this.isConsuming = false;
-    this.consumerGroupName = 'webhook-delivery';
-    this.consumerName = `webhook-consumer-${process.pid}`;
+    // Consumer group configuration - configurable via env var for prod/dev separation
+    // IMPORTANT: Use different consumer group names for prod and dev to avoid competition
+    this.consumerGroupName = process.env.WEBHOOK_CONSUMER_GROUP || 'webhook-delivery';
+    this.consumerName = process.env.WEBHOOK_CONSUMER_NAME || `webhook-consumer-${process.pid}`;
     
     // Use DB 1 for webhooks (DB 0 is for streams)
     // Can be overridden with VALKEY_WEBHOOK_DB env var
@@ -142,7 +144,13 @@ class WebhookManager {
       } else {
         // Create consumer group if it doesn't exist
         try {
-          await this.streamService.createConsumerGroup(this.consumerGroupName, '0');
+          // Best Practice: Use '$' to start from new messages only
+          // This ensures:
+          // - No processing of historical messages (unless explicitly needed)
+          // - Consumer group tracks its position via lastDeliveredId
+          // - '>' will read messages after the group's position
+          const startId = process.env.WEBHOOK_CONSUMER_START_ID || '$';
+          await this.streamService.createConsumerGroup(this.consumerGroupName, startId);
         } catch (error) {
           // Consumer group might already exist, which is fine
           if (!error.message || !error.message.includes('BUSYGROUP')) {

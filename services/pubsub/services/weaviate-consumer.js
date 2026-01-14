@@ -29,6 +29,8 @@ class WeaviateConsumer {
     this.isRunning = false;
     this.consumeLoopPromise = null;
     this.lastPollLog = null; // For periodic polling logs
+    this.processedEntryIds = new Set(); // Track processed entry IDs to detect duplicates
+    this.duplicateCount = 0; // Count of duplicate entry IDs
     
     // Consumer group configuration
     this.consumerGroupName = process.env.WEAVIATE_CONSUMER_GROUP || 'weaviate-consumer';
@@ -195,25 +197,28 @@ class WeaviateConsumer {
         throw new Error('Stream service not connected');
       }
 
-      // Try to create consumer group (will fail if it already exists, which is fine)
-      // Use '0' to read all messages from beginning (for initial setup)
-      // Or '$' to start from new messages only (for production)
+      // Best Practice: Use '$' to start from new messages only
+      // This ensures:
+      // - No processing of historical messages (unless explicitly needed)
+      // - Consumer group tracks its position via lastDeliveredId
+      // - '>' will read messages after the group's position
+      // 
       // Note: Once created, startId can't be changed - only affects new consumer groups
-      const startId = process.env.WEAVIATE_CONSUMER_START_ID || '0';
+      // If you need to process historical messages, set WEAVIATE_CONSUMER_START_ID='0' before first run
+      const startId = process.env.WEAVIATE_CONSUMER_START_ID || '$';
       let groupCreated = false;
+      let groupExists = false;
       try {
         await this.streamService.createConsumerGroup(this.consumerGroupName, startId);
-        console.log(`✅ Created consumer group: ${this.consumerGroupName} (startId: ${startId})`);
+        console.log(`✅ Created consumer group: ${this.consumerGroupName} (startId: ${startId === '$' ? 'new messages only' : 'from beginning'})`);
         groupCreated = true;
       } catch (error) {
         if (error.message && error.message.includes('BUSYGROUP')) {
           console.log(`ℹ️  Consumer group ${this.consumerGroupName} already exists`);
-          // Check if we need to recreate it with different startId
-          // If startId was '$' but we want '0', we need to delete and recreate
-          if (startId === '0') {
-            console.log(`ℹ️  Consumer group exists - will read new messages with '>' (messages after group creation)`);
-            console.log(`⚠️  Note: Messages published before consumer group creation won't be read`);
-          }
+          groupExists = true;
+          // If consumer group already exists, it will use its current position
+          // readGroup will handle: pending messages first, then new messages with '>'
+          console.log(`ℹ️  Will read from group's current position (pending first, then new messages)`);
         } else {
           throw error;
         }
@@ -233,9 +238,17 @@ class WeaviateConsumer {
           console.log(`   - Consumers: ${groupInfo.consumers}`);
         }
         
-        if (groupCreated && streamLength > 0) {
+        if (groupCreated && streamLength > 0 && startId === '$') {
+          console.log(`ℹ️  Consumer group was just created with ${streamLength} existing message(s) in stream`);
+          console.log(`   Will only read NEW messages going forward (startId: '$')`);
+          console.log(`   Existing messages will NOT be read (use WEAVIATE_CONSUMER_START_ID='0' if you need to process history)`);
+        } else if (groupCreated && streamLength > 0 && startId === '0') {
           console.log(`⚠️  Consumer group was just created with ${streamLength} existing message(s)`);
-          console.log(`   Will attempt to read from beginning on first read`);
+          console.log(`   Will attempt to read ALL messages from beginning (startId: '0')`);
+        } else if (groupExists && streamLength > 0) {
+          console.log(`ℹ️  Consumer group exists - will read from its current position`);
+          console.log(`   Stream has ${streamLength} total message(s)`);
+          console.log(`   Will read: pending messages first (retries), then new messages (after lastDeliveredId)`);
         }
       } catch (diagError) {
         console.warn(`⚠️  Could not get stream diagnostics:`, diagError.message);
@@ -321,18 +334,64 @@ class WeaviateConsumer {
               // Log minimal info about processing (reduced verbosity)
               const eventType = eventData?.eventType || 'unknown';
               const agentCode = eventData?.agentCode || 'none';
+              
+              // Check if we've seen this entry ID before (detect if same message is being read repeatedly)
+              if (this.processedEntryIds.has(entry.id)) {
+                this.duplicateCount++;
+                console.error(`⚠️  [Weaviate] DUPLICATE ENTRY ID DETECTED: ${entry.id} (seen ${this.duplicateCount} times) - Consumer group position may not be advancing!`);
+                // Keep the entry ID in the set to track how many times it's seen
+              } else {
+                this.processedEntryIds.add(entry.id);
+                // Limit set size to prevent memory issues (keep last 10000)
+                if (this.processedEntryIds.size > 10000) {
+                  const firstId = this.processedEntryIds.values().next().value;
+                  this.processedEntryIds.delete(firstId);
+                }
+              }
+              
               console.log(`📥 [Weaviate] Processing ${eventType} (entry: ${entry.id}, agentCode: ${agentCode})`);
               
               // Process the stream message
-              await this.processStreamMessage(entry.id, eventData);
+              // processStreamMessage returns true if message was processed or skipped (both should be ACKed)
+              const wasProcessed = await this.processStreamMessage(entry.id, eventData);
               
-              // ACK only after successful ChatEvent insert
+              // Always ACK the message to advance the consumer group position
+              // This prevents the same message from being read repeatedly
+              // Both inserted and skipped (already exists) messages should be ACKed
               await this.streamService.acknowledge(
                 this.consumerGroupName,
                 entry.id
               );
               
-              console.log(`✅ [Weaviate] Processed ${eventType} (entry: ${entry.id})`);
+              // Log based on whether it was a new insert or a duplicate
+              // Track entry ID to detect if we're reading the same message repeatedly
+              if (wasProcessed === false) {
+                // This indicates the event already existed - still ACKed to prevent reprocessing
+                // Reduce verbosity - only log occasionally for duplicates to avoid spam
+                // This is normal when dev consumer reads messages already processed by prod
+                if (Math.random() < 0.05) { // Log only 5% of skipped duplicates
+                  console.log(`✅ [Weaviate] Skipped duplicate ${eventType} (entry: ${entry.id}) - already exists, ACKed`);
+                }
+              } else {
+                console.log(`✅ [Weaviate] Processed ${eventType} (entry: ${entry.id}) - ACKed`);
+              }
+              
+              // Periodically log consumer group position and stats to verify it's advancing
+              if (Math.random() < 0.01) { // Log 1% of the time
+                try {
+                  const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+                  if (groupInfo) {
+                    console.log(`📍 [Weaviate] Consumer group position: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}, processed=${this.processedEntryIds.size}, duplicates=${this.duplicateCount}`);
+                    
+                    // Warn if we're seeing duplicates
+                    if (this.duplicateCount > 0) {
+                      console.warn(`⚠️  [Weaviate] WARNING: ${this.duplicateCount} duplicate entry IDs detected - consumer group may not be advancing correctly!`);
+                    }
+                  }
+                } catch (e) {
+                  // Ignore errors
+                }
+              }
             } catch (error) {
               console.error(`❌ [Weaviate Consumer] Error processing message ${entry.id}:`, error);
               // Don't acknowledge on error - will retry
@@ -372,7 +431,7 @@ class WeaviateConsumer {
 
     if (!eventData.agentCode) {
       console.log(`⚠️  [Weaviate Consumer] Event missing agentCode, skipping (entryId: ${entryId}, eventType: ${eventData.eventType})`);
-      return; // Skip events without agentCode (no tenant)
+      return true; // Return true to ACK - we intentionally skip events without agentCode
     }
 
     // Extract required fields (assume payload already contains all required fields)
@@ -465,7 +524,8 @@ class WeaviateConsumer {
     }, conversationUuid);
 
     // Insert ChatEvent (idempotent by event_id)
-    await this.insertChatEvent(tenant, chatEvent, embedding, eventUuid);
+    // Returns true if inserted, false if already exists (skipped)
+    const wasInserted = await this.insertChatEvent(tenant, chatEvent, embedding, eventUuid);
 
     // Update Conversation state (also update client_id and platform if they're missing)
     // Extract client_id and platform from event data (clientId is already declared above)
@@ -488,6 +548,10 @@ class WeaviateConsumer {
       last_sender_display_name: senderInfo.displayName,
       participant_ids: participantIds
     });
+
+    // Return true if inserted, false if skipped (already exists)
+    // Both cases should be ACKed to prevent reprocessing
+    return wasInserted !== false;
   }
 
   /**
@@ -811,8 +875,12 @@ class WeaviateConsumer {
         .do();
 
       if (existingResult.data && existingResult.data.Get && existingResult.data.Get.ChatEvent && existingResult.data.Get.ChatEvent.length > 0) {
-        console.log(`ℹ️  [Weaviate Consumer] ChatEvent ${chatEvent.event_id} already exists, skipping insert`);
-        return; // Event already exists, skip insert (idempotent)
+        // Reduce log verbosity for duplicates - only log occasionally to avoid spam
+        // This is normal when dev consumer reads old messages already processed by prod
+        if (Math.random() < 0.1) { // Log only 10% of duplicates
+          console.log(`ℹ️  [Weaviate Consumer] ChatEvent ${chatEvent.event_id} already exists, skipping insert (this is normal when catching up on existing messages)`);
+        }
+        return false; // Event already exists, skip insert (idempotent) - return false to indicate skipped
       }
 
       // Insert the event - ensure all string fields are strings
@@ -850,6 +918,7 @@ class WeaviateConsumer {
       await builder.do();
 
       // Removed verbose success log - only log errors
+      return true; // Successfully inserted
     } catch (error) {
       console.error('❌ Error inserting ChatEvent:', error);
       throw error;

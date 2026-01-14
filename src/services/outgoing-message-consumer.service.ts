@@ -14,8 +14,9 @@ export class OutgoingMessageConsumerService {
   private consumeLoopPromise: Promise<void> | null = null;
   
   // Consumer group configuration
-  private consumerGroupName = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer';
-  private consumerName = process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `outgoing-message-consumer-${process.pid}`;
+  // Use separate consumer group for WPP to avoid conflicts with WA-Official consumer
+  private consumerGroupName = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wpp';
+  private consumerName = process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `outgoing-message-consumer-wpp-${process.pid}`;
 
   constructor(whatsappService: WPPConnectWhatsAppService) {
     this.whatsappService = whatsappService;
@@ -38,11 +39,23 @@ export class OutgoingMessageConsumerService {
       // Ensure consumer group exists
       await this.ensureConsumerGroup();
 
+      // Log consumer group status for debugging
+      try {
+        const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+        if (groupInfo) {
+          console.log(`ℹ️  [Outgoing Message Consumer] Consumer group status: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}`);
+          console.log(`   Will read: pending messages first (retries), then new messages (after lastDeliveredId)`);
+        }
+      } catch (error) {
+        console.warn(`⚠️  [Outgoing Message Consumer] Could not check consumer group info:`, error);
+      }
+
       // Start consumption loop
       this.isRunning = true;
       this.consumeLoopPromise = this.consumeLoop();
 
-      console.log(`✅ Outgoing message consumer started (group: ${this.consumerGroupName}, consumer: ${this.consumerName})`);
+      const streamName = this.streamService.config?.streamName || 'unknown';
+      console.log(`✅ Outgoing message consumer started (group: ${this.consumerGroupName}, consumer: ${this.consumerName}, stream: ${streamName})`);
     } catch (error) {
       console.error('❌ Error starting outgoing message consumer:', error);
       this.isRunning = false;
@@ -73,14 +86,32 @@ export class OutgoingMessageConsumerService {
         throw new Error('Stream service not connected');
       }
 
-      // Try to create consumer group (will fail if it already exists, which is fine)
+      // Best Practice: Use '$' to start from new messages only
+      // This ensures:
+      // - No processing of historical messages (unless explicitly needed)
+      // - Consumer group tracks its position via lastDeliveredId
+      // - '>' will read messages after the group's position
+      // 
+      // Note: Once created, startId can't be changed - only affects new consumer groups
+      // If you need to process historical messages, set OUTGOING_MESSAGE_CONSUMER_START_ID='0' before first run
       const startId = process.env.OUTGOING_MESSAGE_CONSUMER_START_ID || '$';
       try {
         await this.streamService.createConsumerGroup(this.consumerGroupName, startId);
-        console.log(`✅ Created consumer group: ${this.consumerGroupName} (startId: ${startId})`);
+        console.log(`✅ Created consumer group: ${this.consumerGroupName} (startId: ${startId === '$' ? 'new messages only' : 'from beginning'})`);
       } catch (error: any) {
         if (error.message && error.message.includes('BUSYGROUP')) {
           console.log(`ℹ️  Consumer group ${this.consumerGroupName} already exists`);
+          // If consumer group already exists, it will use its current position
+          // readGroup will handle: pending messages first, then new messages with '>'
+          try {
+            const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+            if (groupInfo) {
+              console.log(`ℹ️  Consumer group info: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}`);
+              console.log(`   Will read: pending messages first (retries), then new messages (after lastDeliveredId)`);
+            }
+          } catch (infoError) {
+            // Ignore errors getting group info
+          }
         } else {
           throw error;
         }
@@ -110,6 +141,19 @@ export class OutgoingMessageConsumerService {
         // Read messages from stream
         let entries;
         try {
+          // Debug: Check consumer group status occasionally
+          if (Math.random() < 0.05) { // 5% chance to log group status
+            try {
+              const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+              if (groupInfo) {
+                const streamName = this.streamService.config?.streamName || 'unknown';
+                console.log(`🔍 [Outgoing Message Consumer] Group status: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}, stream=${streamName}`);
+              }
+            } catch (infoError) {
+              // Ignore errors getting group info
+            }
+          }
+          
           entries = await this.streamService.readGroup(
             this.consumerGroupName,
             this.consumerName,
@@ -125,19 +169,47 @@ export class OutgoingMessageConsumerService {
           entries = [];
         }
 
+        // Debug: Log when we're polling and what we received
+        const streamName = this.streamService.config?.streamName || 'unknown';
+        if (entries && entries.length > 0) {
+          console.log(`📥 [Outgoing Message Consumer] Received ${entries.length} entry/entries from stream: ${streamName}`);
+        } else {
+          // Log polling status occasionally (every ~10 polls to avoid spam)
+          if (Math.random() < 0.1) {
+            console.log(`🔍 [Outgoing Message Consumer] Polling stream: ${streamName} (group: ${this.consumerGroupName}, consumer: ${this.consumerName}) - no messages`);
+          }
+        }
+
         if (entries && entries.length > 0) {
           for (const entry of entries) {
             try {
               const eventData = entry.data; // Already parsed by readGroup
               
+              // Debug: Log all event types we receive
+              console.log(`📥 [Outgoing Message Consumer] Received event: ${eventData.eventType} (entry: ${entry.id})`);
+              
               // Only process "message:outgoing" events
               if (eventData.eventType !== 'message:outgoing') {
                 // ACK non-outgoing messages to skip them
+                console.log(`⏭️  [Outgoing Message Consumer] Skipping non-outgoing event: ${eventData.eventType}`);
+                await this.streamService.acknowledge(this.consumerGroupName, entry.id);
+                continue;
+              }
+
+              // Check if this message is for WPP platform (this consumer only handles WPP)
+              const platform = eventData.platform || 'wpp';
+              if (platform !== 'wpp') {
+                // This message is for WA-Official, not WPP
+                // Don't ACK it - let the WA-Official consumer handle it
+                // But we need to ACK it to prevent it from blocking the stream
+                // The WA-Official consumer should be reading from the same group
+                console.log(`⏭️  [Outgoing Message Consumer] Skipping message for platform: ${platform} (this consumer handles 'wpp' only)`);
                 await this.streamService.acknowledge(this.consumerGroupName, entry.id);
                 continue;
               }
 
               console.log(`📤 [Outgoing Message Consumer] Processing outgoing message (entry: ${entry.id})`);
+              console.log(`📤 [Outgoing Message Consumer] Event data:`, JSON.stringify(eventData, null, 2));
 
               // Process the outgoing message
               await this.processOutgoingMessage(eventData);

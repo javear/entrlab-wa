@@ -21,8 +21,24 @@ class PubSubApp {
     
     // Register health endpoint FIRST, before any middleware
     // This ensures Railway health checks work immediately
+    // Health endpoint must work even if Redis/Weaviate are not connected
     this.app.get('/health', (req, res) => {
-      res.status(200).json({ status: 'ok', service: 'pubsub' });
+      // Always return 200 OK - health check just verifies server is running
+      // Don't check Redis/Weaviate connections here - that's handled in initialization
+      res.status(200).json({ 
+        status: 'ok', 
+        service: 'pubsub',
+        timestamp: new Date().toISOString()
+      });
+    });
+    
+    // Also register root endpoint for basic connectivity
+    this.app.get('/', (req, res) => {
+      res.status(200).json({ 
+        service: 'pubsub',
+        status: 'running',
+        health: '/health'
+      });
     });
   }
 

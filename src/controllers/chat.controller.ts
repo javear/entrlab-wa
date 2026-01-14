@@ -98,7 +98,7 @@ export class ChatController {
       res.json({
         success: true,
         conversations: result.conversations.map(conv => ({
-          conversationId: conv.conversation_id,
+          conversationId: conv._additional?.id || conv.conversation_id, // Use Weaviate _id as conversationId
           clientId: conv.client_id,
           platform: conv.platform,
           participantIds: conv.participant_ids || [],
@@ -188,7 +188,7 @@ export class ChatController {
       res.json({
         success: true,
         conversationId,
-        chats: result.chats.map(chat => ({
+        chats: result.chats.map((chat: any) => ({
           eventId: chat.event_id,
           eventType: chat.event_type,
           senderType: chat.sender_type,
@@ -246,12 +246,38 @@ export class ChatController {
         return;
       }
 
-      // Extract clientId and userIdentifier from conversationId
-      const [clientId, userIdentifier] = conversationId.split(':');
+      // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
+      const agentCode = (req as any).user?.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token. Please ensure your JWT token contains an agentCode field.'
+        });
+        return;
+      }
+
+      // Get conversation by Weaviate _id to extract clientId and userIdentifier
+      const conversation = await this.weaviateService.getConversationById(conversationId, agentCode);
+      
+      if (!conversation) {
+        res.status(404).json({
+          success: false,
+          error: `Conversation ${conversationId} not found`
+        });
+        return;
+      }
+
+      // Extract clientId and userIdentifier from conversation
+      const clientId = conversation.client_id;
+      const userIdentifier = conversation.participant_ids?.find((id: string) => 
+        id !== clientId && id !== agentCode && !id.includes(':')
+      ) || conversation.participant_ids?.[0] || null;
+
       if (!clientId || !userIdentifier) {
         res.status(400).json({
           success: false,
-          error: 'Invalid conversationId format. Expected "clientId:userIdentifier"'
+          error: 'Could not extract clientId and userIdentifier from conversation'
         });
         return;
       }
@@ -275,7 +301,8 @@ export class ChatController {
       const platform = clientInfo ? 'wpp' : (platformClient?.platform || 'wpp');
 
       // Get agent code (check for private assignment first)
-      let agentCode = clientInfo?.ai_agent_code || platformClient?.ai_agent_code || null;
+      // Use agentCode from JWT as base, but check for private assignment override
+      let finalAgentCode = agentCode; // Start with JWT agentCode
       
       // Check for private agent assignment
       if (platformClient) {
@@ -285,7 +312,7 @@ export class ChatController {
               (a: any) => a.userIdentifier === userIdentifier
             );
             if (privateAssignment) {
-              agentCode = privateAssignment.agentCode;
+              finalAgentCode = privateAssignment.agentCode;
             }
           }
         } catch (error) {
@@ -293,7 +320,7 @@ export class ChatController {
         }
       }
 
-      if (!agentCode) {
+      if (!finalAgentCode) {
         res.status(400).json({
           success: false,
           error: `No agent assigned to client ${clientId} for user ${userIdentifier}`
@@ -327,11 +354,13 @@ export class ChatController {
         
         // Publish as outgoing message event - consumers will send it
         // Platform is determined from client type (wpp or wa-official)
+        // Note: Weaviate _id (conversationId) is included in metadata for reference,
+        // but consumers use clientId and userIdentifier to send messages
         const entryId = await producer.publishOutgoingMessage({
           clientId,
           platform: platform, // 'wpp' or 'wa-official'
           userIdentifier,
-          agentCode,
+          agentCode: finalAgentCode, // Use finalAgentCode (may be overridden by private assignment)
           messageId,
           messageType: messageType || 'text',
           content,
@@ -339,6 +368,7 @@ export class ChatController {
             source: 'api',
             postedBy: jwtUser.agentCode || 'system',
             sender: senderInfo, // Include sender information from JWT
+            conversationId: conversationId, // Weaviate _id for reference/tracking
             timestamp: new Date().toISOString()
           }
         });

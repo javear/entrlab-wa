@@ -1,4 +1,5 @@
 import * as weaviateModule from 'weaviate-ts-client';
+import axios from 'axios';
 import { WPPConnectWhatsAppService } from './whatsapp.service';
 
 // weaviate-ts-client exports default as an object with a client function
@@ -146,7 +147,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status')
+          .withFields('conversation_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status _additional { id }')
           .withWhere({
             path: ['participant_ids'],
             operator: 'ContainsAny',
@@ -241,7 +242,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status')
+          .withFields('conversation_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status _additional { id }')
           .withLimit(limit + offset) // Get more to handle offset
           .withSort([{
             path: ['last_event_at'],
@@ -292,15 +293,153 @@ export class WeaviateService {
   }
 
   /**
+   * Get conversation by Weaviate _id
+   * @param weaviateId - Weaviate conversation _id
+   * @param agentCode - Agent code from JWT (tenant for Weaviate) - REQUIRED
+   * @returns Conversation object with clientId and userIdentifier
+   */
+  async getConversationById(
+    weaviateId: string,
+    agentCode: string
+  ): Promise<{
+    conversation_id: string;
+    client_id: string;
+    participant_ids: string[];
+    [key: string]: any;
+  } | null> {
+    if (!this.isInitialized || !this.client) {
+      throw new Error('Weaviate service not initialized');
+    }
+
+    if (!agentCode) {
+      throw new Error('agentCode is required');
+    }
+
+    try {
+      // Use GraphQL to get object by _id (more reliable with multi-tenancy)
+      // Weaviate GraphQL supports querying by _id using _additional { id } in where clause
+      // However, _id filtering might not be directly supported, so we'll query all and filter
+      // OR use the REST API with proper tenant header
+      
+      // Try GraphQL first - query by _id using _additional field
+      try {
+        const result = await this.client.graphql
+          .get()
+          .withClassName('Conversation')
+          .withTenant(agentCode)
+          .withFields('conversation_id client_id platform participant_ids created_at last_event_at status _additional { id }')
+          .withLimit(1000) // Get a reasonable number to search through
+          .do();
+        
+        if (result.data?.Get?.Conversation) {
+          // Find the conversation with matching _id
+          const conversation = result.data.Get.Conversation.find(
+            (conv: any) => conv._additional?.id === weaviateId
+          );
+          
+          if (conversation) {
+            return {
+              conversation_id: conversation.conversation_id,
+              client_id: conversation.client_id,
+              participant_ids: conversation.participant_ids || [],
+              platform: conversation.platform,
+              created_at: conversation.created_at,
+              last_event_at: conversation.last_event_at,
+              status: conversation.status
+            };
+          }
+        }
+        
+        // If not found in GraphQL, return null
+        return null;
+      } catch (graphqlError) {
+        console.warn('⚠️ GraphQL query failed, trying REST API:', graphqlError);
+        
+        // Fallback to REST API with tenant header
+        try {
+          const weaviateUrl = process.env.WEAVIATE_URL || 'http://localhost:8080';
+          
+          let scheme = 'http';
+          let host = '';
+          let port = 8080;
+
+          // Handle URL parsing (same logic as initializeClient)
+          if (weaviateUrl.startsWith('http://') || weaviateUrl.startsWith('https://')) {
+            const url = new URL(weaviateUrl);
+            scheme = url.protocol === 'https:' ? 'https' : 'http';
+            host = url.hostname;
+            port = url.port ? parseInt(url.port) : (scheme === 'https' ? 443 : 8080);
+          } else {
+            // Handle hostname without protocol
+            const parts = weaviateUrl.split(':');
+            host = parts[0] || '';
+            if (parts.length > 1 && parts[1]) {
+              port = parseInt(parts[1]) || 8080;
+            } else {
+              // Check if it's a cloud URL (Railway, Heroku, etc.)
+              if (weaviateUrl.includes('railway') || 
+                  weaviateUrl.includes('.up.') || 
+                  weaviateUrl.includes('.app') ||
+                  weaviateUrl.includes('heroku') ||
+                  weaviateUrl.includes('.cloud')) {
+                scheme = 'https';
+                port = 443;
+              }
+            }
+          }
+          
+          const baseUrl = `${scheme}://${host}${(scheme === 'http' && port !== 8080) || (scheme === 'https' && port !== 443) ? `:${port}` : ''}`;
+          const apiUrl = `${baseUrl}/v1/objects/${weaviateId}?class=Conversation`;
+          
+          const headers: any = {
+            'Content-Type': 'application/json',
+            'X-Weaviate-Tenant': agentCode // Use header for tenant instead of query param
+          };
+          
+          if (process.env.WEAVIATE_API_KEY) {
+            headers['Authorization'] = `Bearer ${process.env.WEAVIATE_API_KEY}`;
+          }
+          if (process.env.OPENAI_API_KEY) {
+            headers['X-OpenAI-Api-Key'] = process.env.OPENAI_API_KEY;
+          }
+          
+          const response = await axios.get(apiUrl, { headers });
+          const conversation = response.data;
+      
+          return {
+            conversation_id: conversation.properties?.conversation_id,
+            client_id: conversation.properties?.client_id,
+            participant_ids: conversation.properties?.participant_ids || [],
+            platform: conversation.properties?.platform,
+            created_at: conversation.properties?.created_at,
+            last_event_at: conversation.properties?.last_event_at,
+            status: conversation.properties?.status
+          };
+        } catch (axiosError: any) {
+          if (axiosError.response?.status === 404) {
+            return null;
+          }
+          // If REST API also fails, return null
+          console.warn('⚠️ REST API also failed:', axiosError);
+          return null;
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error getting conversation by id:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Get chat events for a conversation
-   * @param conversationId - Conversation ID (format: "clientId:userIdentifier")
+   * @param weaviateId - Weaviate conversation _id (not clientId:userIdentifier)
    * @param limit - Number of results to return
    * @param offset - Offset for pagination
    * @param agentCode - Agent code from JWT (tenant for Weaviate) - REQUIRED
    * @returns Array of chat events sorted by sequence (newest first)
    */
   async getConversationChats(
-    conversationId: string,
+    weaviateId: string,
     limit: number = 50,
     offset: number = 0,
     agentCode: string // Required - no fallback
@@ -318,16 +457,21 @@ export class WeaviateService {
     }
 
     try {
-      // Extract clientId and userIdentifier from conversationId
-      const [clientId, userIdentifier] = conversationId.split(':');
-      if (!clientId || !userIdentifier) {
-        throw new Error('Invalid conversationId format. Expected "clientId:userIdentifier"');
+      // First, get the conversation to find the conversation_id
+      const conversation = await this.getConversationById(weaviateId, agentCode);
+      
+      if (!conversation) {
+        return {
+          chats: [],
+          total: 0,
+          hasMore: false
+        };
       }
 
       // Use agentCode from JWT as tenant (required)
       const tenant = agentCode;
       
-      // Query chat events
+      // Query chat events using conversation_id from the conversation record
       const result = await this.client.graphql
         .get()
         .withClassName('ChatEvent')
@@ -336,7 +480,7 @@ export class WeaviateService {
         .withWhere({
           path: ['conversation_id'],
           operator: 'Equal',
-          valueString: conversationId
+          valueString: conversation.conversation_id
         })
         .withLimit(limit + offset) // Get more to handle offset
         .withSort([{

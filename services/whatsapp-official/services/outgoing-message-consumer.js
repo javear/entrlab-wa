@@ -13,7 +13,8 @@ class OutgoingMessageConsumer {
     this.consumeLoopPromise = null;
     
     // Consumer group configuration
-    this.consumerGroupName = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer';
+    // Use separate consumer group for WA-Official to avoid conflicts with WPP consumer
+    this.consumerGroupName = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wa-official';
     this.consumerName = process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `wa-official-outgoing-consumer-${process.pid}`;
   }
 
@@ -34,11 +35,23 @@ class OutgoingMessageConsumer {
       // Ensure consumer group exists
       await this.ensureConsumerGroup();
 
+      // Log consumer group status for debugging
+      try {
+        const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+        if (groupInfo) {
+          console.log(`ℹ️  [WA-Official Outgoing Consumer] Consumer group status: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}`);
+          console.log(`   Will read: pending messages first (retries), then new messages (after lastDeliveredId)`);
+        }
+      } catch (error) {
+        console.warn(`⚠️  [WA-Official Outgoing Consumer] Could not check consumer group info:`, error);
+      }
+
       // Start consumption loop
       this.isRunning = true;
       this.consumeLoopPromise = this.consumeLoop();
 
-      console.log(`✅ WA-Official outgoing message consumer started (group: ${this.consumerGroupName}, consumer: ${this.consumerName})`);
+      const streamName = this.streamService.config?.streamName || 'unknown';
+      console.log(`✅ WA-Official outgoing message consumer started (group: ${this.consumerGroupName}, consumer: ${this.consumerName}, stream: ${streamName})`);
     } catch (error) {
       console.error('❌ Error starting WA-Official outgoing message consumer:', error);
       this.isRunning = false;
@@ -69,13 +82,32 @@ class OutgoingMessageConsumer {
         throw new Error('Stream service not connected');
       }
 
+      // Best Practice: Use '$' to start from new messages only
+      // This ensures:
+      // - No processing of historical messages (unless explicitly needed)
+      // - Consumer group tracks its position via lastDeliveredId
+      // - '>' will read messages after the group's position
+      // 
+      // Note: Once created, startId can't be changed - only affects new consumer groups
+      // If you need to process historical messages, set OUTGOING_MESSAGE_CONSUMER_START_ID='0' before first run
       const startId = process.env.OUTGOING_MESSAGE_CONSUMER_START_ID || '$';
       try {
         await this.streamService.createConsumerGroup(this.consumerGroupName, startId);
-        console.log(`✅ Created consumer group: ${this.consumerGroupName} (startId: ${startId})`);
+        console.log(`✅ Created consumer group: ${this.consumerGroupName} (startId: ${startId === '$' ? 'new messages only' : 'from beginning'})`);
       } catch (error) {
         if (error.message && error.message.includes('BUSYGROUP')) {
           console.log(`ℹ️  Consumer group ${this.consumerGroupName} already exists`);
+          // If consumer group already exists, it will use its current position
+          // readGroup will handle: pending messages first, then new messages with '>'
+          try {
+            const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+            if (groupInfo) {
+              console.log(`ℹ️  Consumer group info: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}`);
+              console.log(`   Will read: pending messages first (retries), then new messages (after lastDeliveredId)`);
+            }
+          } catch (infoError) {
+            // Ignore errors getting group info
+          }
         } else {
           throw error;
         }
@@ -101,14 +133,27 @@ class OutgoingMessageConsumer {
           continue;
         }
 
+        // Debug: Check consumer group status occasionally
+        if (Math.random() < 0.05) { // 5% chance to log group status
+          try {
+            const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+            if (groupInfo) {
+              const streamName = this.streamService.config?.streamName || 'unknown';
+              console.log(`🔍 [WA-Official Outgoing Consumer] Group status: lastDeliveredId=${groupInfo.lastDeliveredId}, pending=${groupInfo.pending}, stream=${streamName}`);
+            }
+          } catch (infoError) {
+            // Ignore errors getting group info
+          }
+        }
+
         let entries;
         try {
           entries = await this.streamService.readGroup(
             this.consumerGroupName,
             this.consumerName,
             {
-              count: 10,
-              block: 1000
+              count: 10, // Read up to 10 messages at a time
+              block: 1000 // Block for 1 second if no messages
             }
           );
         } catch (readError) {
@@ -118,31 +163,54 @@ class OutgoingMessageConsumer {
           entries = [];
         }
 
+        // Debug: Log when we're polling and what we received
+        const streamName = this.streamService.config?.streamName || 'unknown';
+        if (entries && entries.length > 0) {
+          console.log(`📥 [WA-Official Outgoing Consumer] Received ${entries.length} entry/entries from stream: ${streamName}`);
+        } else {
+          // Log polling status occasionally (every ~10 polls to avoid spam)
+          if (Math.random() < 0.1) {
+            console.log(`🔍 [WA-Official Outgoing Consumer] Polling stream: ${streamName} (group: ${this.consumerGroupName}, consumer: ${this.consumerName}) - no messages`);
+          }
+        }
+
         if (entries && entries.length > 0) {
           for (const entry of entries) {
             try {
-              const eventData = entry.data;
+              const eventData = entry.data; // Already parsed by readGroup
               
-              // Only process "message:outgoing" events for wa-official platform
+              // Debug: Log all event types we receive
+              console.log(`📥 [WA-Official Outgoing Consumer] Received event: ${eventData.eventType} (entry: ${entry.id})`);
+              
+              // Only process "message:outgoing" events
               if (eventData.eventType !== 'message:outgoing') {
+                // ACK non-outgoing messages to skip them
+                console.log(`⏭️  [WA-Official Outgoing Consumer] Skipping non-outgoing event: ${eventData.eventType}`);
                 await this.streamService.acknowledge(this.consumerGroupName, entry.id);
                 continue;
               }
 
               // Only process if platform is wa-official
-              if (eventData.platform !== 'wa-official') {
+              const platform = eventData.platform || 'wpp';
+              if (platform !== 'wa-official') {
+                // This message is for WPP, not WA-Official
+                // ACK it to prevent it from blocking the stream
+                console.log(`⏭️  [WA-Official Outgoing Consumer] Skipping message for platform: ${platform} (this consumer handles 'wa-official' only)`);
                 await this.streamService.acknowledge(this.consumerGroupName, entry.id);
                 continue;
               }
 
               console.log(`📤 [WA-Official Outgoing Consumer] Processing outgoing message (entry: ${entry.id})`);
 
+              // Process the outgoing message
               await this.processOutgoingMessage(eventData);
 
+              // ACK after successful processing
               await this.streamService.acknowledge(this.consumerGroupName, entry.id);
               console.log(`✅ [WA-Official Outgoing Consumer] Processed outgoing message (entry: ${entry.id})`);
             } catch (error) {
               console.error(`❌ [WA-Official Outgoing Consumer] Error processing message ${entry.id}:`, error);
+              // Don't acknowledge on error - will retry (pending messages)
             }
           }
         }

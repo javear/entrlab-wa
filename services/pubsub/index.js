@@ -5,6 +5,23 @@ try {
   console.warn('⚠️  Could not load .env file (this is OK in production):', error.message);
 }
 
+// Parse command line arguments for port
+// Supports: --port 4000, -p 4000, or PUBSUB_PORT=4000
+// CLI-specified port takes highest precedence
+let cliPort = null;
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  if ((args[i] === '--port' || args[i] === '-p') && args[i + 1]) {
+    cliPort = args[i + 1];
+    // Store in PUBSUB_PORT for consistency, but cliPort variable takes precedence
+    process.env.PUBSUB_PORT = cliPort;
+    // Override PORT env var so CLI port takes precedence
+    process.env.PORT = cliPort;
+    console.log(`📌 Port specified via command line: ${cliPort}`);
+    break;
+  }
+}
+
 // Handle unhandled promise rejections (prevent crashes)
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
@@ -36,29 +53,22 @@ try {
       message: error.message 
     });
   });
-  const PORT = process.env.PORT || process.env.PUBSUB_PORT || 3005;
+  const PORT = cliPort || process.env.PUBSUB_PORT || process.env.PORT || 3005;
   minimalApp.listen(PORT, '0.0.0.0', () => {
     console.log(`⚠️  Minimal server started on ${PORT} (app initialization failed)`);
   });
   process.exit(1); // Exit with error code but health check endpoint is available
 }
 
-// Get port - prioritize PORT (Railway sets this automatically), then PUBSUB_PORT, then default to 3005
-// PORT must be prioritized for Railway compatibility - Railway's health check uses the PORT it sets
-const PORT = process.env.PORT || process.env.PUBSUB_PORT || 3005;
+// Get port - prioritize CLI-specified port, then PORT (Railway-provided), then PUBSUB_PORT, then default to 3005
+// CLI port takes highest precedence for development flexibility
+// PORT (Railway-provided) is prioritized for Railway compatibility in production
+// Reference: https://docs.railway.com/guides/public-networking
+const PORT = cliPort || process.env.PORT || process.env.PUBSUB_PORT || 3005;
 
-// Health endpoint is already registered in PubSubApp constructor (before any middleware)
+// Health endpoint and root endpoint are already registered in PubSubApp constructor (before any middleware)
 // Get the express app for server startup
 const expressApp = app.getApp();
-
-// Root endpoint for basic connectivity check
-expressApp.get('/', (req, res) => {
-  res.status(200).json({ 
-    service: 'pubsub',
-    status: 'running',
-    health: `/health`
-  });
-});
 
 // Start the server IMMEDIATELY (health endpoint is ready)
 console.log(`🚀 Starting server on port ${PORT}...`);
@@ -68,9 +78,15 @@ let serverReady = false;
 try {
   server = expressApp.listen(PORT, '0.0.0.0', () => {
     serverReady = true;
-    console.log(`✅ Server listening on 0.0.0.0:${PORT}`);
+    const address = server.address();
+    console.log(`✅ Server listening on ${address.address}:${address.port}`);
     console.log(`🏥 Health check available at http://0.0.0.0:${PORT}/health`);
+    console.log(`🏥 Health check available at http://127.0.0.1:${PORT}/health`);
+    console.log(`🏥 Health check available at http://localhost:${PORT}/health`);
     console.log(`📊 Server is ready to accept connections`);
+    
+    // Log port resolution for debugging
+    console.log(`📌 Port resolution: CLI=${cliPort || 'none'}, PUBSUB_PORT=${process.env.PUBSUB_PORT || 'none'}, PORT=${process.env.PORT || 'none'}, Using=${PORT}`);
   });
   
   // Handle server errors
@@ -80,7 +96,8 @@ try {
     } else {
       console.error(`❌ Server error:`, error);
     }
-    process.exit(1);
+    // Don't exit immediately - let health check still work
+    console.error(`⚠️  Server error occurred, but health endpoint may still be accessible`);
   });
   
   // Verify server is actually listening (for debugging)

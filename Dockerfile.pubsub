@@ -68,11 +68,15 @@ EXPOSE 3005
 # Health check
 # Use curl (more reliable) with fallback to wget
 # start-period allows time for async initialization
-# Increased start-period to 120s to allow for npm install and service startup
-# Note: Railway sets PORT automatically, but service uses PUBSUB_PORT || PORT || 3005
-# Health check uses PORT if set, otherwise defaults to 3005
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
-    CMD sh -c 'port=${PORT:-3005}; curl -f http://127.0.0.1:$port/health 2>/dev/null || wget --quiet --spider http://127.0.0.1:$port/health || exit 1'
+# Increased start-period to 180s to allow for npm install, service startup, and async initialization
+# Note: Railway provides PORT automatically - prioritize it for health check
+# Service uses: cliPort || PUBSUB_PORT || PORT || 3005
+# Health check must match Railway's priority: PORT (Railway-provided) || PUBSUB_PORT || 3005
+# Use 127.0.0.1 (localhost) for health check - service listens on 0.0.0.0
+# Increased timeout to 15s to handle slow responses
+# Reference: https://docs.railway.com/guides/public-networking
+HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
+    CMD sh -c 'if [ -n "$PORT" ]; then port=$PORT; elif [ -n "$PUBSUB_PORT" ]; then port=$PUBSUB_PORT; else port=3005; fi; curl -f --max-time 10 --connect-timeout 5 http://127.0.0.1:$port/health 2>/dev/null || wget --quiet --timeout=10 --spider http://127.0.0.1:$port/health 2>/dev/null || exit 1'
 
 # Use the startup script
 CMD ["/usr/src/app/start.sh"]
