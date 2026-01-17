@@ -1,4 +1,5 @@
 import { WPPConnectWhatsAppService } from './whatsapp.service';
+import { WPPConnectMessageHandler } from '../core/message-handler';
 
 // Import JavaScript services (they're in services/pubsub)
 const StreamService = require('../../services/pubsub/services/stream.service');
@@ -10,16 +11,19 @@ const StreamService = require('../../services/pubsub/services/stream.service');
 export class OutgoingMessageConsumerService {
   private streamService: any;
   private whatsappService: WPPConnectWhatsAppService;
+  private messageHandler: WPPConnectMessageHandler | null;
   private isRunning: boolean = false;
   private consumeLoopPromise: Promise<void> | null = null;
   
   // Consumer group configuration
-  // Use separate consumer group for WPP to avoid conflicts with WA-Official consumer
-  private consumerGroupName = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wpp';
-  private consumerName = process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `outgoing-message-consumer-wpp-${process.pid}`;
+  // Use separate environment variable for WPP to avoid conflicts with WA-Official consumer
+  // WPP_OUTGOING_CONSUMER_GROUP takes precedence, falls back to OUTGOING_MESSAGE_CONSUMER_GROUP for backward compatibility
+  private consumerGroupName = process.env.WPP_OUTGOING_CONSUMER_GROUP || process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wpp';
+  private consumerName = process.env.WPP_OUTGOING_CONSUMER_NAME || process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `outgoing-message-consumer-wpp-${process.pid}`;
 
-  constructor(whatsappService: WPPConnectWhatsAppService) {
+  constructor(whatsappService: WPPConnectWhatsAppService, messageHandler?: WPPConnectMessageHandler | null) {
     this.whatsappService = whatsappService;
+    this.messageHandler = messageHandler || null;
   }
 
   /**
@@ -154,6 +158,16 @@ export class OutgoingMessageConsumerService {
             }
           }
           
+          // Check for pending messages before reading (only log if there are pending)
+          try {
+            const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
+            if (groupInfo && groupInfo.pending > 0) {
+              console.log(`⚠️  [Outgoing Message Consumer] WARNING: ${groupInfo.pending} pending message(s) - these need to be processed first (lastDeliveredId: ${groupInfo.lastDeliveredId})`);
+            }
+          } catch (infoError) {
+            // Ignore errors getting group info
+          }
+          
           entries = await this.streamService.readGroup(
             this.consumerGroupName,
             this.consumerName,
@@ -162,6 +176,11 @@ export class OutgoingMessageConsumerService {
               block: 1000 // Block for 1 second if no messages
             }
           );
+          
+          // Only log if we received messages
+          if (entries && entries.length > 0) {
+            console.log(`📥 [Outgoing Message Consumer] Received ${entries.length} entry/entries from stream`);
+          }
         } catch (readError: any) {
           if (!readError.message || !readError.message.includes('timeout')) {
             console.error(`❌ [Outgoing Message Consumer] Error in readGroup:`, readError.message || readError);
@@ -181,12 +200,20 @@ export class OutgoingMessageConsumerService {
         }
 
         if (entries && entries.length > 0) {
+          console.log(`📥 [Outgoing Message Consumer] Processing ${entries.length} entry/entries`);
           for (const entry of entries) {
             try {
               const eventData = entry.data; // Already parsed by readGroup
               
-              // Debug: Log all event types we receive
+              // Debug: Log all event types we receive with full details
               console.log(`📥 [Outgoing Message Consumer] Received event: ${eventData.eventType} (entry: ${entry.id})`);
+              console.log(`   Full event data:`, JSON.stringify({
+                eventType: eventData.eventType,
+                platform: eventData.platform,
+                clientId: eventData.clientId,
+                userIdentifier: eventData.userIdentifier,
+                hasContent: !!eventData.content
+              }, null, 2));
               
               // Only process "message:outgoing" events
               if (eventData.eventType !== 'message:outgoing') {
@@ -198,6 +225,7 @@ export class OutgoingMessageConsumerService {
 
               // Check if this message is for WPP platform (this consumer only handles WPP)
               const platform = eventData.platform || 'wpp';
+              console.log(`🔍 [Outgoing Message Consumer] Checking platform: ${platform} (expected: wpp)`);
               if (platform !== 'wpp') {
                 // This message is for WA-Official, not WPP
                 // Don't ACK it - let the WA-Official consumer handle it
@@ -207,19 +235,37 @@ export class OutgoingMessageConsumerService {
                 await this.streamService.acknowledge(this.consumerGroupName, entry.id);
                 continue;
               }
+              
+              console.log(`✅ [Outgoing Message Consumer] Message passed platform check, will process`);
 
               console.log(`📤 [Outgoing Message Consumer] Processing outgoing message (entry: ${entry.id})`);
               console.log(`📤 [Outgoing Message Consumer] Event data:`, JSON.stringify(eventData, null, 2));
 
               // Process the outgoing message
-              await this.processOutgoingMessage(eventData);
-
-              // ACK after successful processing
-              await this.streamService.acknowledge(this.consumerGroupName, entry.id);
-              console.log(`✅ [Outgoing Message Consumer] Processed outgoing message (entry: ${entry.id})`);
+              try {
+                await this.processOutgoingMessage(eventData);
+                // ACK after successful processing
+                await this.streamService.acknowledge(this.consumerGroupName, entry.id);
+                console.log(`✅ [Outgoing Message Consumer] Processed outgoing message (entry: ${entry.id})`);
+              } catch (error: any) {
+                // ACK even on error to prevent unlimited retries
+                // Errors like "No LID for user" won't be fixed by retrying
+                console.error(`❌ [Outgoing Message Consumer] Error processing message ${entry.id}:`, error);
+                console.error(`   Error message: ${error.message || 'Unknown error'}`);
+                console.warn(`⚠️  [Outgoing Message Consumer] ACKing message despite error to prevent unlimited retries`);
+                await this.streamService.acknowledge(this.consumerGroupName, entry.id);
+                console.log(`✅ [Outgoing Message Consumer] ACKed message ${entry.id} (error logged, no retry)`);
+              }
             } catch (error: any) {
-              console.error(`❌ [Outgoing Message Consumer] Error processing message ${entry.id}:`, error);
-              // Don't acknowledge on error - will retry
+              // Outer catch for any errors in the try block (including ACK errors)
+              console.error(`❌ [Outgoing Message Consumer] Unexpected error processing message ${entry.id}:`, error);
+              // Try to ACK anyway to prevent blocking
+              try {
+                await this.streamService.acknowledge(this.consumerGroupName, entry.id);
+                console.log(`✅ [Outgoing Message Consumer] ACKed message ${entry.id} after unexpected error`);
+              } catch (ackError) {
+                console.error(`❌ [Outgoing Message Consumer] Failed to ACK message ${entry.id}:`, ackError);
+              }
             }
           }
         }
@@ -265,13 +311,108 @@ export class OutgoingMessageConsumerService {
           return;
         }
 
-        // Format user ID
-        const fullUserId = userIdentifier.includes('@') 
-          ? userIdentifier 
-          : `${userIdentifier}@c.us`;
+        // Format user ID - use stored full ID from message handler (same as AI replies)
+        // This ensures we use the same format that works for AI responses
+        let fullUserId: string;
+        if (userIdentifier.includes('@')) {
+          // Already has suffix, use as-is
+          fullUserId = userIdentifier;
+        } else {
+          // Try to get stored full ID from message handler (same method used by AI replies)
+          const phoneNumber = userIdentifier.replace(/@.*$/, ''); // Remove any existing suffix
+          const storedFullId = this.messageHandler?.getStoredFullId(clientId, phoneNumber);
+          
+          if (storedFullId) {
+            // Use stored full ID (with correct suffix like @lid, @c.us, etc.)
+            fullUserId = storedFullId;
+            console.log(`ℹ️  [Outgoing Message Consumer] Using stored full ID: ${fullUserId} (from message handler)`);
+          } else {
+            // Fallback: determine format based on identifier pattern
+            // Phone numbers typically: 8-15 digits total, often start with country codes
+            // LID/group IDs: usually 15+ digits, don't follow phone number patterns
+            // Very long numeric IDs (15+ digits) are likely LIDs, try @lid first
+            const numericId = /^\d+$/.test(userIdentifier);
+            const idLength = userIdentifier.length;
+            
+            if (numericId && idLength >= 15) {
+              // Very long numeric ID (15+ digits) - likely LID, try @lid first
+              fullUserId = `${userIdentifier}@lid`;
+              console.log(`ℹ️  [Outgoing Message Consumer] No stored full ID found, using @lid format for long numeric ID (${idLength} digits): ${fullUserId}`);
+            } else if (numericId && idLength >= 8 && idLength <= 14) {
+              // Medium length (8-14 digits) - likely phone number, try @c.us first
+              fullUserId = `${userIdentifier}@c.us`;
+              console.log(`ℹ️  [Outgoing Message Consumer] No stored full ID found, using @c.us format for phone number (${idLength} digits): ${fullUserId}`);
+            } else if (numericId) {
+              // Short numeric ID (< 8 digits) - try @c.us first
+              fullUserId = `${userIdentifier}@c.us`;
+              console.log(`ℹ️  [Outgoing Message Consumer] No stored full ID found, using @c.us format for short numeric ID (${idLength} digits): ${fullUserId}`);
+            } else {
+              // Non-numeric - try @c.us first
+              fullUserId = `${userIdentifier}@c.us`;
+              console.log(`ℹ️  [Outgoing Message Consumer] No stored full ID found, using @c.us format for non-numeric ID: ${fullUserId}`);
+            }
+          }
+        }
 
-        // Send message
-        const result: any = await clientInfo.client.sendText(fullUserId, content);
+        // Send message with retry on format error
+        let result: any;
+        let sendError: any = null;
+        try {
+          result = await clientInfo.client.sendText(fullUserId, content);
+        } catch (error: any) {
+          sendError = error;
+          const errorMessage = error?.message || '';
+          
+          // Handle "No LID for user" error - try alternative format
+          if (errorMessage.includes('No LID for user')) {
+            if (fullUserId.endsWith('@lid')) {
+              // Tried @lid, retry with @c.us
+              console.warn(`⚠️  [Outgoing Message Consumer] No LID for user with @lid format, retrying with @c.us`);
+              const alternativeFormat = `${userIdentifier}@c.us`;
+              try {
+                result = await clientInfo.client.sendText(alternativeFormat, content);
+                fullUserId = alternativeFormat; // Update for logging
+                sendError = null; // Clear error
+                console.log(`✅ [Outgoing Message Consumer] Successfully sent with @c.us format after @lid failed`);
+              } catch (retryError: any) {
+                // Both formats failed, keep original error
+                sendError = error;
+              }
+            } else if (fullUserId.endsWith('@c.us')) {
+              // Tried @c.us but got "No LID for user" - this means it needs @lid format
+              console.warn(`⚠️  [Outgoing Message Consumer] No LID for user with @c.us format, retrying with @lid`);
+              const alternativeFormat = `${userIdentifier}@lid`;
+              try {
+                result = await clientInfo.client.sendText(alternativeFormat, content);
+                fullUserId = alternativeFormat; // Update for logging
+                sendError = null; // Clear error
+                console.log(`✅ [Outgoing Message Consumer] Successfully sent with @lid format after @c.us failed`);
+              } catch (retryError: any) {
+                // Both formats failed, keep original error
+                sendError = error;
+              }
+            }
+          }
+          // If invalid number error and we tried @c.us, retry with @lid
+          else if ((errorMessage.includes('invalid') || errorMessage.includes('Invalid')) && fullUserId.endsWith('@c.us')) {
+            console.warn(`⚠️  [Outgoing Message Consumer] Invalid number with @c.us, retrying with @lid format`);
+            const alternativeFormat = `${userIdentifier}@lid`;
+            try {
+              result = await clientInfo.client.sendText(alternativeFormat, content);
+              fullUserId = alternativeFormat; // Update for logging
+              sendError = null; // Clear error
+              console.log(`✅ [Outgoing Message Consumer] Successfully sent with @lid format after @c.us failed`);
+            } catch (retryError: any) {
+              // Both formats failed, keep original error
+              sendError = error;
+            }
+          }
+          
+          // If still has error, throw it
+          if (sendError) {
+            throw sendError;
+          }
+        }
         const messageId = (result && typeof result === 'object' && result.id?.id) 
           ? result.id.id 
           : eventData.messageId || `outgoing-${Date.now()}`;
@@ -306,7 +447,9 @@ export class OutgoingMessageConsumerService {
               postedBy: eventData.metadata?.postedBy || 'system',
               sender: eventData.metadata?.sender || null, // Pass sender info from JWT
               messageId: messageId || eventData.messageId,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
+              // Include clientMessageId from original message:outgoing event for idempotency matching
+              clientMessageId: eventData.metadata?.clientMessageId || null
             }
           });
         } catch (streamError: any) {
@@ -325,7 +468,15 @@ export class OutgoingMessageConsumerService {
       }
     } catch (error: any) {
       console.error(`❌ [Outgoing Message Consumer] Error processing outgoing message:`, error);
-      throw error; // Re-throw to prevent ACK
+      console.error(`   Error details: ${error.message || 'Unknown error'}`);
+      // Check for specific errors that shouldn't be retried
+      const errorMessage = error.message || '';
+      if (errorMessage.includes('No LID for user') || 
+          errorMessage.includes('not found') ||
+          errorMessage.includes('does not exist')) {
+        console.warn(`⚠️  [Outgoing Message Consumer] Non-retryable error detected - will ACK message`);
+      }
+      throw error; // Re-throw - caller will ACK even on error
     }
   }
 }

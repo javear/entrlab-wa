@@ -167,7 +167,7 @@ export class WPPConnectWhatsAppBotApp {
     this.pubSubController = new PubSubController();
     this.weaviateService = new WeaviateService(this.whatsappService);
     this.chatController = new ChatController(this.weaviateService, this.whatsappService);
-    this.outgoingMessageConsumer = new OutgoingMessageConsumerService(this.whatsappService);
+    this.outgoingMessageConsumer = new OutgoingMessageConsumerService(this.whatsappService, this.messageHandler);
     this.autoRestartService = new AutoRestartService(env, async () => { 
       await this.gracefulShutdown(); 
     });

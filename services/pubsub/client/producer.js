@@ -1,4 +1,5 @@
 const redis = require('redis');
+const crypto = require('crypto');
 
 /**
  * Stream Producer Client
@@ -147,10 +148,24 @@ class StreamProducer {
           throw new Error('Stream producer client not ready');
         }
 
+        // Calculate hashed room ID if agentCode, clientId, and userIdentifier are available
+        let hashedId = null;
+        if (messageData.agentCode && messageData.clientId && messageData.userIdentifier) {
+          try {
+            hashedId = this.hashRoomId(messageData.agentCode, messageData.clientId, messageData.userIdentifier);
+            console.log(`🔑 [Producer] Calculated hashedId for incoming message: ${hashedId} (agentCode: ${messageData.agentCode}, clientId: ${messageData.clientId}, userIdentifier: ${messageData.userIdentifier})`);
+          } catch (error) {
+            console.warn(`⚠️  [Producer] Failed to hash room ID: ${error.message}`);
+          }
+        } else {
+          console.warn(`⚠️  [Producer] Cannot calculate hashedId - missing required fields (agentCode: ${!!messageData.agentCode}, clientId: ${!!messageData.clientId}, userIdentifier: ${!!messageData.userIdentifier})`);
+        }
+
         const entryData = {
           eventType: 'message:incoming',
           timestamp: new Date().toISOString(),
-          ...messageData
+          ...messageData,
+          ...(hashedId && { hashedId }) // Include hashed_id if calculated
         };
 
         const streamEntry = this.prepareStreamEntry(entryData);
@@ -216,10 +231,24 @@ class StreamProducer {
           throw new Error('Stream producer client not ready');
         }
 
+        // Calculate hashed room ID if agentCode, clientId, and userIdentifier are available
+        let hashedId = null;
+        if (responseData.agentCode && responseData.clientId && responseData.userIdentifier) {
+          try {
+            hashedId = this.hashRoomId(responseData.agentCode, responseData.clientId, responseData.userIdentifier);
+            console.log(`🔑 [Producer] Calculated hashedId for AI response: ${hashedId} (agentCode: ${responseData.agentCode}, clientId: ${responseData.clientId}, userIdentifier: ${responseData.userIdentifier})`);
+          } catch (error) {
+            console.warn(`⚠️  [Producer] Failed to hash room ID: ${error.message}`);
+          }
+        } else {
+          console.warn(`⚠️  [Producer] Cannot calculate hashedId for AI response - missing required fields (agentCode: ${!!responseData.agentCode}, clientId: ${!!responseData.clientId}, userIdentifier: ${!!responseData.userIdentifier})`);
+        }
+
         const entryData = {
           eventType: 'ai:response',
           timestamp: new Date().toISOString(),
-          ...responseData
+          ...responseData,
+          ...(hashedId && { hashedId }) // Include hashed_id if calculated
         };
 
         const streamEntry = this.prepareStreamEntry(entryData);
@@ -285,10 +314,24 @@ class StreamProducer {
           throw new Error('Stream producer client not ready');
         }
 
+        // Calculate hashed room ID if agentCode, clientId, and userIdentifier are available
+        let hashedId = null;
+        if (responseData.agentCode && responseData.clientId && responseData.userIdentifier) {
+          try {
+            hashedId = this.hashRoomId(responseData.agentCode, responseData.clientId, responseData.userIdentifier);
+            console.log(`🔑 [Producer] Calculated hashedId for agent response: ${hashedId} (agentCode: ${responseData.agentCode}, clientId: ${responseData.clientId}, userIdentifier: ${responseData.userIdentifier})`);
+          } catch (error) {
+            console.warn(`⚠️  [Producer] Failed to hash room ID: ${error.message}`);
+          }
+        } else {
+          console.warn(`⚠️  [Producer] Cannot calculate hashedId for agent response - missing required fields (agentCode: ${!!responseData.agentCode}, clientId: ${!!responseData.clientId}, userIdentifier: ${!!responseData.userIdentifier})`);
+        }
+
         const entryData = {
           eventType: 'agent:response',
           timestamp: new Date().toISOString(),
-          ...responseData
+          ...responseData,
+          ...(hashedId && { hashedId }) // Include hashed_id if calculated
         };
 
         const streamEntry = this.prepareStreamEntry(entryData);
@@ -354,10 +397,21 @@ class StreamProducer {
           throw new Error('Stream producer client not ready');
         }
 
+        // Calculate hashed room ID if agentCode, clientId, and userIdentifier are available
+        let hashedId = null;
+        if (messageData.agentCode && messageData.clientId && messageData.userIdentifier) {
+          try {
+            hashedId = this.hashRoomId(messageData.agentCode, messageData.clientId, messageData.userIdentifier);
+          } catch (error) {
+            console.warn(`⚠️  [Producer] Failed to hash room ID: ${error.message}`);
+          }
+        }
+
         const entryData = {
           eventType: 'message:outgoing',
           timestamp: new Date().toISOString(),
-          ...messageData
+          ...messageData,
+          ...(hashedId && { hashedId }) // Include hashed_id if calculated
         };
 
         const streamEntry = this.prepareStreamEntry(entryData);
@@ -394,6 +448,29 @@ class StreamProducer {
     }
 
     throw lastError;
+  }
+
+  /**
+   * Hash room ID using HMAC-SHA256 (matches Elixir implementation)
+   * @param {string} agentCode - Agent code
+   * @param {string} clientId - Client ID
+   * @param {string} userIdentifier - User identifier
+   * @returns {string} - Base64 encoded hash
+   */
+  hashRoomId(agentCode, clientId, userIdentifier) {
+    const secret = process.env.ROOM_HASH_SECRET;
+    
+    if (!secret) {
+      throw new Error('ROOM_HASH_SECRET environment variable is required for room hashing');
+    }
+    
+    // Construct input: "agentCode:clientId:userIdentifier"
+    const input = `${agentCode}:${clientId}:${userIdentifier}`;
+    
+    // Hash using HMAC-SHA256
+    const hash = crypto.createHmac('sha256', secret).update(input).digest('base64');
+    
+    return hash;
   }
 
   /**

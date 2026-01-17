@@ -49,9 +49,15 @@ async function resetConsumerGroup() {
   // Use the same stream name logic as the services
   const streamName = process.env.VALKEY_STREAM_NAME || 'whatsapp:events';
   // Reset both consumer groups (WPP and WA-Official)
-  const groupNames = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP 
-    ? [process.env.OUTGOING_MESSAGE_CONSUMER_GROUP] 
-    : ['outgoing-message-consumer-wpp', 'outgoing-message-consumer-wa-official'];
+  // Use platform-specific env vars, fallback to legacy var, then defaults
+  const wppGroup = process.env.WPP_OUTGOING_CONSUMER_GROUP || process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wpp';
+  const waOfficialGroup = process.env.WA_OFFICIAL_OUTGOING_CONSUMER_GROUP || process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wa-official';
+  
+  // If legacy var is set, use it for both (backward compatibility)
+  // Otherwise use platform-specific groups
+  const groupNames = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP && !process.env.WPP_OUTGOING_CONSUMER_GROUP && !process.env.WA_OFFICIAL_OUTGOING_CONSUMER_GROUP
+    ? [process.env.OUTGOING_MESSAGE_CONSUMER_GROUP]
+    : [wppGroup, waOfficialGroup];
   
   console.log(`📋 Configuration:`);
   console.log(`   Stream: ${streamName}`);

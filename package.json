@@ -15,7 +15,9 @@
     "reset-outgoing-consumer": "node scripts/reset-outgoing-consumer-group.js",
     "reset-weaviate-consumer-position": "node scripts/reset-weaviate-consumer-position.js",
     "waofficial-dev": "node services/whatsapp-official/index.js",
-    "pubsub-dev": "node services/pubsub/index.js"
+    "pubsub-dev": "node services/pubsub/index.js",
+    "socket-server-dev": "./scripts/start-socket-server.sh",
+    "test-socket": "node scripts/test-socket-client.js"
   },
   "dependencies": {
     "@types/archiver": "^6.0.3",
@@ -37,6 +39,7 @@
     "mongoose": "^8.18.1",
     "node-cron": "^4.2.1",
     "node-vault": "^0.10.9",
+    "phoenix": "^1.8.3",
     "puppeteer": "^24.34.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",

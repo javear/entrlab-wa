@@ -35,6 +35,12 @@ const CONVERSATION_SCHEMA = {
       indexFilterable: true
     },
     {
+      name: 'hashed_id',
+      dataType: ['string'],
+      description: 'Hashed room ID for universal identification across services (agentCode:clientId:userIdentifier)',
+      indexFilterable: true
+    },
+    {
       name: 'client_id',
       dataType: ['string'],
       description: 'Client identifier (e.g., "javear-client-wpp")',
@@ -252,6 +258,28 @@ async function initializeSchemas(client) {
       console.log('✅ Conversation schema created');
     } else {
       console.log('ℹ️  Conversation schema already exists');
+      // Check if hashed_id property exists, add it if missing
+      try {
+        const conversationSchema = await client.schema.classGetter().withClassName('Conversation').do();
+        const conversationProperties = (conversationSchema.properties || []).map(p => p.name);
+        
+        if (!conversationProperties.includes('hashed_id')) {
+          console.log('➕ Adding hashed_id field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'hashed_id',
+              dataType: ['string'],
+              description: 'Hashed room ID for universal identification across services (agentCode:clientId:userIdentifier)',
+              indexFilterable: true
+            })
+            .do();
+          console.log('✅ Successfully added hashed_id field to Conversation schema');
+        }
+      } catch (error) {
+        console.warn('⚠️  Could not check/add hashed_id property:', error.message);
+      }
     }
 
     // Check if ChatEvent schema exists

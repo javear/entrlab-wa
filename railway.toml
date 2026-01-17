@@ -11,6 +11,11 @@ restartPolicyMaxRetries = 10
 [[services]]
 name = "whatsapp-bot"
 
+[[services]]
+name = "socket-server"
+dockerfile = "Dockerfile.socket-server"
+# startCommand matches the global one: /usr/src/app/start.sh
+
 # Volume configuration for session persistence
 [[volumes]]
 name = "whatsapp_data"

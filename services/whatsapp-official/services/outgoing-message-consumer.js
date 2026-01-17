@@ -13,9 +13,10 @@ class OutgoingMessageConsumer {
     this.consumeLoopPromise = null;
     
     // Consumer group configuration
-    // Use separate consumer group for WA-Official to avoid conflicts with WPP consumer
-    this.consumerGroupName = process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wa-official';
-    this.consumerName = process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `wa-official-outgoing-consumer-${process.pid}`;
+    // Use separate environment variable for WA-Official to avoid conflicts with WPP consumer
+    // WA_OFFICIAL_OUTGOING_CONSUMER_GROUP takes precedence, falls back to OUTGOING_MESSAGE_CONSUMER_GROUP for backward compatibility
+    this.consumerGroupName = process.env.WA_OFFICIAL_OUTGOING_CONSUMER_GROUP || process.env.OUTGOING_MESSAGE_CONSUMER_GROUP || 'outgoing-message-consumer-wa-official';
+    this.consumerName = process.env.WA_OFFICIAL_OUTGOING_CONSUMER_NAME || process.env.OUTGOING_MESSAGE_CONSUMER_NAME || `wa-official-outgoing-consumer-${process.pid}`;
   }
 
   /**
@@ -310,7 +311,9 @@ class OutgoingMessageConsumer {
             postedBy: eventData.metadata?.postedBy || 'system',
             sender: eventData.metadata?.sender || null, // Pass sender info from JWT
             messageId: sentMessageId || eventData.messageId,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            // Include clientMessageId from original message:outgoing event for idempotency matching
+            clientMessageId: eventData.metadata?.clientMessageId || null
           }
         });
       } catch (streamError) {

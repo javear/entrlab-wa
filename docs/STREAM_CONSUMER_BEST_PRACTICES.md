@@ -52,7 +52,9 @@ Each consumer supports environment variables to override defaults:
 
 **Consumer Group Names** (for prod/dev separation):
 - `WEAVIATE_CONSUMER_GROUP` - Weaviate consumer group (default: `'weaviate-consumer'`)
-- `OUTGOING_MESSAGE_CONSUMER_GROUP` - Outgoing message consumer group (default: `'outgoing-message-consumer-wpp'` or `'outgoing-message-consumer-wa-official'`)
+- `WPP_OUTGOING_CONSUMER_GROUP` - WPP outgoing message consumer group (default: `'outgoing-message-consumer-wpp'`)
+- `WA_OFFICIAL_OUTGOING_CONSUMER_GROUP` - WA-Official outgoing message consumer group (default: `'outgoing-message-consumer-wa-official'`)
+- `OUTGOING_MESSAGE_CONSUMER_GROUP` - Legacy/fallback (deprecated, use platform-specific vars above)
 - `WEBHOOK_CONSUMER_GROUP` - Webhook consumer group (default: `'webhook-delivery'`)
 
 **Start ID** (for historical message processing):
@@ -198,14 +200,16 @@ Each consumer group has ONE position (`lastDeliveredId`). If prod and dev share 
 **Production Environment:**
 ```bash
 WEAVIATE_CONSUMER_GROUP=weaviate-consumer-prod
-OUTGOING_MESSAGE_CONSUMER_GROUP=outgoing-message-consumer-wpp-prod  # or wa-official-prod
+WPP_OUTGOING_CONSUMER_GROUP=outgoing-message-consumer-wpp-prod
+WA_OFFICIAL_OUTGOING_CONSUMER_GROUP=outgoing-message-consumer-wa-official-prod
 WEBHOOK_CONSUMER_GROUP=webhook-delivery-prod
 ```
 
 **Development Environment:**
 ```bash
 WEAVIATE_CONSUMER_GROUP=weaviate-consumer-dev
-OUTGOING_MESSAGE_CONSUMER_GROUP=outgoing-message-consumer-wpp-dev  # or wa-official-dev
+WPP_OUTGOING_CONSUMER_GROUP=outgoing-message-consumer-wpp-dev
+WA_OFFICIAL_OUTGOING_CONSUMER_GROUP=outgoing-message-consumer-wa-official-dev
 WEBHOOK_CONSUMER_GROUP=webhook-delivery-dev
 ```
 

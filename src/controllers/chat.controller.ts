@@ -98,7 +98,7 @@ export class ChatController {
       res.json({
         success: true,
         conversations: result.conversations.map(conv => ({
-          conversationId: conv._additional?.id || conv.conversation_id, // Use Weaviate _id as conversationId
+          conversationId: conv.hashed_id || conv._additional?.id || conv.conversation_id, // Use hashed_id as conversationId (universal ID)
           clientId: conv.client_id,
           platform: conv.platform,
           participantIds: conv.participant_ids || [],
@@ -132,6 +132,10 @@ export class ChatController {
    * Get chats in a conversation
    * GET /api/v1/platform/chat/conversations/:conversationId/chats
    * Query params: limit, offset
+   * 
+   * conversationId can be:
+   * - hashed_id (universal ID, preferred): e.g., "mhSSVwWhku7HDR+5ukDJumRDin5Tx9BbZpsbkrDNapA="
+   * - Weaviate _id (fallback): e.g., "32ca98f6-e414-5aaa-908f-763500c1a4ce"
    * 
    * Tenant (agent_code) is REQUIRED and extracted from JWT token.
    * Only returns chats for the agent specified in the JWT.
@@ -257,7 +261,8 @@ export class ChatController {
         return;
       }
 
-      // Get conversation by Weaviate _id to extract clientId and userIdentifier
+      // Get conversation by hashed_id (universal ID) with fallback to Weaviate _id
+      // This will try hashed_id first, then fallback to _id if not found
       const conversation = await this.weaviateService.getConversationById(conversationId, agentCode);
       
       if (!conversation) {
@@ -354,7 +359,7 @@ export class ChatController {
         
         // Publish as outgoing message event - consumers will send it
         // Platform is determined from client type (wpp or wa-official)
-        // Note: Weaviate _id (conversationId) is included in metadata for reference,
+        // Note: hashed_id (conversationId) is included in metadata for reference,
         // but consumers use clientId and userIdentifier to send messages
         const entryId = await producer.publishOutgoingMessage({
           clientId,
@@ -368,7 +373,7 @@ export class ChatController {
             source: 'api',
             postedBy: jwtUser.agentCode || 'system',
             sender: senderInfo, // Include sender information from JWT
-            conversationId: conversationId, // Weaviate _id for reference/tracking
+            conversationId: conversationId, // hashed_id (universal ID) for reference/tracking
             timestamp: new Date().toISOString()
           }
         });

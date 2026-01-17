@@ -119,6 +119,24 @@ async function main() {
     const conversationProperties = (conversationSchema.properties || []).map(p => p.name);
     console.log(`   Conversation properties: ${conversationProperties.join(', ')}\n`);
 
+    // Add hashed_id field to Conversation if it doesn't exist
+    if (!conversationProperties.includes('hashed_id')) {
+      console.log('➕ Adding hashed_id field to Conversation schema...');
+      await client.schema
+        .propertyCreator()
+        .withClassName('Conversation')
+        .withProperty({
+          name: 'hashed_id',
+          dataType: ['string'],
+          description: 'Hashed room ID for universal identification across services (agentCode:clientId:userIdentifier)',
+          indexFilterable: true
+        })
+        .do();
+      console.log('✅ Successfully added hashed_id field to Conversation schema\n');
+    } else {
+      console.log('✅ hashed_id field already exists in Conversation schema\n');
+    }
+
     // Add client_id field to Conversation if it doesn't exist
     if (!conversationProperties.includes('client_id')) {
       console.log('➕ Adding client_id field to Conversation schema...');
@@ -186,7 +204,7 @@ async function main() {
 
     // Check participant_ids property configuration
     console.log('\n📋 Checking participant_ids property configuration...');
-    const participantIdsProperty = conversationSchema.properties?.find((p: any) => p.name === 'participant_ids');
+    const participantIdsProperty = conversationSchema.properties?.find((p) => p.name === 'participant_ids');
     if (participantIdsProperty) {
       console.log(`   Current participant_ids config:`, {
         indexInverted: participantIdsProperty.indexInverted,

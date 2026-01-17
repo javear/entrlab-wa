@@ -1,0 +1,67 @@
+# Multi-stage build for Elixir/Phoenix socket server
+
+# Stage 1: Builder
+FROM elixir:1.16-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    git
+
+WORKDIR /app
+
+# Install hex and rebar
+RUN mix local.hex --force && \
+    mix local.rebar --force
+
+# Set MIX_ENV early for all build steps
+ENV MIX_ENV=prod
+
+# Copy mix files (to current directory /app)
+COPY services/socket-server/mix.exs services/socket-server/mix.lock* ./
+RUN mix deps.get --only prod && \
+    mix deps.compile
+
+# Copy source code (overwrites mix files, but that's OK since they're already processed)
+COPY services/socket-server/ ./
+
+# Compile the application
+RUN mix compile
+
+# Build release in production mode
+RUN mix release
+
+# Stage 2: Runtime
+FROM alpine:latest
+
+RUN apk add --no-cache \
+    openssl \
+    ncurses-libs \
+    ca-certificates \
+    dumb-init \
+    curl \
+    wget \
+    libstdc++ \
+    libgcc
+
+WORKDIR /usr/src/app
+
+# Copy release from builder
+COPY --from=builder /app/_build/prod/rel/socket_server ./
+
+# Create startup script for Railway compatibility
+RUN echo '#!/bin/sh' > /usr/src/app/start.sh && \
+    echo 'cd /usr/src/app' >> /usr/src/app/start.sh && \
+    echo 'exec ./bin/socket_server start' >> /usr/src/app/start.sh && \
+    chmod +x /usr/src/app/start.sh
+
+# Health check
+# Prioritize Railway's PORT, then SOCKET_PORT, then default to 4000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD sh -c 'if [ -n "$PORT" ]; then port=$PORT; elif [ -n "$SOCKET_PORT" ]; then port=$SOCKET_PORT; else port=4000; fi; curl -f --max-time 10 --connect-timeout 5 http://127.0.0.1:$port/health 2>/dev/null || wget --quiet --timeout=10 --spider http://127.0.0.1:$port/health 2>/dev/null || exit 1'
+
+EXPOSE 4000
+
+ENTRYPOINT ["dumb-init", "--"]
+# Use start.sh for Railway compatibility
+CMD ["/usr/src/app/start.sh"]

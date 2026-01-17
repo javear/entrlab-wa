@@ -76,6 +76,16 @@ export class WPPConnectMessageHandler {
     return `${clientId}:${senderNumber}`;
   }
 
+  /**
+   * Get stored full sender ID (with correct suffix like @lid, @c.us, etc.)
+   * Used by outgoing message consumer to send messages with correct format
+   */
+  public getStoredFullId(clientId: string, userIdentifier: string): string | null {
+    const phoneNumber = userIdentifier.replace(/@.*$/, ''); // Remove any existing suffix
+    const userKey = this.getUserKey(clientId, phoneNumber);
+    return (this.senderFullIds as any)[userKey] || null;
+  }
+
   constructor(
     private whatsappService: WPPConnectWhatsAppService,
     env: Environment

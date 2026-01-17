@@ -507,9 +507,18 @@ class WeaviateConsumer {
     // content is already a JSON string from extractFormattedContent
     const lastEventContentString = content || '[]';
 
+    // Extract hashed_id from event data (pre-calculated by producer)
+    const hashedId = eventData.hashedId || eventData.hashed_id || null;
+    if (hashedId) {
+      console.log(`🔑 [Weaviate Consumer] Extracted hashedId from event: ${hashedId} (conversationId: ${conversationId}, tenant: ${tenant})`);
+    } else {
+      console.warn(`⚠️  [Weaviate Consumer] No hashedId in event data (conversationId: ${conversationId}, tenant: ${tenant}, eventType: ${eventType})`);
+    }
+
     // Ensure Conversation exists
     await this.ensureConversation(tenant, {
       conversation_id: conversationId,
+      hashed_id: hashedId,
       client_id: eventData.clientId || null,
       platform: eventData.platform || null,
       participant_ids: participantIds,
@@ -534,9 +543,11 @@ class WeaviateConsumer {
     
     // Reuse lastEventContentString from above for the update
     // The content is already a JSON string
-    
+    // Reuse hashedId from above (already extracted)
+
     await this.updateConversation(tenant, {
       conversation_id: conversationId,
+      hashed_id: hashedId,
       client_id: clientIdValue,
       platform: platformValue,
       last_event_at: createdAt,
@@ -774,11 +785,11 @@ class WeaviateConsumer {
       // Ensure tenant exists first
       await this.ensureTenant(tenant);
 
-      // Check if conversation exists by querying
+      // Check if conversation exists by querying (also check hashed_id)
       const checkResult = await this.weaviateClient.graphql
         .get()
         .withClassName('Conversation')
-        .withFields('conversation_id')
+        .withFields('conversation_id hashed_id _additional { id }')
         .withTenant(tenant)
         .withWhere({
           path: ['conversation_id'],
@@ -792,6 +803,31 @@ class WeaviateConsumer {
                      checkResult.data.Get && 
                      checkResult.data.Get.Conversation && 
                      checkResult.data.Get.Conversation.length > 0;
+
+      if (exists && conversationData.hashed_id) {
+        // Conversation exists - check if it needs hashed_id update
+        const existingConv = checkResult.data.Get.Conversation[0];
+        const existingHashedId = existingConv.hashed_id;
+        const conversationUuid = existingConv._additional?.id;
+        
+        // If conversation exists but doesn't have hashed_id, update it
+        if (!existingHashedId && conversationData.hashed_id && conversationUuid) {
+          try {
+            await this.weaviateClient.data
+              .merger()
+              .withId(conversationUuid)
+              .withClassName('Conversation')
+              .withTenant(tenant)
+              .withProperties({
+                hashed_id: String(conversationData.hashed_id)
+              })
+              .do();
+            console.log(`✅ [Weaviate Consumer] Updated hashed_id for conversation ${conversationData.conversation_id} (tenant: ${tenant})`);
+          } catch (updateError) {
+            console.warn(`⚠️  [Weaviate Consumer] Failed to update hashed_id for conversation ${conversationData.conversation_id}:`, updateError.message);
+          }
+        }
+      }
 
       if (!exists) {
         // Conversation doesn't exist, create it
@@ -809,6 +845,7 @@ class WeaviateConsumer {
           .withTenant(tenant)
           .withProperties({
             conversation_id: conversationData.conversation_id,
+            hashed_id: conversationData.hashed_id ? String(conversationData.hashed_id) : null,
             client_id: conversationData.client_id ? String(conversationData.client_id) : null,
             platform: conversationData.platform ? String(conversationData.platform) : null,
             participant_ids: participantIds.length > 0 ? participantIds : [], // Ensure it's always an array
@@ -974,6 +1011,11 @@ class WeaviateConsumer {
         last_event_at: updateData.last_event_at,
         participant_ids: mergedParticipants
       };
+
+      // Update hashed_id if provided
+      if (updateData.hashed_id) {
+        updateProperties.hashed_id = String(updateData.hashed_id);
+      }
 
       // Update last event information if provided
       if (updateData.last_event_id) {
