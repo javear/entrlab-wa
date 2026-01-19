@@ -285,15 +285,29 @@ export class OutgoingMessageConsumerService {
    * Process outgoing message event
    */
   private async processOutgoingMessage(eventData: any): Promise<void> {
-    const { clientId, platform, userIdentifier: userIdentifierRaw, content, messageType = 'text', messageId } = eventData;
+    const { clientId, platform, userIdentifier: userIdentifierRaw, content, messageType = 'text', messageId, mediaUrl, caption } = eventData;
 
     // Ensure userIdentifier is a string
     const userIdentifier = typeof userIdentifierRaw === 'string' 
       ? userIdentifierRaw 
       : String(userIdentifierRaw || '');
 
-    if (!clientId || !userIdentifier || !content) {
-      console.error('❌ [Outgoing Message Consumer] Missing required fields:', { clientId, userIdentifier, content });
+    // For text messages, content is required. For media messages, mediaUrl is required.
+    const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+    const isMediaType = mediaTypes.includes(messageType);
+    
+    if (!clientId || !userIdentifier) {
+      console.error('❌ [Outgoing Message Consumer] Missing required fields:', { clientId, userIdentifier });
+      return;
+    }
+    
+    if (!isMediaType && (!content || content === '')) {
+      console.error('❌ [Outgoing Message Consumer] Missing content for text message:', { clientId, userIdentifier, messageType });
+      return;
+    }
+    
+    if (isMediaType && (!mediaUrl || mediaUrl === '')) {
+      console.error('❌ [Outgoing Message Consumer] Missing mediaUrl for media message:', { clientId, userIdentifier, messageType });
       return;
     }
 
@@ -354,64 +368,113 @@ export class OutgoingMessageConsumerService {
           }
         }
 
-        // Send message with retry on format error
-        let result: any;
-        let sendError: any = null;
-        try {
-          result = await clientInfo.client.sendText(fullUserId, content);
-        } catch (error: any) {
-          sendError = error;
-          const errorMessage = error?.message || '';
+        // Helper function to send message with retry logic for user ID format errors
+        const sendWithRetry = async (sendFn: (userId: string) => Promise<any>): Promise<any> => {
+          let result: any;
+          let sendError: any = null;
+          let currentUserId = fullUserId;
           
-          // Handle "No LID for user" error - try alternative format
-          if (errorMessage.includes('No LID for user')) {
-            if (fullUserId.endsWith('@lid')) {
-              // Tried @lid, retry with @c.us
-              console.warn(`⚠️  [Outgoing Message Consumer] No LID for user with @lid format, retrying with @c.us`);
-              const alternativeFormat = `${userIdentifier}@c.us`;
-              try {
-                result = await clientInfo.client.sendText(alternativeFormat, content);
-                fullUserId = alternativeFormat; // Update for logging
-                sendError = null; // Clear error
-                console.log(`✅ [Outgoing Message Consumer] Successfully sent with @c.us format after @lid failed`);
-              } catch (retryError: any) {
-                // Both formats failed, keep original error
-                sendError = error;
+          try {
+            result = await sendFn(currentUserId);
+            return result;
+          } catch (error: any) {
+            sendError = error;
+            const errorMessage = error?.message || '';
+            
+            // Handle "No LID for user" error - try alternative format
+            if (errorMessage.includes('No LID for user')) {
+              if (currentUserId.endsWith('@lid')) {
+                console.warn(`⚠️  [Outgoing Message Consumer] No LID for user with @lid format, retrying with @c.us`);
+                const alternativeFormat = `${userIdentifier}@c.us`;
+                try {
+                  result = await sendFn(alternativeFormat);
+                  fullUserId = alternativeFormat; // Update for logging
+                  sendError = null;
+                  console.log(`✅ [Outgoing Message Consumer] Successfully sent with @c.us format after @lid failed`);
+                  return result;
+                } catch (retryError: any) {
+                  sendError = error; // Keep original error
+                }
+              } else if (currentUserId.endsWith('@c.us')) {
+                console.warn(`⚠️  [Outgoing Message Consumer] No LID for user with @c.us format, retrying with @lid`);
+                const alternativeFormat = `${userIdentifier}@lid`;
+                try {
+                  result = await sendFn(alternativeFormat);
+                  fullUserId = alternativeFormat;
+                  sendError = null;
+                  console.log(`✅ [Outgoing Message Consumer] Successfully sent with @lid format after @c.us failed`);
+                  return result;
+                } catch (retryError: any) {
+                  sendError = error;
+                }
               }
-            } else if (fullUserId.endsWith('@c.us')) {
-              // Tried @c.us but got "No LID for user" - this means it needs @lid format
-              console.warn(`⚠️  [Outgoing Message Consumer] No LID for user with @c.us format, retrying with @lid`);
+            }
+            // If invalid number error and we tried @c.us, retry with @lid
+            else if ((errorMessage.includes('invalid') || errorMessage.includes('Invalid')) && currentUserId.endsWith('@c.us')) {
+              console.warn(`⚠️  [Outgoing Message Consumer] Invalid number with @c.us, retrying with @lid format`);
               const alternativeFormat = `${userIdentifier}@lid`;
               try {
-                result = await clientInfo.client.sendText(alternativeFormat, content);
-                fullUserId = alternativeFormat; // Update for logging
-                sendError = null; // Clear error
+                result = await sendFn(alternativeFormat);
+                fullUserId = alternativeFormat;
+                sendError = null;
                 console.log(`✅ [Outgoing Message Consumer] Successfully sent with @lid format after @c.us failed`);
+                return result;
               } catch (retryError: any) {
-                // Both formats failed, keep original error
                 sendError = error;
               }
             }
-          }
-          // If invalid number error and we tried @c.us, retry with @lid
-          else if ((errorMessage.includes('invalid') || errorMessage.includes('Invalid')) && fullUserId.endsWith('@c.us')) {
-            console.warn(`⚠️  [Outgoing Message Consumer] Invalid number with @c.us, retrying with @lid format`);
-            const alternativeFormat = `${userIdentifier}@lid`;
-            try {
-              result = await clientInfo.client.sendText(alternativeFormat, content);
-              fullUserId = alternativeFormat; // Update for logging
-              sendError = null; // Clear error
-              console.log(`✅ [Outgoing Message Consumer] Successfully sent with @lid format after @c.us failed`);
-            } catch (retryError: any) {
-              // Both formats failed, keep original error
-              sendError = error;
+            
+            // If still has error, throw it
+            if (sendError) {
+              throw sendError;
             }
           }
-          
-          // If still has error, throw it
-          if (sendError) {
-            throw sendError;
+        };
+        
+        // Route to appropriate WPP client method based on messageType
+        let result: any;
+        try {
+          switch (messageType) {
+            case 'text':
+              result = await sendWithRetry((userId) => clientInfo.client.sendText(userId, content));
+              break;
+            
+            case 'image':
+              result = await sendWithRetry((userId) => 
+                clientInfo.client.sendImage(userId, mediaUrl, undefined, caption || content || '')
+              );
+              break;
+            
+            case 'video':
+            case 'audio':
+            case 'file':
+            case 'document':
+              result = await sendWithRetry((userId) => 
+                clientInfo.client.sendFile(userId, mediaUrl, undefined, caption || content || '')
+              );
+              break;
+            
+            case 'sticker':
+              // Determine if animated (gif/webp)
+              const isAnimated = /\.(gif|webp)(\?|#|$)/i.test(mediaUrl);
+              if (isAnimated) {
+                result = await sendWithRetry((userId) => 
+                  clientInfo.client.sendImageAsStickerGif(userId, mediaUrl)
+                );
+              } else {
+                result = await sendWithRetry((userId) => 
+                  clientInfo.client.sendImageAsSticker(userId, mediaUrl)
+                );
+              }
+              break;
+            
+            default:
+              // Fallback to text for unknown types
+              console.warn(`⚠️  [Outgoing Message Consumer] Unknown messageType '${messageType}', falling back to text`);
+              result = await sendWithRetry((userId) => clientInfo.client.sendText(userId, content || ''));
           }
+        } catch (error: any) {
+          throw error;
         }
         const messageId = (result && typeof result === 'object' && result.id?.id) 
           ? result.id.id 
@@ -436,12 +499,16 @@ export class OutgoingMessageConsumerService {
             response: {
               messages: [{
                 type: messageType,
-                text: content
+                text: content || '',
+                url: mediaUrl || undefined,
+                caption: caption || undefined
               }]
             },
-            // Also include content and messageType at top level for fallback extraction
-            content: content,
+            // Also include content, messageType, mediaUrl, and caption at top level for fallback extraction
+            content: content || '',
             messageType: messageType,
+            mediaUrl: mediaUrl || undefined,
+            caption: caption || undefined,
             metadata: {
               source: 'api',
               postedBy: eventData.metadata?.postedBy || 'system',

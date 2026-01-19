@@ -16,11 +16,13 @@ defmodule SocketServer.Publishers.StreamPublisher do
   - `agent_code` - Agent code from JWT
   - `client_id` - Client ID (from socket assigns)
   - `user_identifier` - User identifier (from socket assigns)
-  - `content` - Message content
+  - `content` - Message content (required for text, optional for media as caption fallback)
   - `message_type` - Message type (default: "text")
   - `sender_info` - Sender information map (from JWT)
   - `platform` - Platform type: "wpp" or "wa-official" (default: "wpp")
   - `client_message_id` - Optional client message ID for idempotency (allows client to match optimistic updates)
+  - `media_url` - Optional media URL for media message types (image, video, file, etc.)
+  - `caption` - Optional caption for media messages
   
   ## Returns
   
@@ -37,11 +39,13 @@ defmodule SocketServer.Publishers.StreamPublisher do
       ...>   "text",
       ...>   %{senderId: "agent-123", senderDisplayName: "John Doe"},
       ...>   "wpp",
-      ...>   "client-msg-123"
+      ...>   "client-msg-123",
+      ...>   nil,
+      ...>   nil
       ...> )
       {:ok, "1768543834709-0"}
   """
-  def publish_outgoing_message(agent_code, client_id, user_identifier, content, message_type \\ "text", sender_info \\ %{}, platform \\ "wpp", client_message_id \\ nil) do
+  def publish_outgoing_message(agent_code, client_id, user_identifier, content, message_type \\ "text", sender_info \\ %{}, platform \\ "wpp", client_message_id \\ nil, media_url \\ nil, caption \\ nil) do
     # Get Redis connection
     case Process.whereis(:redix) do
       nil ->
@@ -75,6 +79,19 @@ defmodule SocketServer.Publishers.StreamPublisher do
             "hashedId" => hashed_id,
             "metadata" => build_metadata(agent_code, sender_info, hashed_id, client_message_id)
           }
+          
+          # Add mediaUrl and caption if provided (for media message types)
+          entry_data = if media_url do
+            entry_data |> Map.put("mediaUrl", media_url)
+          else
+            entry_data
+          end
+          
+          entry_data = if caption do
+            entry_data |> Map.put("caption", caption)
+          else
+            entry_data
+          end
           
           # Prepare stream entry (convert to string format for Redis)
           stream_entry = prepare_stream_entry(entry_data)

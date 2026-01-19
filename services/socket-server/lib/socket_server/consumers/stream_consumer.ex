@@ -336,6 +336,14 @@ defmodule SocketServer.Consumers.StreamConsumer do
     user_identifier = safe_get(data, "userIdentifier") || safe_get(data, "user_identifier")
     conversation_id = if client_id && user_identifier, do: "#{client_id}:#{user_identifier}", else: nil
     
+    # Extract messageType, mediaUrl, and caption from stream data (for media messages)
+    message_type = safe_get(data, "messageType") || safe_get(data, "message_type") || "text"
+    
+    # For outgoing messages (agent sends): mediaUrl and caption are at top level
+    # For incoming messages (user sends): mediaUrls (array) is in metadata.message.mediaUrls, caption is in content
+    media_url = safe_get(data, "mediaUrl") || safe_get(data, "media_url")
+    caption = safe_get(data, "caption")
+    
     # Extract clientMessageId from metadata (for idempotency - allows client to match optimistic updates)
     metadata = safe_get(data, "metadata") || %{}
     # Try both string and atom keys, and also check if metadata is a string that needs parsing
@@ -354,15 +362,47 @@ defmodule SocketServer.Consumers.StreamConsumer do
                         Map.get(metadata, "client_message_id") || 
                         Map.get(metadata, :client_message_id)
     
-    %{
+    # If mediaUrl not found at top level, check metadata for incoming messages
+    # Incoming messages store mediaUrls as an array in metadata.message.mediaUrls
+    media_url = if is_nil(media_url) do
+      message_meta = safe_get(metadata, "message") || %{}
+      media_urls_array = safe_get(message_meta, "mediaUrls") || safe_get(message_meta, "media_urls") || []
+      
+      # Use first media URL if available (incoming messages typically have one media file)
+      if is_list(media_urls_array) and length(media_urls_array) > 0 do
+        List.first(media_urls_array)
+      else
+        nil
+      end
+    else
+      media_url
+    end
+    
+    payload = %{
       event_id: entry_id,
       event_type: event_type,
       content: content,
+      message_type: message_type, # Include messageType for media message support
       sender: sender,
       timestamp: safe_get(data, "timestamp") || DateTime.utc_now() |> DateTime.to_iso8601(),
       conversation_id: conversation_id,
       client_message_id: client_message_id # Include clientMessageId for idempotency matching
     }
+    
+    # Add mediaUrl and caption if present (for media messages)
+    payload = if media_url do
+      Map.put(payload, :media_url, media_url)
+    else
+      payload
+    end
+    
+    payload = if caption do
+      Map.put(payload, :caption, caption)
+    else
+      payload
+    end
+    
+    payload
   end
 
   defp extract_sender_info(data, event_type) do
@@ -424,6 +464,14 @@ defmodule SocketServer.Consumers.StreamConsumer do
     # Extract sender info for display
     sender = extract_sender_info(data, event_type)
     
+    # Extract messageType, mediaUrl, and caption from stream data (for media messages)
+    message_type = safe_get(data, "messageType") || safe_get(data, "message_type") || "text"
+    
+    # For outgoing messages (agent sends): mediaUrl and caption are at top level
+    # For incoming messages (user sends): mediaUrls (array) is in metadata.message.mediaUrls, caption is in content
+    media_url = safe_get(data, "mediaUrl") || safe_get(data, "media_url")
+    caption = safe_get(data, "caption")
+    
     # Extract clientMessageId from metadata (for idempotency - allows client to match optimistic updates)
     metadata = safe_get(data, "metadata") || %{}
     # Try both string and atom keys, and also check if metadata is a string that needs parsing
@@ -442,7 +490,23 @@ defmodule SocketServer.Consumers.StreamConsumer do
                         Map.get(metadata, "client_message_id") || 
                         Map.get(metadata, :client_message_id)
     
-    %{
+    # If mediaUrl not found at top level, check metadata for incoming messages
+    # Incoming messages store mediaUrls as an array in metadata.message.mediaUrls
+    media_url = if is_nil(media_url) do
+      message_meta = safe_get(metadata, "message") || %{}
+      media_urls_array = safe_get(message_meta, "mediaUrls") || safe_get(message_meta, "media_urls") || []
+      
+      # Use first media URL if available (incoming messages typically have one media file)
+      if is_list(media_urls_array) and length(media_urls_array) > 0 do
+        List.first(media_urls_array)
+      else
+        nil
+      end
+    else
+      media_url
+    end
+    
+    payload = %{
       event_id: entry_id,
       event_type: event_type,
       conversation_id: hashed_id, # Use hashed_id as conversation_id (universal ID across services)
@@ -450,10 +514,26 @@ defmodule SocketServer.Consumers.StreamConsumer do
       user_identifier: user_identifier,
       hashed_id: hashed_id, # Keep hashed_id for backward compatibility
       content: content, # Message content for conversation list preview
+      message_type: message_type, # Include messageType for media message support
       sender: sender, # Sender info for display
       timestamp: safe_get(data, "timestamp") || DateTime.utc_now() |> DateTime.to_iso8601(),
       client_message_id: client_message_id # Include clientMessageId for idempotency matching
     }
+    
+    # Add mediaUrl and caption if present (for media messages)
+    payload = if media_url do
+      Map.put(payload, :media_url, media_url)
+    else
+      payload
+    end
+    
+    payload = if caption do
+      Map.put(payload, :caption, caption)
+    else
+      payload
+    end
+    
+    payload
   end
 
   # Helper to safely get values from maps, handling JSON strings
@@ -486,8 +566,53 @@ defmodule SocketServer.Consumers.StreamConsumer do
         extract_fallback_content(data)
       
       "message:incoming" ->
-        content = safe_get(data, "content") || ""
-        Jason.encode!([%{type: "text", text: to_string(content)}])
+        # Check if this is a media message
+        message_type = safe_get(data, "messageType") || safe_get(data, "message_type") || "text"
+        media_types = ["image", "video", "audio", "file", "document", "sticker"]
+        is_media_type = message_type in media_types
+        
+        # Extract mediaUrl from metadata.message.mediaUrls (for incoming) or top-level (for outgoing)
+        media_url = safe_get(data, "mediaUrl") || safe_get(data, "media_url")
+        
+        # If not found at top level, check metadata for incoming messages
+        media_url = if is_nil(media_url) and is_media_type do
+          metadata = safe_get(data, "metadata") || %{}
+          metadata = case metadata do
+            m when is_map(m) -> m
+            s when is_binary(s) -> 
+              case Jason.decode(s) do
+                {:ok, decoded} -> decoded
+                {:error, _} -> %{}
+              end
+            _ -> %{}
+          end
+          message_meta = safe_get(metadata, "message") || %{}
+          media_urls_array = safe_get(message_meta, "mediaUrls") || safe_get(message_meta, "media_urls") || []
+          if is_list(media_urls_array) and length(media_urls_array) > 0 do
+            List.first(media_urls_array)
+          else
+            nil
+          end
+        else
+          media_url
+        end
+        
+        content = safe_get(data, "content") || "" # Caption for media, text for regular messages
+        
+        if is_media_type and media_url do
+          # Format as media message
+          message_obj = %{type: message_type, url: media_url}
+          # Add caption if available
+          message_obj = if content && content != "" do
+            Map.put(message_obj, :caption, to_string(content))
+          else
+            message_obj
+          end
+          Jason.encode!([message_obj])
+        else
+          # Format as text message
+          Jason.encode!([%{type: "text", text: to_string(content)}])
+        end
       
       _ ->
         Jason.encode!([])
@@ -515,11 +640,32 @@ defmodule SocketServer.Consumers.StreamConsumer do
   defp extract_fallback_content(data) do
     content = safe_get(data, "content")
     message_type = safe_get(data, "messageType") || safe_get(data, "message_type") || "text"
+    media_types = ["image", "video", "audio", "file", "document", "sticker"]
+    is_media_type = message_type in media_types
+    media_url = safe_get(data, "mediaUrl") || safe_get(data, "media_url")
+    caption = safe_get(data, "caption")
     
-    if content do
-      Jason.encode!([%{type: message_type, text: to_string(content)}])
-    else
-      Jason.encode!([])
+    cond do
+      is_media_type && media_url ->
+        # Format as media message
+        message_obj = %{type: message_type, url: media_url}
+        # Add caption if available (prefer explicit caption, fallback to content)
+        message_obj = cond do
+          caption && caption != "" ->
+            Map.put(message_obj, :caption, to_string(caption))
+          content && content != "" ->
+            Map.put(message_obj, :caption, to_string(content))
+          true ->
+            message_obj
+        end
+        Jason.encode!([message_obj])
+      
+      content ->
+        # Format as text message
+        Jason.encode!([%{type: message_type, text: to_string(content)}])
+      
+      true ->
+        Jason.encode!([])
     end
   end
 

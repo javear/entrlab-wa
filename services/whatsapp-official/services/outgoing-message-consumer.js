@@ -231,15 +231,29 @@ class OutgoingMessageConsumer {
    * Process outgoing message event for WA-Official
    */
   async processOutgoingMessage(eventData) {
-    const { clientId, userIdentifier: userIdentifierRaw, content, messageType = 'text', messageId } = eventData;
+    const { clientId, userIdentifier: userIdentifierRaw, content, messageType = 'text', messageId, mediaUrl, caption } = eventData;
 
     // Ensure userIdentifier is a string
     const userIdentifier = typeof userIdentifierRaw === 'string' 
       ? userIdentifierRaw 
       : String(userIdentifierRaw || '');
 
-    if (!clientId || !userIdentifier || !content) {
-      console.error('❌ [WA-Official Outgoing Consumer] Missing required fields:', { clientId, userIdentifier, content });
+    // For text messages, content is required. For media messages, mediaUrl is required.
+    const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+    const isMediaType = mediaTypes.includes(messageType);
+    
+    if (!clientId || !userIdentifier) {
+      console.error('❌ [WA-Official Outgoing Consumer] Missing required fields:', { clientId, userIdentifier });
+      return;
+    }
+    
+    if (!isMediaType && (!content || content === '')) {
+      console.error('❌ [WA-Official Outgoing Consumer] Missing content for text message:', { clientId, userIdentifier, messageType });
+      return;
+    }
+    
+    if (isMediaType && (!mediaUrl || mediaUrl === '')) {
+      console.error('❌ [WA-Official Outgoing Consumer] Missing mediaUrl for media message:', { clientId, userIdentifier, messageType });
       return;
     }
 
@@ -265,14 +279,74 @@ class OutgoingMessageConsumer {
 
       // Send message via Meta WhatsApp Business API
       const apiUrl = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
-      const payload = {
+      
+      // Build payload based on messageType
+      let payload = {
         messaging_product: 'whatsapp',
         to: userIdentifier, // Phone number without @c.us
-        type: messageType === 'text' ? 'text' : 'text', // Default to text for now
-        text: {
-          body: content
-        }
+        type: messageType
       };
+      
+      // Add type-specific fields based on messageType
+      switch (messageType) {
+        case 'text':
+          payload.text = {
+            body: content
+          };
+          break;
+        
+        case 'image':
+          payload.image = {
+            link: mediaUrl
+          };
+          if (caption || content) {
+            payload.image.caption = caption || content;
+          }
+          break;
+        
+        case 'document':
+        case 'file':
+          payload.document = {
+            link: mediaUrl
+          };
+          if (caption || content) {
+            payload.document.caption = caption || content;
+          }
+          // For documents, we can also specify filename if available
+          // Note: Meta API will determine file type from URL or Content-Type header
+          break;
+        
+        case 'video':
+          payload.video = {
+            link: mediaUrl
+          };
+          if (caption || content) {
+            payload.video.caption = caption || content;
+          }
+          break;
+        
+        case 'audio':
+          payload.audio = {
+            link: mediaUrl
+          };
+          // Audio doesn't support caption in Meta API
+          break;
+        
+        case 'sticker':
+          // Stickers are sent as images in Meta API
+          payload.image = {
+            link: mediaUrl
+          };
+          break;
+        
+        default:
+          // Fallback to text for unknown types
+          console.warn(`⚠️  [WA-Official Outgoing Consumer] Unknown messageType '${messageType}', falling back to text`);
+          payload.type = 'text';
+          payload.text = {
+            body: content || ''
+          };
+      }
 
       const response = await axios.post(apiUrl, payload, {
         headers: {
@@ -300,12 +374,16 @@ class OutgoingMessageConsumer {
           response: {
             messages: [{
               type: messageType,
-              text: content
+              text: content || '',
+              url: mediaUrl || undefined,
+              caption: caption || undefined
             }]
           },
-          // Also include content and messageType at top level for fallback extraction
-          content: content,
+          // Also include content, messageType, mediaUrl, and caption at top level for fallback extraction
+          content: content || '',
           messageType: messageType,
+          mediaUrl: mediaUrl || undefined,
+          caption: caption || undefined,
           metadata: {
             source: 'api',
             postedBy: eventData.metadata?.postedBy || 'system',

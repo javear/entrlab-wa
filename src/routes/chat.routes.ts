@@ -14,5 +14,8 @@ export function createChatRoutes(chatController: ChatController): Router {
     // POST /api/v1/platform/chat/conversations/:conversationId/messages
     router.post('/conversations/:conversationId/messages', (req, res) => chatController.postChatMessage(req, res));
 
+    // PUT /api/v1/platform/chat/conversations/:hashedId/:action (block, pause, release, taken)
+    router.put('/conversations/:hashedId/:action', (req, res) => chatController.setConversationNeedAttention(req, res));
+
     return router;
 }

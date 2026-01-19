@@ -112,6 +112,12 @@ const CONVERSATION_SCHEMA = {
       indexFilterable: true
     },
     {
+      name: 'last_attention',
+      dataType: ['text'],
+      description: 'Current needAttention status (JSON string: {option, reason, from, to, taken})',
+      indexFilterable: false
+    },
+    {
       name: 'metadata',
       dataType: ['text'],
       description: 'Additional metadata about the conversation (stored as JSON string for flexibility)'
@@ -277,8 +283,23 @@ async function initializeSchemas(client) {
             .do();
           console.log('✅ Successfully added hashed_id field to Conversation schema');
         }
+        
+        if (!conversationProperties.includes('last_attention')) {
+          console.log('➕ Adding last_attention field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'last_attention',
+              dataType: ['text'],
+              description: 'Current needAttention status (JSON string: {option, reason, from, to, taken})',
+              indexFilterable: false
+            })
+            .do();
+          console.log('✅ Successfully added last_attention field to Conversation schema');
+        }
       } catch (error) {
-        console.warn('⚠️  Could not check/add hashed_id property:', error.message);
+        console.warn('⚠️  Could not check/add hashed_id or last_attention property:', error.message);
       }
     }
 

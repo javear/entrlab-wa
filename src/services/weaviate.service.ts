@@ -147,7 +147,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status _additional { id }')
+          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status last_attention _additional { id }')
           .withWhere({
             path: ['participant_ids'],
             operator: 'ContainsAny',
@@ -242,7 +242,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status _additional { id }')
+          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status last_attention _additional { id }')
           .withLimit(limit + offset) // Get more to handle offset
           .withSort([{
             path: ['last_event_at'],
@@ -323,7 +323,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at status _additional { id }')
+          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at status last_attention _additional { id }')
           .withWhere({
             path: ['hashed_id'],
             operator: 'Equal',
@@ -360,7 +360,7 @@ export class WeaviateService {
             .get()
             .withClassName('Conversation')
             .withTenant(agentCode)
-            .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at status _additional { id }')
+            .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at status last_attention _additional { id }')
             .withLimit(1000) // Get a reasonable number to search through
             .do();
           

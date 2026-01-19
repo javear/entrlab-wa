@@ -144,7 +144,12 @@ defmodule SocketServerWeb.ConversationChannel do
     conversation_id = Map.get(payload, "conversationId") || Map.get(payload, :conversationId)
     content = Map.get(payload, "content") || Map.get(payload, :content)
     message_type = Map.get(payload, "messageType") || Map.get(payload, :message_type) || "text"
+    media_url = Map.get(payload, "mediaUrl") || Map.get(payload, :media_url)
+    caption = Map.get(payload, "caption") || Map.get(payload, :caption)
     client_message_id = Map.get(payload, "clientMessageId") || Map.get(payload, :client_message_id) # Optional: idempotency key from client
+    
+    # Media types that require mediaUrl
+    media_types = ["image", "video", "audio", "file", "document", "sticker"]
     
     cond do
       is_nil(agent_code) ->
@@ -159,9 +164,14 @@ defmodule SocketServerWeb.ConversationChannel do
         Logger.warning("send_message: missing conversationId in payload")
         {:reply, {:error, %{status: "error", reason: "missing_conversation_id"}}, socket}
       
-      is_nil(content) or content == "" ->
-        Logger.warning("send_message: missing or empty content")
-        {:reply, {:error, %{status: "error", reason: "missing_content"}}, socket}
+      # For text messages, content is required. For media messages, content is optional (caption fallback).
+      message_type not in media_types and (is_nil(content) or content == "") ->
+        Logger.warning("send_message: missing or empty content for text message")
+        {:reply, {:error, %{status: "error", reason: "missing_content", message: "Text messages require content"}}, socket}
+      
+      message_type in media_types and (is_nil(media_url) or media_url == "") ->
+        Logger.warning("send_message: media message type '#{message_type}' requires mediaUrl")
+        {:reply, {:error, %{status: "error", reason: "missing_media_url", message: "Media message types require a mediaUrl field"}}, socket}
       
       true ->
         # Calculate expected hashed_id from socket assigns
@@ -172,7 +182,7 @@ defmodule SocketServerWeb.ConversationChannel do
           Logger.warning("send_message: conversationId mismatch (expected: #{expected_hashed_id}, got: #{conversation_id})")
           {:reply, {:error, %{status: "error", reason: "invalid_conversation_id"}}, socket}
         else
-          # Publish to stream (include platform and clientMessageId from socket assigns)
+          # Publish to stream (include platform, clientMessageId, mediaUrl, and caption)
           case SocketServer.Publishers.StreamPublisher.publish_outgoing_message(
             agent_code,
             client_id,
@@ -181,7 +191,9 @@ defmodule SocketServerWeb.ConversationChannel do
             message_type,
             sender_info,
             platform,
-            client_message_id
+            client_message_id,
+            media_url,
+            caption
           ) do
             {:ok, entry_id} ->
               Logger.info("✅ send_message: Published successfully (entryId: #{entry_id}, conversationId: #{conversation_id}, platform: #{platform}#{if client_message_id, do: ", clientMessageId: #{client_message_id}", else: ""})")

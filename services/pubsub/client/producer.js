@@ -451,6 +451,91 @@ class StreamProducer {
   }
 
   /**
+   * Publish needAttention changed event
+   * @param {Object} attentionData - NeedAttention data
+   * @returns {Promise<string>} - Stream entry ID
+   */
+  async publishNeedAttentionChanged(attentionData) {
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Check connection state
+        const isReallyConnected = this.isConnected && 
+                                 this.client && 
+                                 this.client.isReady;
+        
+        if (!isReallyConnected) {
+          console.log(`🔄 [Producer] Not connected (attempt ${attempt}/${maxRetries}), reconnecting...`);
+          await this.connect();
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!this.client || !this.client.isReady) {
+          throw new Error('Stream producer client not ready');
+        }
+
+        // Calculate hashedId if agentCode, clientId, and userIdentifier are available
+        let hashedId = attentionData.hashedId || null;
+        if (!hashedId && attentionData.agentCode && attentionData.clientId && attentionData.userIdentifier) {
+          try {
+            hashedId = this.hashRoomId(attentionData.agentCode, attentionData.clientId, attentionData.userIdentifier);
+          } catch (error) {
+            console.warn(`⚠️  [Producer] Failed to hash room ID: ${error.message}`);
+          }
+        }
+
+        const entryData = {
+          eventType: 'needattention:changed',
+          timestamp: new Date().toISOString(),
+          clientId: attentionData.clientId,
+          platform: attentionData.platform,
+          userIdentifier: attentionData.userIdentifier,
+          agentCode: attentionData.agentCode, // Required for tenant
+          option: attentionData.option || null, // null means released
+          reason: attentionData.reason || null,
+          from: attentionData.from || null,
+          to: attentionData.to || null,
+          taken: attentionData.taken || null,
+          ...(hashedId && { hashedId })
+        };
+
+        const streamEntry = this.prepareStreamEntry(entryData);
+        console.log(`📤 [Producer] Publishing needattention:changed to stream: ${this.config.streamName}`);
+        const entryId = await this.client.xAdd(
+          this.config.streamName,
+          '*',
+          streamEntry
+        );
+
+        console.log(`📤 [Producer] Published needattention:changed to stream: ${entryId} (stream: ${this.config.streamName})`);
+        return entryId;
+      } catch (error) {
+        lastError = error;
+        const isConnectionError = error.code === 'ECONNRESET' || 
+                                 error.code === 'EPIPE' || 
+                                 error.message?.includes('Connection') ||
+                                 error.message?.includes('closed');
+        
+        if (isConnectionError && attempt < maxRetries) {
+          console.log(`⚠️  [Producer] Connection error on attempt ${attempt}, will retry:`, error.message);
+          this.isConnected = false;
+          await new Promise(resolve => setTimeout(resolve, attempt * 200));
+          continue;
+        }
+        
+        if (!isConnectionError || attempt === maxRetries) {
+          console.error('❌ Error publishing needattention:changed:', error.message || error);
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
    * Hash room ID using HMAC-SHA256 (matches Elixir implementation)
    * @param {string} agentCode - Agent code
    * @param {string} clientId - Client ID

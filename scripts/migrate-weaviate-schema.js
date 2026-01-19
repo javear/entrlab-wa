@@ -202,6 +202,24 @@ async function main() {
       }
     }
 
+    // Add last_attention field to Conversation if it doesn't exist
+    if (!conversationProperties.includes('last_attention')) {
+      console.log('➕ Adding last_attention field to Conversation schema...');
+      await client.schema
+        .propertyCreator()
+        .withClassName('Conversation')
+        .withProperty({
+          name: 'last_attention',
+          dataType: ['text'],
+          description: 'Current needAttention status (JSON string: {option, reason, from, to, taken})',
+          indexFilterable: false
+        })
+        .do();
+      console.log('✅ Successfully added last_attention field to Conversation schema\n');
+    } else {
+      console.log('✅ last_attention field already exists in Conversation schema\n');
+    }
+
     // Check participant_ids property configuration
     console.log('\n📋 Checking participant_ids property configuration...');
     const participantIdsProperty = conversationSchema.properties?.find((p) => p.name === 'participant_ids');

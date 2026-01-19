@@ -4,6 +4,10 @@ import { Environment } from '../types';
 import mongoose, { Document, Schema } from 'mongoose';
 import { encryptWithVault, decryptWithVault } from '../utils/vault';
 import crypto from 'crypto';
+import { WeaviateService } from '../services/weaviate.service';
+
+// Stream Producer for publishing events
+const { StreamProducer } = require('../../services/pubsub/client/producer');
 
 // ============================================
 // Platform Client Model
@@ -16,11 +20,43 @@ interface IPrivateAgentAssignment {
 
 interface INeedAttention {
   userIdentifier: string;
-  option: 'pause' | 'release' | 'block';
+  option: 'pause' | 'release' | 'block' | 'taken';
   from?: Date;
   to?: Date;
   reason?: string;
   updatedAt?: Date;
+  taken?: {
+    by: {
+      id: string;          // sender.senderId from JWT
+      name: string;        // sender.senderDisplayName from JWT
+      role: string;        // sender.senderRoleLabel from JWT
+      avatarUrl?: string;  // sender.senderAvatarUrl from JWT
+    }
+  };
+}
+
+interface INeedAttentionHistory {
+  userIdentifier: string;
+  option: 'pause' | 'release' | 'block' | 'taken';
+  previousOption?: string;
+  from?: Date;
+  to?: Date;
+  reason?: string;
+  changedAt: Date;
+  changedBy?: {
+    id: string;
+    name: string;
+    role: string;
+    avatarUrl?: string;
+  };
+  taken?: {
+    by: {
+      id: string;
+      name: string;
+      role: string;
+      avatarUrl?: string;
+    };
+  };
 }
 
 interface IPlatformClientAgent extends Document {
@@ -31,6 +67,7 @@ interface IPlatformClientAgent extends Document {
   configuration?: string; // Encrypted configuration
   privateAgentAssignment?: IPrivateAgentAssignment[]; // Array of user-specific agent assignments
   needAttention?: INeedAttention[]; // Array of users needing attention (pause, block, etc.)
+  needAttentionHistory?: INeedAttentionHistory[]; // Audit trail of needAttention changes
   assignedAt?: Date;
   updatedAt?: Date;
   isActive: boolean;
@@ -59,14 +96,88 @@ try {
       schema.add({
         needAttention: [{
           userIdentifier: { type: String, required: true },
-          option: { type: String, required: true, enum: ['pause', 'release', 'block'] },
+          option: { type: String, required: true, enum: ['pause', 'release', 'block', 'taken'] },
           from: { type: Date },
           to: { type: Date },
           reason: { type: String },
-          updatedAt: { type: Date, default: Date.now }
+          updatedAt: { type: Date, default: Date.now },
+          taken: {
+            type: {
+              by: {
+                id: { type: String, required: true },
+                name: { type: String, required: true },
+                role: { type: String, required: true },
+                avatarUrl: { type: String, required: false }
+              }
+            },
+            required: false
+          }
+        }],
+        needAttentionHistory: [{
+          userIdentifier: { type: String, required: true },
+          option: { type: String, required: true, enum: ['pause', 'release', 'block', 'taken'] },
+          previousOption: { type: String },
+          from: { type: Date },
+          to: { type: Date },
+          reason: { type: String },
+          changedAt: { type: Date, default: Date.now, required: true },
+          changedBy: {
+            type: {
+              id: { type: String },
+              name: { type: String },
+              role: { type: String },
+              avatarUrl: { type: String }
+            },
+            required: false
+          },
+          taken: {
+            type: {
+              by: {
+                id: { type: String, required: true },
+                name: { type: String, required: true },
+                role: { type: String, required: true },
+                avatarUrl: { type: String, required: false }
+              }
+            },
+            required: false
+          }
         }]
       });
-      console.log('✅ Added needAttention field to existing PlatformClientAgent schema');
+      console.log('✅ Added needAttention and needAttentionHistory fields to existing PlatformClientAgent schema');
+    } else if (!schema.path('needAttentionHistory')) {
+      // Add only needAttentionHistory field if needAttention already exists
+      schema.add({
+        needAttentionHistory: [{
+          userIdentifier: { type: String, required: true },
+          option: { type: String, required: true, enum: ['pause', 'release', 'block', 'taken'] },
+          previousOption: { type: String },
+          from: { type: Date },
+          to: { type: Date },
+          reason: { type: String },
+          changedAt: { type: Date, default: Date.now, required: true },
+          changedBy: {
+            type: {
+              id: { type: String },
+              name: { type: String },
+              role: { type: String },
+              avatarUrl: { type: String }
+            },
+            required: false
+          },
+          taken: {
+            type: {
+              by: {
+                id: { type: String, required: true },
+                name: { type: String, required: true },
+                role: { type: String, required: true },
+                avatarUrl: { type: String, required: false }
+              }
+            },
+            required: false
+          }
+        }]
+      });
+      console.log('✅ Added needAttentionHistory field to existing PlatformClientAgent schema');
     }
   } catch (schemaError) {
     console.warn('⚠️ Could not add fields to existing schema:', schemaError);
@@ -118,7 +229,7 @@ try {
         option: {
           type: String,
           required: true,
-          enum: ['pause', 'release', 'block']
+          enum: ['pause', 'release', 'block', 'taken']
         },
         from: {
           type: Date
@@ -132,6 +243,68 @@ try {
         updatedAt: {
           type: Date,
           default: Date.now
+        },
+        taken: {
+          type: {
+            by: {
+              id: { type: String, required: true },
+              name: { type: String, required: true },
+              role: { type: String, required: true },
+              avatarUrl: { type: String, required: false }
+            }
+          },
+          required: false
+        }
+      }],
+      default: undefined
+    },
+    needAttentionHistory: {
+      type: [{
+        userIdentifier: {
+          type: String,
+          required: true
+        },
+        option: {
+          type: String,
+          required: true,
+          enum: ['pause', 'release', 'block', 'taken']
+        },
+        previousOption: {
+          type: String
+        },
+        from: {
+          type: Date
+        },
+        to: {
+          type: Date
+        },
+        reason: {
+          type: String
+        },
+        changedAt: {
+          type: Date,
+          default: Date.now,
+          required: true
+        },
+        changedBy: {
+          type: {
+            id: { type: String },
+            name: { type: String },
+            role: { type: String },
+            avatarUrl: { type: String }
+          },
+          required: false
+        },
+        taken: {
+          type: {
+            by: {
+              id: { type: String, required: true },
+              name: { type: String, required: true },
+              role: { type: String, required: true },
+              avatarUrl: { type: String, required: false }
+            }
+          },
+          required: false
         }
       }],
       default: undefined
@@ -153,7 +326,9 @@ try {
   });
 
   PlatformClientAgentSchema.pre('save', function(next) {
-    this.updatedAt = new Date();
+    if (this.isModified() || this.isNew) {
+      (this as any).updatedAt = new Date();
+    }
     next();
   });
 
@@ -198,7 +373,8 @@ function generateVerifyToken(): string {
 export class PlatformController {
   constructor(
     private whatsappService: WPPConnectWhatsAppService,
-    private env: Environment
+    private env: Environment,
+    private weaviateService?: WeaviateService
   ) {}
 
   /**
@@ -1247,7 +1423,8 @@ export class PlatformController {
         reason: item.reason || null,
         from: item.from || null,
         to: item.to || null,
-        updatedAt: item.updatedAt || null
+        updatedAt: item.updatedAt || null,
+        taken: item.taken || null
       }));
 
       res.json({
@@ -1271,7 +1448,7 @@ export class PlatformController {
    */
   async setNeedAttention(req: Request, res: Response): Promise<void> {
     try {
-      const { clientId, userIdentifier } = req.params;
+      const { clientId, userIdentifier: identifierParam } = req.params;
       const { option, from, to, reason } = req.body;
 
       if (!clientId) {
@@ -1282,10 +1459,10 @@ export class PlatformController {
         return;
       }
 
-      if (!userIdentifier) {
+      if (!identifierParam) {
         res.status(400).json({
           success: false,
-          message: 'userIdentifier is required'
+          message: 'userIdentifier or conversationId (hashedId) is required'
         });
         return;
       }
@@ -1293,48 +1470,111 @@ export class PlatformController {
       if (!option) {
         res.status(400).json({
           success: false,
-          message: 'option is required (pause, release, or block)'
+          message: 'option is required (pause, release, block, or taken)'
         });
         return;
       }
 
-      if (!['pause', 'release', 'block'].includes(option)) {
+      if (!['pause', 'release', 'block', 'taken'].includes(option)) {
         res.status(400).json({
           success: false,
-          message: 'option must be one of: pause, release, block'
+          message: 'option must be one of: pause, release, block, taken'
         });
         return;
+      }
+
+      // Resolve identifier - check if it's a hashedId or userIdentifier
+      let userIdentifier: string = identifierParam;
+      let actualClientId = clientId;
+      
+      // Check if identifier looks like a hashedId (base64 encoded, ~44 chars)
+      // HashedId is base64, userIdentifier is typically a phone number
+      const looksLikeHashId = /^[A-Za-z0-9+\/]{40,}={0,2}$/.test(identifierParam);
+      
+      if (looksLikeHashId && this.weaviateService) {
+        // Try to find conversation by hashedId
+        const jwtUser = (req as any).user || {};
+        const agentCode = jwtUser.agentCode;
+        
+        if (agentCode) {
+          try {
+            const conversation = await this.weaviateService.getConversationById(
+              identifierParam,
+              agentCode
+            );
+            
+            if (conversation) {
+              // Extract from conversation_id format: "clientId:userIdentifier"
+              const parts = conversation.conversation_id.split(':');
+              if (parts.length === 2 && parts[0] && parts[1]) {
+                actualClientId = parts[0];
+                userIdentifier = parts[1];
+                
+                // Verify route clientId matches conversation clientId (if provided in route)
+                if (clientId && clientId !== actualClientId) {
+                  res.status(400).json({
+                    success: false,
+                    message: `Client ID mismatch: conversation belongs to '${actualClientId}', not '${clientId}'. Use /api/v1/platform/clients/${actualClientId}/needattention/${identifierParam}`
+                  });
+                  return;
+                }
+                
+                console.log(`🔍 Resolved hashedId ${identifierParam} to clientId: ${actualClientId}, userIdentifier: ${userIdentifier}`);
+              }
+            }
+          } catch (error) {
+            console.warn('⚠️ Error querying Weaviate for hashedId, treating as userIdentifier:', error);
+            // Fall through to use identifierParam as userIdentifier
+          }
+        }
       }
 
       // Query with lean() to get raw MongoDB data including needAttention
-      const existingDoc = await PlatformClientAgent.findOne({ clientId, isActive: true }).lean();
+      const existingDoc = await PlatformClientAgent.findOne({ clientId: actualClientId, isActive: true }).lean();
       
       if (!existingDoc) {
         res.status(404).json({
           success: false,
-          message: `Client ${clientId} not found in PlatformClientAgent collection.`
+          message: `Client ${actualClientId} not found in PlatformClientAgent collection.`
         });
         return;
       }
 
       const existingNeedAttention = (existingDoc.needAttention as INeedAttention[]) || [];
+      const existingHistory = (existingDoc.needAttentionHistory as any[]) || [];
       let updatedNeedAttention: INeedAttention[];
+      let previousOption: string | undefined;
+
+      // Extract sender information from JWT for history tracking
+      const jwtUser = (req as any).user || {};
+      const sender = jwtUser.sender || {};
 
       if (option === 'release') {
+        // Find the previous option before release
+        const existingItem = existingNeedAttention.find(
+          (item: INeedAttention) => item.userIdentifier === userIdentifier
+        );
+        previousOption = existingItem?.option;
+
         // Remove the user from needAttention array
         updatedNeedAttention = existingNeedAttention.filter(
           (item: INeedAttention) => item.userIdentifier !== userIdentifier
         );
-        console.log(`✅ Released user ${userIdentifier} from needAttention for client ${clientId}`);
+        console.log(`✅ Released user ${userIdentifier} from needAttention for client ${actualClientId}`);
       } else {
         // Upsert: update if exists, add if not
         const existingIndex = existingNeedAttention.findIndex(
           (item: INeedAttention) => item.userIdentifier === userIdentifier
         );
 
+        // Get previous option if updating existing entry
+        if (existingIndex >= 0 && existingNeedAttention[existingIndex]) {
+          previousOption = existingNeedAttention[existingIndex].option;
+        }
+
         const needAttentionItem: INeedAttention = {
           userIdentifier,
-          option: option as 'pause' | 'block',
+          option: option as 'pause' | 'block' | 'taken',
           updatedAt: new Date()
         };
 
@@ -1347,6 +1587,26 @@ export class PlatformController {
         }
         if (reason) {
           needAttentionItem.reason = reason;
+        }
+
+        // Extract sender information from JWT for 'taken' option
+        if (option === 'taken') {
+          if (!sender.senderId && !sender.id) {
+            res.status(400).json({
+              success: false,
+              message: 'sender information is required in JWT for "taken" option'
+            });
+            return;
+          }
+          
+          needAttentionItem.taken = {
+            by: {
+              id: sender.senderId || sender.id || '',
+              name: sender.senderDisplayName || sender.displayName || '',
+              role: sender.senderRoleLabel || sender.roleLabel || 'agent',
+              avatarUrl: sender.senderAvatarUrl || sender.avatarUrl || null
+            }
+          };
         }
 
         if (existingIndex >= 0) {
@@ -1362,12 +1622,54 @@ export class PlatformController {
         }
       }
 
+      // Create history entry
+      const historyEntry: any = {
+        userIdentifier,
+        option: option as 'pause' | 'release' | 'block' | 'taken',
+        changedAt: new Date()
+      };
+
+      if (previousOption) {
+        historyEntry.previousOption = previousOption;
+      }
+
+      // Add optional fields to history
+      if (from) {
+        historyEntry.from = new Date(from);
+      }
+      if (to) {
+        historyEntry.to = new Date(to);
+      }
+      if (reason) {
+        historyEntry.reason = reason;
+      }
+
+      // Add changedBy if sender info is available
+      if (sender.senderId || sender.id) {
+        historyEntry.changedBy = {
+          id: sender.senderId || sender.id || '',
+          name: sender.senderDisplayName || sender.displayName || '',
+          role: sender.senderRoleLabel || sender.roleLabel || 'agent',
+          avatarUrl: sender.senderAvatarUrl || sender.avatarUrl || null
+        };
+      }
+
+      // Add taken info to history if present
+      const updatedItem = updatedNeedAttention.find(item => item.userIdentifier === userIdentifier);
+      if (updatedItem?.taken) {
+        historyEntry.taken = updatedItem.taken;
+      }
+
+      // Add history entry to array
+      const updatedHistory = [...existingHistory, historyEntry];
+
       // Update the document
       const updatedClient = await PlatformClientAgent.findOneAndUpdate(
-        { clientId, isActive: true },
+        { clientId: actualClientId, isActive: true },
         { 
           $set: { 
             needAttention: updatedNeedAttention,
+            needAttentionHistory: updatedHistory,
             updatedAt: new Date()
           }
         },
@@ -1377,9 +1679,46 @@ export class PlatformController {
       if (!updatedClient) {
         res.status(404).json({
           success: false,
-          message: `Failed to update client ${clientId}`
+          message: `Failed to update client ${actualClientId}`
         });
         return;
+      }
+
+      // Publish needattention:changed event to stream
+      try {
+        const producer = new StreamProducer();
+        await producer.connect();
+
+        // Get agentCode from JWT or from existingDoc
+        const jwtUser = (req as any).user || {};
+        const agentCode = jwtUser.agentCode || existingDoc.ai_agent_code;
+        
+        if (agentCode) {
+          // Get the needAttention item that was updated (for taken object if option === 'taken')
+          const updatedItem = option === 'release' 
+            ? null 
+            : updatedNeedAttention.find((item: INeedAttention) => item.userIdentifier === userIdentifier);
+
+          const attentionData: any = {
+            clientId: actualClientId,
+            platform: existingDoc.platform || 'wpp',
+            userIdentifier,
+            agentCode,
+            option: option === 'release' ? null : option, // null means released
+            reason: updatedItem?.reason || reason || null,
+            from: updatedItem?.from ? updatedItem.from.toISOString() : (from || null),
+            to: updatedItem?.to ? updatedItem.to.toISOString() : (to || null),
+            taken: updatedItem?.taken || null
+          };
+
+          await producer.publishNeedAttentionChanged(attentionData);
+          console.log(`✅ Published needattention:changed event to stream for ${userIdentifier}`);
+        } else {
+          console.warn(`⚠️  Cannot publish needattention:changed event: agentCode not found (clientId: ${actualClientId})`);
+        }
+      } catch (streamError) {
+        // Log error but don't fail API response (MongoDB update succeeded)
+        console.error('❌ Error publishing needattention:changed event to stream:', streamError);
       }
 
       const responseMessage = option === 'release' 

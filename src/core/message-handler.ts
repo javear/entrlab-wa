@@ -249,7 +249,7 @@ export class WPPConnectMessageHandler {
       
       // Find matching userIdentifier
       const needAttentionItem = needAttentionList.find(
-        (item: any) => item.userIdentifier === userIdentifier && (item.option === 'block' || item.option === 'pause')
+        (item: any) => item.userIdentifier === userIdentifier && (item.option === 'block' || item.option === 'pause' || item.option === 'taken')
       );
 
       if (!needAttentionItem) {
@@ -266,8 +266,10 @@ export class WPPConnectMessageHandler {
         }
       }
 
-      // User is blocked/paused and not expired
-      const option = needAttentionItem.option === 'block' ? 'blocked' : 'paused';
+      // User is blocked/paused/taken and not expired
+      const option = needAttentionItem.option === 'block' ? 'blocked' : 
+                     needAttentionItem.option === 'pause' ? 'paused' : 
+                     'taken by human agent';
       const reason = needAttentionItem.reason ? ` (reason: ${needAttentionItem.reason})` : '';
       console.log(`🚫 [${clientId}] User ${userIdentifier} is ${option} - skipping message${reason}`);
       return true;
@@ -474,14 +476,7 @@ export class WPPConnectMessageHandler {
     try {
       const userKey = this.getUserKey(clientId, senderNumber);
       
-      // Check needAttention status first (before any message actions)
-      // For WPPConnect, userIdentifier is the phoneNumber (sender's number)
-      const isBlockedOrPaused = await this.checkNeedAttention(clientId, senderNumber);
-      if (isBlockedOrPaused) {
-        return; // Skip all message actions (no read, typing, reply, etc.)
-      }
-      
-      // Extract and store contact information
+      // Extract and store contact information (before checking needAttention)
       const contactInfo = this.extractContactInfo(message);
       this.contactInfo[userKey] = contactInfo;
       
@@ -666,15 +661,24 @@ export class WPPConnectMessageHandler {
         console.log('ℹ️  [WPP Handler] REDIS_HOST check:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');
       }
 
+      // Check needAttention status AFTER publishing to stream (for audit/logging)
+      // For WPPConnect, userIdentifier is the phoneNumber (sender's number)
+      // If blocked/paused/taken, skip AI workflow but keep the stream event
+      const isBlockedOrPaused = await this.checkNeedAttention(clientId, senderNumber);
+      if (isBlockedOrPaused) {
+        console.log(`🚫 [${clientId}] User ${senderNumber} is blocked/paused/taken - skipping AI workflow but event was published to stream`);
+        return; // Skip AI workflow (no read, typing, reply, etc.) but stream event is already published
+      }
+
       // If user is already being processed, mark this message as read immediately
       if (this.processingUsers[userKey]) {
         await this.sendReadReceipt(clientId, senderFullIdForStorage);
       }
 
-      // Add to message queue
+      // Add to message queue (only if not blocked/paused/taken)
       this.addToQueue(clientId, senderNumber, message, enhancedMessage, mediaUrls);
 
-      // Start processing with delay
+      // Start processing with delay (only if not blocked/paused/taken)
       const delay = 16000; // 25 seconds
       this.startProcessing(clientId, senderNumber, delay);
 

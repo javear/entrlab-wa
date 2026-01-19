@@ -3,7 +3,34 @@ import { WeaviateService } from '../services/weaviate.service';
 import { WPPConnectWhatsAppService } from '../services/whatsapp.service';
 import mongoose from 'mongoose';
 
+// Stream Producer for publishing events
+const { StreamProducer } = require('../../services/pubsub/client/producer');
+
 // Import PlatformClientAgent model (reuse from platform.controller)
+interface INeedAttentionHistory {
+  userIdentifier: string;
+  option: 'pause' | 'release' | 'block' | 'taken';
+  previousOption?: string;
+  from?: Date;
+  to?: Date;
+  reason?: string;
+  changedAt: Date;
+  changedBy?: {
+    id: string;
+    name: string;
+    role: string;
+    avatarUrl?: string;
+  };
+  taken?: {
+    by: {
+      id: string;
+      name: string;
+      role: string;
+      avatarUrl?: string;
+    };
+  };
+}
+
 interface IPlatformClientAgent extends mongoose.Document {
   clientId: string;
   platform: 'wpp' | 'wa-official';
@@ -12,6 +39,8 @@ interface IPlatformClientAgent extends mongoose.Document {
     userIdentifier: string;
     agentCode: string;
   }>;
+  needAttention?: INeedAttention[];
+  needAttentionHistory?: INeedAttentionHistory[];
 }
 
 let PlatformClientAgent: mongoose.Model<IPlatformClientAgent>;
@@ -20,6 +49,24 @@ try {
 } catch (error) {
   // Model will be created by platform.controller
   PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent');
+}
+
+// NeedAttention interface (same as platform.controller)
+interface INeedAttention {
+  userIdentifier: string;
+  option: 'pause' | 'release' | 'block' | 'taken';
+  from?: Date;
+  to?: Date;
+  reason?: string;
+  updatedAt?: Date;
+  taken?: {
+    by: {
+      id: string;
+      name: string;
+      role: string;
+      avatarUrl?: string;
+    }
+  };
 }
 
 /**
@@ -109,7 +156,8 @@ export class ChatController {
           lastSenderType: conv.last_sender_type,
           lastSenderId: conv.last_sender_id,
           lastSenderDisplayName: conv.last_sender_display_name,
-          status: conv.status
+          status: conv.status,
+          lastAttention: conv.last_attention ? JSON.parse(conv.last_attention) : null
         })),
         pagination: {
           total: result.total,
@@ -224,15 +272,18 @@ export class ChatController {
   /**
    * Post a chat message to a conversation
    * POST /api/v1/platform/chat/conversations/:conversationId/messages
-   * Body: { content: string, messageType?: string }
+   * Body: { content: string, messageType?: string, mediaUrl?: string, caption?: string }
    * 
    * This will publish a message event to the stream, which will be forwarded
    * to WPP or WA Official to reply to the user
+   * 
+   * For media messages (image, video, file, document, sticker), mediaUrl is required.
+   * Caption is optional for media messages (falls back to content if provided).
    */
   async postChatMessage(req: Request, res: Response): Promise<void> {
     try {
       const { conversationId } = req.params;
-      const { content, messageType = 'text' } = req.body;
+      const { content, messageType = 'text', mediaUrl, caption } = req.body;
 
       if (!conversationId) {
         res.status(400).json({
@@ -242,10 +293,23 @@ export class ChatController {
         return;
       }
 
-      if (!content || typeof content !== 'string') {
+      // Media types that require mediaUrl
+      const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+      const isMediaType = mediaTypes.includes(messageType);
+      
+      // For text messages, content is required. For media messages, mediaUrl is required.
+      if (!isMediaType && (!content || typeof content !== 'string')) {
         res.status(400).json({
           success: false,
-          error: 'content is required and must be a string'
+          error: 'content is required and must be a string for text messages'
+        });
+        return;
+      }
+      
+      if (isMediaType && (!mediaUrl || typeof mediaUrl !== 'string' || mediaUrl.trim() === '')) {
+        res.status(400).json({
+          success: false,
+          error: `mediaUrl is required for media message type '${messageType}'`
         });
         return;
       }
@@ -361,14 +425,14 @@ export class ChatController {
         // Platform is determined from client type (wpp or wa-official)
         // Note: hashed_id (conversationId) is included in metadata for reference,
         // but consumers use clientId and userIdentifier to send messages
-        const entryId = await producer.publishOutgoingMessage({
+        const messageData: any = {
           clientId,
           platform: platform, // 'wpp' or 'wa-official'
           userIdentifier,
           agentCode: finalAgentCode, // Use finalAgentCode (may be overridden by private assignment)
           messageId,
           messageType: messageType || 'text',
-          content,
+          content: content || '', // Allow empty for media messages
           metadata: {
             source: 'api',
             postedBy: jwtUser.agentCode || 'system',
@@ -376,7 +440,17 @@ export class ChatController {
             conversationId: conversationId, // hashed_id (universal ID) for reference/tracking
             timestamp: new Date().toISOString()
           }
-        });
+        };
+        
+        // Add mediaUrl and caption if provided (for media messages)
+        if (mediaUrl) {
+          messageData.mediaUrl = mediaUrl;
+        }
+        if (caption) {
+          messageData.caption = caption;
+        }
+        
+        const entryId = await producer.publishOutgoingMessage(messageData);
 
         console.log(`✅ Published outgoing message to stream: ${entryId} (conversationId: ${conversationId})`);
 
@@ -388,8 +462,10 @@ export class ChatController {
           data: {
             conversationId,
             messageId,
-            content,
+            content: content || '',
             messageType,
+            mediaUrl: mediaUrl || undefined,
+            caption: caption || undefined,
             entryId,
             publishedAt: new Date().toISOString()
           }
@@ -408,6 +484,286 @@ export class ChatController {
         success: false,
         error: 'Failed to post chat message',
         details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Set need attention status for a conversation by hashedId
+   * PUT /api/v1/platform/chat/conversations/:hashedId/:action
+   * Actions: block, pause, release, taken
+   */
+  async setConversationNeedAttention(req: Request, res: Response): Promise<void> {
+    try {
+      const { hashedId, action } = req.params;
+      const { from, to, reason } = req.body;
+
+      if (!hashedId) {
+        res.status(400).json({
+          success: false,
+          message: 'hashedId is required'
+        });
+        return;
+      }
+
+      if (!action) {
+        res.status(400).json({
+          success: false,
+          message: 'action is required (block, pause, release, or taken)'
+        });
+        return;
+      }
+
+      if (!['pause', 'release', 'block', 'taken'].includes(action)) {
+        res.status(400).json({
+          success: false,
+          message: 'action must be one of: block, pause, release, taken'
+        });
+        return;
+      }
+
+      // Get agentCode from JWT
+      const jwtUser = (req as any).user || {};
+      const agentCode = jwtUser.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          message: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      // Get conversation by hashedId
+      const conversation = await this.weaviateService.getConversationById(hashedId, agentCode);
+      
+      if (!conversation) {
+        res.status(404).json({
+          success: false,
+          message: `Conversation with hashedId ${hashedId} not found`
+        });
+        return;
+      }
+
+      // Extract clientId and userIdentifier from conversation_id format: "clientId:userIdentifier"
+      const conversationIdParts = conversation.conversation_id.split(':');
+      if (conversationIdParts.length !== 2 || !conversationIdParts[0] || !conversationIdParts[1]) {
+        res.status(400).json({
+          success: false,
+          message: 'Could not extract clientId and userIdentifier from conversation'
+        });
+        return;
+      }
+
+      const clientId = conversationIdParts[0];
+      const userIdentifier = conversationIdParts[1];
+
+      // Query MongoDB for needAttention
+      const existingDoc = await PlatformClientAgent.findOne({ clientId, isActive: true }).lean() as IPlatformClientAgent | null;
+      
+      if (!existingDoc) {
+        res.status(404).json({
+          success: false,
+          message: `Client ${clientId} not found in PlatformClientAgent collection.`
+        });
+        return;
+      }
+
+      const existingNeedAttention = (existingDoc.needAttention as INeedAttention[]) || [];
+      const existingHistory = (existingDoc.needAttentionHistory as any[]) || [];
+      let updatedNeedAttention: INeedAttention[];
+      let previousOption: string | undefined;
+
+      if (action === 'release') {
+        // Find the previous option before release
+        const existingItem = existingNeedAttention.find(
+          (item: INeedAttention) => item.userIdentifier === userIdentifier
+        );
+        previousOption = existingItem?.option;
+
+        // Remove the user from needAttention array
+        updatedNeedAttention = existingNeedAttention.filter(
+          (item: INeedAttention) => item.userIdentifier !== userIdentifier
+        );
+        console.log(`✅ Released user ${userIdentifier} from needAttention for client ${clientId}`);
+      } else {
+        // Upsert: update if exists, add if not
+        const existingIndex = existingNeedAttention.findIndex(
+          (item: INeedAttention) => item.userIdentifier === userIdentifier
+        );
+
+        // Get previous option if updating existing entry
+        if (existingIndex >= 0 && existingNeedAttention[existingIndex]) {
+          previousOption = existingNeedAttention[existingIndex].option;
+        }
+
+        const needAttentionItem: INeedAttention = {
+          userIdentifier,
+          option: action as 'pause' | 'block' | 'taken',
+          updatedAt: new Date()
+        };
+
+        // Add optional fields if provided
+        if (from) {
+          needAttentionItem.from = new Date(from);
+        }
+        if (to) {
+          needAttentionItem.to = new Date(to);
+        }
+        if (reason) {
+          needAttentionItem.reason = reason;
+        }
+
+        // Extract sender information from JWT for 'taken' action
+        if (action === 'taken') {
+          const sender = jwtUser.sender || {};
+          
+          if (!sender.senderId && !sender.id) {
+            res.status(400).json({
+              success: false,
+              message: 'sender information is required in JWT for "taken" action'
+            });
+            return;
+          }
+          
+          needAttentionItem.taken = {
+            by: {
+              id: sender.senderId || sender.id || '',
+              name: sender.senderDisplayName || sender.displayName || '',
+              role: sender.senderRoleLabel || sender.roleLabel || 'agent',
+              avatarUrl: sender.senderAvatarUrl || sender.avatarUrl || null
+            }
+          };
+        }
+
+        if (existingIndex >= 0) {
+          // Update existing entry
+          existingNeedAttention[existingIndex] = needAttentionItem;
+          updatedNeedAttention = existingNeedAttention;
+          console.log(`✅ Updated needAttention for userIdentifier ${userIdentifier} to action ${action}`);
+        } else {
+          // Add new entry
+          existingNeedAttention.push(needAttentionItem);
+          updatedNeedAttention = existingNeedAttention;
+          console.log(`✅ Added needAttention for userIdentifier ${userIdentifier} with action ${action}`);
+        }
+      }
+
+      // Create history entry
+      const historyEntry: any = {
+        userIdentifier,
+        option: action as 'pause' | 'release' | 'block' | 'taken',
+        changedAt: new Date()
+      };
+
+      if (previousOption) {
+        historyEntry.previousOption = previousOption;
+      }
+
+      // Add optional fields to history
+      if (from) {
+        historyEntry.from = new Date(from);
+      }
+      if (to) {
+        historyEntry.to = new Date(to);
+      }
+      if (reason) {
+        historyEntry.reason = reason;
+      }
+
+      // Add changedBy if sender info is available
+      const sender = jwtUser.sender || {};
+      if (sender.senderId || sender.id) {
+        historyEntry.changedBy = {
+          id: sender.senderId || sender.id || '',
+          name: sender.senderDisplayName || sender.displayName || '',
+          role: sender.senderRoleLabel || sender.roleLabel || 'agent',
+          avatarUrl: sender.senderAvatarUrl || sender.avatarUrl || null
+        };
+      }
+
+      // Add taken info to history if present
+      const updatedItem = updatedNeedAttention.find(item => item.userIdentifier === userIdentifier);
+      if (updatedItem?.taken) {
+        historyEntry.taken = updatedItem.taken;
+      }
+
+      // Add history entry to array
+      const updatedHistory = [...existingHistory, historyEntry];
+
+      // Update the document
+      const updatedClient = await PlatformClientAgent.findOneAndUpdate(
+        { clientId, isActive: true },
+        { 
+          $set: { 
+            needAttention: updatedNeedAttention,
+            needAttentionHistory: updatedHistory,
+            updatedAt: new Date()
+          }
+        },
+        { new: true, runValidators: false, strict: false }
+      );
+
+      if (!updatedClient) {
+        res.status(404).json({
+          success: false,
+          message: `Failed to update client ${clientId}`
+        });
+        return;
+      }
+
+      // Publish needattention:changed event to stream
+      try {
+        const producer = new StreamProducer();
+        await producer.connect();
+
+        // Get the needAttention item that was updated (for taken object if action === 'taken')
+        const updatedItem = action === 'release' 
+          ? null 
+          : updatedNeedAttention.find((item: INeedAttention) => item.userIdentifier === userIdentifier);
+
+        const attentionData: any = {
+          clientId,
+          platform: existingDoc.platform || 'wpp',
+          userIdentifier,
+          agentCode,
+          option: action === 'release' ? null : action, // null means released
+          reason: updatedItem?.reason || reason || null,
+          from: updatedItem?.from ? updatedItem.from.toISOString() : (from || null),
+          to: updatedItem?.to ? updatedItem.to.toISOString() : (to || null),
+          taken: updatedItem?.taken || null,
+          hashedId // Include hashedId in event
+        };
+
+        await producer.publishNeedAttentionChanged(attentionData);
+        console.log(`✅ Published needattention:changed event to stream for ${userIdentifier}`);
+      } catch (streamError) {
+        // Log error but don't fail API response (MongoDB update succeeded)
+        console.error('❌ Error publishing needattention:changed event to stream:', streamError);
+      }
+
+      const responseMessage = action === 'release' 
+        ? `User ${userIdentifier} released from needAttention successfully`
+        : `Need attention status for user ${userIdentifier} updated successfully (action: ${action})`;
+
+      const responseData: any = {
+        success: true,
+        message: responseMessage,
+        conversationId: hashedId
+      };
+
+      // Only include needAttention in response if it's not release (since release removes it)
+      if (action !== 'release') {
+        responseData.needAttention = updatedNeedAttention.find(item => item.userIdentifier === userIdentifier) || null;
+      }
+
+      res.json(responseData);
+    } catch (error) {
+      console.error('❌ Error setting conversation need attention:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to set need attention status',
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   }

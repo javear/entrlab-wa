@@ -429,6 +429,57 @@ class WeaviateConsumer {
       return;
     }
 
+    // Handle needattention:changed events - update Conversation.last_attention
+    if (eventData.eventType === 'needattention:changed') {
+      if (!eventData.agentCode) {
+        console.log(`⚠️  [Weaviate Consumer] needattention:changed event missing agentCode, skipping (entryId: ${entryId})`);
+        return true; // ACK to prevent reprocessing
+      }
+
+      const tenant = eventData.agentCode;
+      const clientId = eventData.clientId;
+      const userIdentifier = eventData.userIdentifier;
+
+      if (!clientId || !userIdentifier) {
+        console.log(`⚠️  [Weaviate Consumer] needattention:changed event missing clientId or userIdentifier, skipping (entryId: ${entryId})`);
+        return true;
+      }
+
+      const conversationId = `${clientId}:${userIdentifier}`;
+      
+      // If option is null, it means released - store null instead of object with all null values
+      let lastAttentionValue;
+      if (eventData.option === null || eventData.option === undefined) {
+        // Released - store null (Weaviate text fields use empty string for null)
+        lastAttentionValue = null;
+      } else {
+        // Build lastAttention object from event data
+        const lastAttention = {
+          option: eventData.option,
+          reason: eventData.reason || null,
+          from: eventData.from || null,
+          to: eventData.to || null,
+          taken: eventData.taken || null
+        };
+        lastAttentionValue = JSON.stringify(lastAttention);
+      }
+
+      try {
+        // Update conversation's last_attention field
+        await this.updateConversation(tenant, {
+          conversation_id: conversationId,
+          last_attention: lastAttentionValue
+        });
+
+        console.log(`✅ [Weaviate Consumer] Updated last_attention for conversation ${conversationId} (option: ${eventData.option || 'released'})`);
+        return true; // ACK the event
+      } catch (error) {
+        console.error(`❌ [Weaviate Consumer] Error updating last_attention for conversation ${conversationId}:`, error);
+        // Still ACK to prevent reprocessing (conversation might not exist yet)
+        return true;
+      }
+    }
+
     if (!eventData.agentCode) {
       console.log(`⚠️  [Weaviate Consumer] Event missing agentCode, skipping (entryId: ${entryId}, eventType: ${eventData.eventType})`);
       return true; // Return true to ACK - we intentionally skip events without agentCode
@@ -684,12 +735,37 @@ class WeaviateConsumer {
         
         // For agent:response, also try content field directly (fallback for API messages)
         if (eventType === 'agent:response' && eventData.content) {
-          // If content is a string, format it as a text message
+          // Check if this is a media message
+          const messageType = eventData.messageType || eventData.message_type || 'text';
+          const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+          const isMediaType = mediaTypes.includes(messageType);
+          const mediaUrl = eventData.mediaUrl || eventData.media_url;
+          const caption = eventData.caption || null;
+          
+          // If content is a string
           if (typeof eventData.content === 'string') {
-            return JSON.stringify([{
-              type: eventData.messageType || 'text',
-              text: eventData.content
-            }]);
+            if (isMediaType && mediaUrl) {
+              // Format as media message
+              const messageObj = {
+                type: messageType,
+                url: mediaUrl
+              };
+              
+              // Add caption if available (prefer explicit caption, fallback to content)
+              if (caption && caption.trim() !== '') {
+                messageObj.caption = caption;
+              } else if (eventData.content && eventData.content.trim() !== '') {
+                messageObj.caption = eventData.content;
+              }
+              
+              return JSON.stringify([messageObj]);
+            } else {
+              // Format as text message
+              return JSON.stringify([{
+                type: messageType || 'text',
+                text: eventData.content
+              }]);
+            }
           }
           // If content is already an array, stringify it
           if (Array.isArray(eventData.content)) {
@@ -701,12 +777,42 @@ class WeaviateConsumer {
         console.warn(`⚠️  [Weaviate Consumer] No content found for ${eventType} event (entryId: ${eventData.messageId || 'unknown'})`);
         return JSON.stringify([]);
       } else if (eventType === 'message:incoming') {
-        // Format incoming message as text type
-        const content = eventData.content || '';
-        return JSON.stringify([{
-          type: 'text',
-          text: String(content)
-        }]);
+        // Check if this is a media message
+        const messageType = eventData.messageType || eventData.message_type || 'text';
+        const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+        const isMediaType = mediaTypes.includes(messageType);
+        
+        // For media messages, extract mediaUrl from metadata.message.mediaUrls (array)
+        let mediaUrl = eventData.mediaUrl || eventData.media_url;
+        if (!mediaUrl && isMediaType && eventData.metadata && eventData.metadata.message) {
+          const mediaUrls = eventData.metadata.message.mediaUrls || eventData.metadata.message.media_urls || [];
+          if (Array.isArray(mediaUrls) && mediaUrls.length > 0) {
+            mediaUrl = mediaUrls[0]; // Use first media URL
+          }
+        }
+        
+        const content = eventData.content || ''; // Caption for media, text for regular messages
+        
+        if (isMediaType && mediaUrl) {
+          // Format as media message
+          const messageObj = {
+            type: messageType,
+            url: mediaUrl
+          };
+          
+          // Add caption if available
+          if (content && content.trim() !== '') {
+            messageObj.caption = content;
+          }
+          
+          return JSON.stringify([messageObj]);
+        } else {
+          // Format as text message
+          return JSON.stringify([{
+            type: 'text',
+            text: String(content)
+          }]);
+        }
       }
       
       // Default: empty array
@@ -858,6 +964,7 @@ class WeaviateConsumer {
             last_sender_id: conversationData.last_sender_id ? String(conversationData.last_sender_id) : null,
             last_sender_display_name: conversationData.last_sender_display_name ? String(conversationData.last_sender_display_name) : null,
             status: conversationData.status || 'open',
+            last_attention: conversationData.last_attention || '{}',
             metadata: '{}' // Empty JSON object as string (for flexible structure)
           });
 
@@ -1038,6 +1145,17 @@ class WeaviateConsumer {
       }
       if (updateData.last_sender_display_name) {
         updateProperties.last_sender_display_name = String(updateData.last_sender_display_name);
+      }
+      // Explicitly handle null case for last_attention (released state)
+      if ('last_attention' in updateData) {
+        if (updateData.last_attention === null || updateData.last_attention === undefined) {
+          // Released - clear the field by setting to empty string (Weaviate text fields use empty string for null)
+          updateProperties.last_attention = '';
+        } else {
+          updateProperties.last_attention = typeof updateData.last_attention === 'string' 
+            ? updateData.last_attention 
+            : JSON.stringify(updateData.last_attention);
+        }
       }
 
       // Update client_id and platform if they're missing (null) in the existing conversation
