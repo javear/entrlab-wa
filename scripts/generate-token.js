@@ -26,8 +26,8 @@ async function generateToken() {
         // Parse command line arguments
         const args = process.argv.slice(2);
         const clientId = args[0] || 'javear-client-wpp-4';
-        //const agentCode = args[1] || 'ginka-transaction-agent';
-        const agentCode = args[1] || 'Herbakof';
+        const agentCode = args[1] || 'ginka-transaction-agent';
+        //const agentCode = args[1] || 'Herbakof';
 
         // Generate payload for WhatsApp API
         const payload = {

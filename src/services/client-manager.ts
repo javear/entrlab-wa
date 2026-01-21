@@ -1385,6 +1385,18 @@ export class WPPConnectClientManager {
         console.error(`⚠️  Error deleting client-agent assignment for ${clientId}:`, error);
       }
 
+      // 6. Delete platform client-agent assignment from MongoDB (PlatformClientAgent)
+      try {
+        const PlatformClientAgent = mongoose.model('PlatformClientAgent');
+        const result = await PlatformClientAgent.deleteOne({ clientId });
+        if (result.deletedCount > 0) {
+          console.log(`✅ Deleted platform client-agent assignment for ${clientId} from PlatformClientAgent`);
+          foundAnyData = true;
+        }
+      } catch (error) {
+        console.error(`⚠️  Error deleting platform client-agent assignment for ${clientId}:`, error);
+      }
+
       if (foundAnyData) {
         console.log(`✅ All session data deleted for ${clientId}`);
       } else {

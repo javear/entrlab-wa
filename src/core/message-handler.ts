@@ -679,7 +679,7 @@ export class WPPConnectMessageHandler {
       this.addToQueue(clientId, senderNumber, message, enhancedMessage, mediaUrls);
 
       // Start processing with delay (only if not blocked/paused/taken)
-      const delay = 16000; // 25 seconds
+      const delay = 7000; // 7 seconds
       this.startProcessing(clientId, senderNumber, delay);
 
     } catch (error) {

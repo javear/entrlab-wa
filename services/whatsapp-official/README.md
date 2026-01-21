@@ -29,7 +29,7 @@ VAULT_KEY_NAME=automark-key  # Optional, defaults to 'automark-key'
 
 # WhatsApp Business API Global Settings (optional, used for webhook signature verification)
 WA_APP_SECRET=your_app_secret_here  # Optional, for webhook signature verification
-WA_API_VERSION=v21.0
+WA_API_VERSION=v24.0
 
 # Global Webhook Verify Token (for /webhook/v1 - all clients)
 # This token is used when webhook URL is set to /webhook/v1 without clientId

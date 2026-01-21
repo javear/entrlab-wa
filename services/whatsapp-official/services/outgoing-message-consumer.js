@@ -203,15 +203,49 @@ class OutgoingMessageConsumer {
 
               console.log(`📤 [WA-Official Outgoing Consumer] Processing outgoing message (entry: ${entry.id})`);
 
-              // Process the outgoing message
-              await this.processOutgoingMessage(eventData);
+              try {
+                // Process the outgoing message
+                await this.processOutgoingMessage(eventData);
+                console.log(`✅ [WA-Official Outgoing Consumer] Processed outgoing message (entry: ${entry.id})`);
+              } catch (error) {
+                console.error(`❌ [WA-Official Outgoing Consumer] Error processing message ${entry.id}:`, error);
+                // Log error details for debugging
+                if (error.response) {
+                  const errorData = error.response.data?.error || {};
+                  console.error(`❌ [WA-Official Outgoing Consumer] API Error Response:`, {
+                    status: error.response.status,
+                    statusText: error.response.statusText,
+                    errorCode: errorData.code,
+                    errorType: errorData.type,
+                    errorMessage: errorData.message,
+                    errorSubcode: errorData.error_subcode,
+                    fullData: error.response.data
+                  });
+                  
+                  // Special handling for sticker/media errors
+                  if (eventData.messageType === 'sticker' && errorData.code === 131053) {
+                    console.error(`⚠️  [WA-Official Outgoing Consumer] Sticker media upload error (131053)`);
+                    console.error(`   This usually means:`);
+                    console.error(`   1. Sticker URL is not publicly accessible`);
+                    console.error(`   2. Sticker doesn't meet requirements (512×512px, max 100KB static/500KB animated, .webp format)`);
+                    console.error(`   3. Missing or incorrect Content-Type headers`);
+                    console.error(`   4. Sticker URL: ${eventData.mediaUrl || 'N/A'}`);
+                    console.error(`   Reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/sticker-messages`);
+                  }
+                }
+                // Continue to ACK even on error - don't retry failed messages
+              }
 
-              // ACK after successful processing
+              // ACK after processing (both success and error) - don't retry failed messages
               await this.streamService.acknowledge(this.consumerGroupName, entry.id);
-              console.log(`✅ [WA-Official Outgoing Consumer] Processed outgoing message (entry: ${entry.id})`);
             } catch (error) {
-              console.error(`❌ [WA-Official Outgoing Consumer] Error processing message ${entry.id}:`, error);
-              // Don't acknowledge on error - will retry (pending messages)
+              console.error(`❌ [WA-Official Outgoing Consumer] Error in message processing loop for entry ${entry.id}:`, error);
+              // Try to ACK even if there's an error in the outer catch
+              try {
+                await this.streamService.acknowledge(this.consumerGroupName, entry.id);
+              } catch (ackError) {
+                console.error(`❌ [WA-Official Outgoing Consumer] Failed to ACK entry ${entry.id}:`, ackError);
+              }
             }
           }
         }
@@ -278,7 +312,8 @@ class OutgoingMessageConsumer {
       }
 
       // Send message via Meta WhatsApp Business API
-      const apiUrl = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+      const apiVersion = process.env.WA_API_VERSION || 'v24.0';
+      const apiUrl = `https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`;
       
       // Build payload based on messageType
       let payload = {
@@ -333,10 +368,22 @@ class OutgoingMessageConsumer {
           break;
         
         case 'sticker':
-          // Stickers are sent as images in Meta API
-          payload.image = {
+          // Stickers are supported in Meta API with type: "sticker"
+          // Can use sticker.link (URL) or sticker.id (previously uploaded media ID)
+          // Reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/sticker-messages
+          // 
+          // Requirements for stickers:
+          // - Static stickers: 512×512 pixels, max 100 KB, .webp format, transparent background
+          // - Animated stickers: 512×512 pixels, max 500 KB, .webp format, transparent background
+          // - URL must be publicly accessible with proper Content-Type headers (image/webp)
+          payload.type = 'sticker';
+          payload.sticker = {
             link: mediaUrl
           };
+          // Note: Stickers don't support captions
+          // Note: Do NOT include recipient_type for stickers (not in Meta API docs)
+          console.log(`📎 [WA-Official Outgoing Consumer] Sending sticker from URL: ${mediaUrl}`);
+          console.log(`📎 [WA-Official Outgoing Consumer] Sticker payload:`, JSON.stringify(payload, null, 2));
           break;
         
         default:
@@ -346,6 +393,12 @@ class OutgoingMessageConsumer {
           payload.text = {
             body: content || ''
           };
+      }
+
+      // Log full payload for debugging (especially for stickers)
+      if (messageType === 'sticker') {
+        console.log(`📤 [WA-Official Outgoing Consumer] Full sticker request payload:`, JSON.stringify(payload, null, 2));
+        console.log(`📤 [WA-Official Outgoing Consumer] Request URL: ${apiUrl}`);
       }
 
       const response = await axios.post(apiUrl, payload, {

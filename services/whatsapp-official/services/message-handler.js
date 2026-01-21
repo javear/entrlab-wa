@@ -73,6 +73,28 @@ class WhatsAppOfficialMessageHandler {
   }
 
   /**
+   * Ensure function_call items have unique IDs (dedup/rewrites duplicates)
+   * This prevents downstream "Duplicate item id" errors if the workflow returns
+   * multiple function_call entries with the same id.
+   */
+  ensureUniqueFunctionCallIds(items = []) {
+    const seen = new Set();
+    return items.map(item => {
+      if (item && item.type === 'function_call') {
+        let id = item.id || `fc_${crypto.randomUUID()}`;
+        if (seen.has(id)) {
+          const newId = `fc_${crypto.randomUUID()}`;
+          console.warn(`🔁 Duplicate function_call id detected (${id}), rewriting to ${newId}`);
+          id = newId;
+        }
+        seen.add(id);
+        return { ...item, id };
+      }
+      return item;
+    });
+  }
+
+  /**
    * Helper to create unique key per client+user
    */
   getUserKey(clientId, senderNumber) {
@@ -343,16 +365,30 @@ class WhatsAppOfficialMessageHandler {
       const formattedTimestamp = this.formatTimestamp(timestamp);
       const metadataPrefix = `[#messageid:${messageId}#message-timestamp:${formattedTimestamp}]`;
 
-      // Add media URLs if any
-      if (mediaUrls.length > 0) {
-        if (enhancedMessage) {
-          enhancedMessage += `\nMedia attached:\n- @[${mediaUrls.join(']\n- @[')}]`;
-        } else {
-          enhancedMessage = `Media attached:\n- @[${mediaUrls.join(']\n- @[')}]`;
-        }
-      }
+      // Determine if this is a media message
+      const mediaTypes = ['image', 'video', 'audio', 'document', 'file', 'sticker'];
+      const isMediaMessage = mediaTypes.includes(message.type);
 
-      const fullMessage = enhancedMessage ? `${metadataPrefix} ${enhancedMessage}` : `${metadataPrefix}`;
+      // For media messages: content should only contain the actual caption (not metadata/URLs)
+      // Metadata and media URLs are already in metadata.message.mediaUrls
+      // For text messages: include metadata prefix for AI workflow context
+      let contentForStream;
+      if (isMediaMessage) {
+        // Media messages: content is just the caption (clean, no metadata/URLs)
+        // Media URLs are already in metadata.message.mediaUrls array
+        contentForStream = enhancedMessage || ''; // Just the caption, if any
+      } else {
+        // Text messages: include metadata prefix for context
+        // Add media URLs if any (for non-media messages that might have attachments)
+        if (mediaUrls.length > 0) {
+          if (enhancedMessage) {
+            enhancedMessage += `\nMedia attached:\n- @[${mediaUrls.join(']\n- @[')}]`;
+          } else {
+            enhancedMessage = `Media attached:\n- @[${mediaUrls.join(']\n- @[')}]`;
+          }
+        }
+        contentForStream = enhancedMessage ? `${metadataPrefix} ${enhancedMessage}` : `${metadataPrefix}`;
+      }
 
       // Publish incoming message event to stream (if producer is available)
       // Lazy initialize producer (ensures dotenv.config() has run)
@@ -383,7 +419,7 @@ class WhatsAppOfficialMessageHandler {
             agentCode: agentCode || null, // Include agentCode so scoped webhooks can receive this event
             messageId: message.id || message.timestamp || Date.now().toString(),
             messageType: message.type || 'text',
-            content: fullMessage || '',
+            content: contentForStream || '',
             metadata: {
               sender: {
                 name: message.contacts?.[0]?.profile?.name,
@@ -420,15 +456,20 @@ class WhatsAppOfficialMessageHandler {
 
       // Add to message queue (only if not blocked/paused/taken)
       // Note: For private agent assignment, we use senderPhoneNumber (message.from) as userIdentifier
-      this.addToQueue(clientId, senderPhoneNumber, message, fullMessage, mediaUrls);
+      // For AI workflow: use enhancedMessage with metadata prefix for context (like WPPConnect)
+      // This helps AI understand message context while keeping stored caption clean
+      const messageForAI = isMediaMessage 
+        ? (enhancedMessage || '') // Media: just caption for AI (metadata/URLs already in metadata)
+        : contentForStream; // Text: with metadata prefix
+      this.addToQueue(clientId, senderPhoneNumber, message, messageForAI, mediaUrls);
 
       // If user is already being processed, we'll mark the last message as read
       // (which will mark all previous messages as read in WhatsApp)
       // This is handled in the readReceiptTimer below
 
       // Start processing with delay (only if not blocked/paused/taken)
-      // Similar to WPPConnect's 16 seconds
-      const delay = 16000; // 16 seconds
+      // Similar to WPPConnect's 7 seconds
+      const delay = 7000; // 7 seconds
       this.startProcessing(clientId, senderPhoneNumber, delay);
 
     } catch (error) {
@@ -450,7 +491,7 @@ class WhatsAppOfficialMessageHandler {
 
       // Get media URL from Meta
       const mediaUrlResponse = await axios.get(
-        `https://graph.facebook.com/v21.0/${mediaId}`,
+        `https://graph.facebook.com/v24.0/${mediaId}`,
         {
           headers: {
             'Authorization': `Bearer ${accessToken}`
@@ -531,7 +572,16 @@ class WhatsAppOfficialMessageHandler {
    * Send read receipt (mark messages as read)
    * Reference: https://developers.facebook.com/docs/whatsapp/cloud-api/guides/mark-message-as-read
    */
-  async sendReadReceipt(clientId, messageId) {
+  /**
+   * Send read receipt (optionally with typing indicator)
+   * Reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/mark-message-as-read
+   * 
+   * @param {string} clientId - Client ID
+   * @param {string} messageId - WhatsApp message ID
+   * @param {boolean} withTypingIndicator - If true, also send typing indicator in the same call
+   * @returns {Promise<boolean>} - Returns true if successful, false otherwise
+   */
+  async sendReadReceipt(clientId, messageId, withTypingIndicator = false) {
     try {
       const accessToken = await this.clientManager.getAccessToken(clientId);
       const phoneNumberId = await this.clientManager.getPhoneNumberId(clientId);
@@ -541,7 +591,8 @@ class WhatsAppOfficialMessageHandler {
         return false;
       }
 
-      const baseUrl = `https://graph.facebook.com/v21.0/${phoneNumberId}`;
+      const apiVersion = process.env.WA_API_VERSION || 'v24.0';
+      const baseUrl = `https://graph.facebook.com/${apiVersion}/${phoneNumberId}`;
       const requestUrl = `${baseUrl}/messages`;
 
       const payload = {
@@ -550,6 +601,13 @@ class WhatsAppOfficialMessageHandler {
         message_id: messageId
       };
 
+      // Add typing indicator if requested (combines read receipt + typing in one call)
+      if (withTypingIndicator) {
+        payload.typing_indicator = {
+          type: 'text'
+        };
+      }
+
       await axios.post(requestUrl, payload, {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -557,7 +615,11 @@ class WhatsAppOfficialMessageHandler {
         }
       });
 
-      console.log(`✅ Read receipt sent for message ${messageId} (client: ${clientId})`);
+      if (withTypingIndicator) {
+        console.log(`✅ Read receipt + typing indicator sent for message ${messageId} (client: ${clientId})`);
+      } else {
+        console.log(`✅ Read receipt sent for message ${messageId} (client: ${clientId})`);
+      }
       return true;
     } catch (error) {
       console.error(`❌ Error sending read receipt for client ${clientId}:`, error.message);
@@ -565,9 +627,30 @@ class WhatsAppOfficialMessageHandler {
     }
   }
 
-  // Note: Typing indicators are NOT supported by Meta's WhatsApp Business API (REST API)
-  // Typing indicators are only available in WhatsApp Web API (used by WPPConnect)
-  // This feature has been removed from WhatsApp Official service
+  /**
+   * Send typing indicator (should be combined with read receipt using message_id)
+   * Reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/typing-indicators/
+   * 
+   * Note: Typing indicators should be sent together with read receipts using message_id.
+   * Use sendReadReceipt(clientId, messageId, true) instead of calling this separately.
+   * 
+   * @param {string} clientId - Client ID
+   * @param {string} messageId - WhatsApp message ID (required for typing indicator)
+   * @param {boolean} start - true to start typing, false to stop typing
+   * @returns {Promise<boolean>} - Returns true if successful, false otherwise
+   */
+  async sendTypingIndicator(clientId, messageId, start = true) {
+    // If stop is requested, we can skip the API call
+    // Typing indicator automatically stops after a timeout on WhatsApp
+    if (!start) {
+      console.log(`⌨️  Typing indicator stop (no API call needed)`);
+      return true; // Return true as stopping doesn't require an API call
+    }
+
+    // Typing indicator should be sent together with read receipt
+    // Call sendReadReceipt with withTypingIndicator=true
+    return await this.sendReadReceipt(clientId, messageId, true);
+  }
 
   /**
    * Start processing messages with delay
@@ -582,7 +665,7 @@ class WhatsAppOfficialMessageHandler {
         clearTimeout(existingTimer);
       }
       
-      // Reset read receipt timer to mark the new last message
+      // Reset read receipt/typing timer to mark the new last message
       const existingReadReceiptTimer = this.processingUsers[`${userKey}_readReceiptTimer`];
       if (existingReadReceiptTimer) {
         clearTimeout(existingReadReceiptTimer);
@@ -592,7 +675,7 @@ class WhatsAppOfficialMessageHandler {
       // This allows us to mark the latest message when rapid messages arrive
       this.readReceiptSent[userKey] = false;
       
-      // Set new read receipt timer to mark the last message in queue
+      // Set new read receipt + typing indicator timer to mark the last message in queue
       const preDelayMs = 300;
       const newReadReceiptTimer = setTimeout(async () => {
         try {
@@ -603,13 +686,14 @@ class WhatsAppOfficialMessageHandler {
             const messageId = lastMessage.message?.id;
             
             if (messageId) {
-              await this.sendReadReceipt(clientId, messageId);
+              // Send read receipt + typing indicator together (combined in one API call)
+              await this.sendReadReceipt(clientId, messageId, true);
               this.readReceiptSent[userKey] = true;
-              console.log(`✅ Read receipt sent for last message (${messages.length} message(s) in queue)`);
+              console.log(`✅ Read receipt + typing indicator sent for last message (${messages.length} message(s) in queue)`);
             }
           }
         } catch (error) {
-          console.log('⚠️ Error in read receipt sequence:', error.message);
+          console.log('⚠️ Error in read receipt/typing sequence:', error.message);
         }
       }, preDelayMs);
       
@@ -626,7 +710,7 @@ class WhatsAppOfficialMessageHandler {
     // Mark as processing
     this.processingUsers[userKey] = Date.now();
 
-    // Send read receipt after 300ms (same as WPPConnect timing)
+    // Send read receipt + typing indicator after 300ms (same as WPPConnect timing)
     const preDelayMs = 300;
     const readReceiptTimer = setTimeout(async () => {
       try {
@@ -640,13 +724,14 @@ class WhatsAppOfficialMessageHandler {
           
           // Send read receipt if not already sent
           if (messageId && !this.readReceiptSent[userKey]) {
-            await this.sendReadReceipt(clientId, messageId);
+            // Send read receipt + typing indicator together (combined in one API call)
+            await this.sendReadReceipt(clientId, messageId, true);
             this.readReceiptSent[userKey] = true;
-            console.log(`✅ Read receipt sent for last message (${messages.length} message(s) in queue)`);
+            console.log(`✅ Read receipt + typing indicator sent for last message (${messages.length} message(s) in queue)`);
           }
         }
       } catch (error) {
-        console.log('⚠️ Error in read receipt sequence:', error.message);
+        console.log('⚠️ Error in read receipt/typing sequence:', error.message);
       }
     }, preDelayMs);
 
@@ -686,7 +771,7 @@ class WhatsAppOfficialMessageHandler {
 
       if (messages.length === 0) {
         console.log(`⚠️ No messages in queue for ${senderNumber}`);
-        this.cleanupProcessingState(clientId, senderNumber);
+        await this.cleanupProcessingState(clientId, senderNumber);
         return;
       }
 
@@ -699,12 +784,15 @@ class WhatsAppOfficialMessageHandler {
       // Note: For private agent assignment, we use senderNumber (message.from) as userIdentifier
       await this.sendMessage(clientId, senderNumber, combinedMessages);
 
+      // Stop typing indicator after sending response (no API call needed - stops automatically)
+      console.log(`⌨️  Typing indicator stopped for ${senderNumber} (automatic after response)`);
+
       // Clean up
-      this.cleanupProcessingState(clientId, senderNumber);
+      await this.cleanupProcessingState(clientId, senderNumber);
 
     } catch (error) {
       console.error(`❌ Error processing messages for ${senderNumber}:`, error);
-      this.cleanupProcessingState(clientId, senderNumber);
+      await this.cleanupProcessingState(clientId, senderNumber);
     } finally {
       delete this.processingUsers[processingKey];
     }
@@ -713,7 +801,7 @@ class WhatsAppOfficialMessageHandler {
   /**
    * Clean up processing state
    */
-  cleanupProcessingState(clientId, senderNumber) {
+  async cleanupProcessingState(clientId, senderNumber) {
     const userKey = this.getUserKey(clientId, senderNumber);
     
     // Check if new messages arrived
@@ -734,6 +822,9 @@ class WhatsAppOfficialMessageHandler {
     if (readTypingTimer) {
       clearTimeout(readTypingTimer);
     }
+
+    // Stop typing indicator if still active (no API call needed - stops automatically)
+    // Typing indicators automatically stop after 25 seconds or when a message is sent
 
     // Clean up state
     delete this.messageQueue[userKey];
@@ -796,11 +887,11 @@ class WhatsAppOfficialMessageHandler {
       
       if (workflowResponse?.result?.formatted?.whatsapp && Array.isArray(workflowResponse.result.formatted.whatsapp) && workflowResponse.result.formatted.whatsapp.length > 0) {
         // Primary: Use formatted.whatsapp
-        messageObjects = workflowResponse.result.formatted.whatsapp;
+        messageObjects = this.ensureUniqueFunctionCallIds(workflowResponse.result.formatted.whatsapp);
         console.log(`📥 [${clientId}] Using formatted.whatsapp: ${messageObjects.length} message(s)`);
       } else if (workflowResponse?.result?.content?.object && Array.isArray(workflowResponse.result.content.object) && workflowResponse.result.content.object.length > 0) {
         // Fallback: Use content.object if formatted.whatsapp is not available
-        messageObjects = workflowResponse.result.content.object;
+        messageObjects = this.ensureUniqueFunctionCallIds(workflowResponse.result.content.object);
         console.log(`📥 [${clientId}] Using content.object: ${messageObjects.length} message(s)`);
       }
 

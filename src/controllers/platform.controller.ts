@@ -824,6 +824,119 @@ export class PlatformController {
   }
 
   /**
+   * Delete a platform client (supports both WPP and WA-Official)
+   * DELETE /api/v1/platform/clients/{clientId}
+   */
+  async deletePlatformClient(req: Request, res: Response): Promise<void> {
+    try {
+      const { clientId } = req.params;
+
+      if (!clientId) {
+        res.status(400).json({
+          success: false,
+          message: 'clientId is required'
+        });
+        return;
+      }
+
+      console.log(`🗑️  Removing platform client ${clientId} permanently (deleting all data)...`);
+
+      // Find the client in PlatformClientAgent to determine platform
+      const platformClient = await PlatformClientAgent.findOne({
+        clientId,
+        isActive: true
+      });
+
+      if (!platformClient) {
+        res.status(404).json({
+          success: false,
+          message: `Platform client ${clientId} not found`
+        });
+        return;
+      }
+
+      const platform = platformClient.platform;
+      let deleted = false;
+
+      // Handle deletion based on platform
+      if (platform === 'wpp') {
+        // For WPP clients, use the WPPConnect deletion logic
+        // This will delete from ClientAgent, PlatformClientAgent, and all session data
+        const clientExists = this.whatsappService.getClient(clientId) !== undefined;
+        const disconnectSuccess = await this.whatsappService.disconnectClient(clientId, true);
+
+        // If client wasn't in memory, try to delete session data anyway
+        if (!clientExists) {
+          const clientManager = (this.whatsappService as any).clientManager;
+          if (clientManager) {
+            const sessionDataDeleted = await clientManager['deleteAllSessionData'](clientId);
+            deleted = sessionDataDeleted || disconnectSuccess;
+          } else {
+            deleted = disconnectSuccess;
+          }
+        } else {
+          deleted = disconnectSuccess;
+        }
+
+        if (!deleted) {
+          // Even if WPPConnect deletion failed, try to delete from PlatformClientAgent
+          const result = await PlatformClientAgent.deleteOne({ clientId });
+          deleted = result.deletedCount > 0;
+        }
+      } else if (platform === 'wa-official') {
+        // For WA-Official clients, delete from PlatformClientAgent and ClientAgent
+        try {
+          // Delete from PlatformClientAgent
+          const platformResult = await PlatformClientAgent.deleteOne({ clientId });
+          if (platformResult.deletedCount > 0) {
+            console.log(`✅ Deleted WA-Official client ${clientId} from PlatformClientAgent`);
+            deleted = true;
+          }
+
+          // Also delete from ClientAgent for backward compatibility
+          try {
+            const ClientAgent = mongoose.model('ClientAgent');
+            const clientAgentResult = await ClientAgent.deleteOne({ clientId });
+            if (clientAgentResult.deletedCount > 0) {
+              console.log(`✅ Deleted WA-Official client ${clientId} from ClientAgent (backward compatibility)`);
+            }
+          } catch (error) {
+            console.warn(`⚠️  Error deleting WA-Official client ${clientId} from ClientAgent:`, error);
+            // Continue even if ClientAgent deletion fails
+          }
+        } catch (error) {
+          console.error(`❌ Error deleting WA-Official client ${clientId}:`, error);
+          throw error;
+        }
+      } else {
+        // Unknown platform - just delete from PlatformClientAgent
+        const result = await PlatformClientAgent.deleteOne({ clientId });
+        deleted = result.deletedCount > 0;
+      }
+
+      if (!deleted) {
+        res.status(404).json({
+          success: false,
+          message: `Platform client ${clientId} not found or could not be deleted`
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        message: `Platform client ${clientId} (${platform}) removed successfully (all data deleted permanently)`
+      });
+    } catch (error) {
+      console.error('❌ Error deleting platform client:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to delete platform client',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
    * Get agent assignment for a platform client
    * GET /api/v1/platform/clients/{clientId}/agent
    */

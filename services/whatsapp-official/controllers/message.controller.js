@@ -9,7 +9,7 @@ const clientManager = require('../services/client-manager');
 class WhatsAppMessageController {
   constructor() {
     this.clientManager = clientManager;
-    this.apiVersion = process.env.WA_API_VERSION || 'v21.0';
+    this.apiVersion = process.env.WA_API_VERSION || 'v24.0';
   }
 
   /**
@@ -127,10 +127,16 @@ class WhatsAppMessageController {
     } else if (type === 'sticker') {
       // Sticker messages - supports both static and animated stickers
       // Reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/sticker-messages
+      // 
+      // Requirements for stickers:
+      // - Static stickers: 512×512 pixels, max 100 KB, .webp format, transparent background
+      // - Animated stickers: 512×512 pixels, max 500 KB, .webp format, transparent background
+      // - URL must be publicly accessible with proper Content-Type headers (image/webp)
       messagePayload.sticker = {
         link: mediaUrl
       };
       // Note: Stickers don't support captions, so we ignore the caption parameter
+      console.log(`📎 [Message Controller] Sending sticker from URL: ${mediaUrl}`);
     } else {
       throw new Error(`Invalid media type: ${type}. Supported: image, video, document, audio, sticker`);
     }
@@ -165,6 +171,17 @@ class WhatsAppMessageController {
         data: response.data
       };
     } catch (error) {
+      // Enhanced error handling for sticker errors
+      if (type === 'sticker' && error.response?.data?.error?.code === 131053) {
+        console.error(`⚠️  [Message Controller] Sticker media upload error (131053) for ${to}`);
+        console.error(`   Sticker URL: ${mediaUrl}`);
+        console.error(`   Common causes:`);
+        console.error(`   1. URL not publicly accessible (Meta servers can't download it)`);
+        console.error(`   2. File doesn't meet requirements: 512×512px, max 100KB (static) or 500KB (animated), .webp format`);
+        console.error(`   3. Missing or incorrect Content-Type: image/webp header`);
+        console.error(`   4. File doesn't have transparent background`);
+        console.error(`   Reference: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/sticker-messages`);
+      }
       this.handleApiError(clientId, error, requestUrl, messagePayload);
       throw error;
     }
