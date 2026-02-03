@@ -158,16 +158,6 @@ export class OutgoingMessageConsumerService {
             }
           }
           
-          // Check for pending messages before reading (only log if there are pending)
-          try {
-            const groupInfo = await this.streamService.getConsumerGroupInfo(this.consumerGroupName);
-            if (groupInfo && groupInfo.pending > 0) {
-              console.log(`⚠️  [Outgoing Message Consumer] WARNING: ${groupInfo.pending} pending message(s) - these need to be processed first (lastDeliveredId: ${groupInfo.lastDeliveredId})`);
-            }
-          } catch (infoError) {
-            // Ignore errors getting group info
-          }
-          
           entries = await this.streamService.readGroup(
             this.consumerGroupName,
             this.consumerName,

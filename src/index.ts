@@ -81,6 +81,7 @@ const env: Environment = {
   CHROMIUM_PATH: process.env.CHROMIUM_PATH,
   FW_ENDPOINT: process.env.FW_ENDPOINT,
   FW_ENDPOINT_WORKFLOW: process.env.FW_ENDPOINT_WORKFLOW,
+  MASTRA_ENDPOINT_WORKFLOW: process.env.MASTRA_ENDPOINT_WORKFLOW,
   ALLOWED_NUMBERS: process.env.ALLOWED_NUMBERS,
   UPLOAD_USER_ID: process.env.UPLOAD_USER_ID || undefined,
   UPLOAD_AUTH_TOKEN: process.env.UPLOAD_AUTH_TOKEN || undefined,
@@ -189,6 +190,8 @@ async function startWPPConnectApplication(): Promise<void> {
     console.log(`  - WA_JWT_SECRET: ${env.WA_JWT_SECRET ? 'SET' : 'NOT SET'} (for WhatsApp Bot API)`);
     console.log(`  - CHROMIUM_PATH: ${env.CHROMIUM_PATH || 'DEFAULT'}`);
     console.log(`  - FW_ENDPOINT: ${env.FW_ENDPOINT || 'NOT SET'}`);
+    console.log(`  - FW_ENDPOINT_WORKFLOW: ${env.FW_ENDPOINT_WORKFLOW || 'NOT SET'}`);
+    console.log(`  - MASTRA_ENDPOINT_WORKFLOW: ${env.MASTRA_ENDPOINT_WORKFLOW || 'NOT SET'}`);
     console.log(`  - ALLOWED_NUMBERS: ${env.ALLOWED_NUMBERS || 'NOT SET'}`);
     console.log(`  - UPLOAD_USER_ID: ${env.UPLOAD_USER_ID ? 'SET' : 'NOT SET'}`);
     console.log(`  - UPLOAD_AUTH_TOKEN: ${env.UPLOAD_AUTH_TOKEN ? 'SET' : 'NOT SET'}`);

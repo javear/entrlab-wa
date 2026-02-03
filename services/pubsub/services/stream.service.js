@@ -348,7 +348,7 @@ class StreamService {
 
       let entries = null;
       let isPending = false;
-
+      
       // STEP 1: Read pending messages first (id: '0')
       // These are messages that were read but not ACKed - they need to be retried
       // This ensures no message loss if a consumer crashed or failed to ACK
@@ -390,37 +390,37 @@ class StreamService {
       // This ensures we only process messages we haven't seen yet
       if (!entries || entries.length === 0) {
         try {
-          entries = await this.client.xReadGroup(
-            groupName,
-            consumerName,
+                  entries = await this.client.xReadGroup(
+                    groupName,
+                    consumerName,
             [{ key: this.config.streamName, id: '>' }],
-            {
-              COUNT: count,
-              BLOCK: block // Block for new messages (use provided block time)
-            }
-          );
-          
+                {
+                  COUNT: count,
+                  BLOCK: block // Block for new messages (use provided block time)
+                }
+              );
+              
           isPending = false; // Messages from '>' are new, not retries
-          
+              
           // Log successful reads
-          if (entries && entries.length > 0) {
-            const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
-            if (messageCount > 0) {
-              console.log(`✅ [Stream Service] Read ${messageCount} new message(s) for ${groupName} from ${this.config.streamName}`);
+              if (entries && entries.length > 0) {
+                const messageCount = entries.reduce((sum, stream) => sum + (stream.messages?.length || 0), 0);
+                if (messageCount > 0) {
+                  console.log(`✅ [Stream Service] Read ${messageCount} new message(s) for ${groupName} from ${this.config.streamName}`);
+                }
+              }
+            } catch (readError) {
+              // Handle timeout gracefully - it's expected when no new messages
+              if (readError.message && readError.message.includes('timeout')) {
+                // This is normal - no new messages available
+                entries = null;
+              } else {
+                // Log actual errors
+            console.error(`❌ [Stream Service] Error reading new messages:`, readError.message || readError);
+                entries = null;
+              }
             }
           }
-        } catch (readError) {
-          // Handle timeout gracefully - it's expected when no new messages
-          if (readError.message && readError.message.includes('timeout')) {
-            // This is normal - no new messages available
-            entries = null;
-          } else {
-            // Log actual errors
-            console.error(`❌ [Stream Service] Error reading new messages:`, readError.message || readError);
-            entries = null;
-          }
-        }
-      }
 
       // Return empty array if no messages
       if (!entries || entries.length === 0) {

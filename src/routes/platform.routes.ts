@@ -9,6 +9,10 @@ export function createPlatformRoutes(platformController: PlatformController): Ro
     router.get('/clients', (req, res) => platformController.getAllPlatformClients(req, res));
     router.get('/clients/:clientId', (req, res) => platformController.getPlatformClient(req, res));
     router.delete('/clients/:clientId', (req, res) => platformController.deletePlatformClient(req, res));
+
+    // Chat-scoped client listing for current agent
+    // GET /api/v1/platform/chat/clients
+    router.get('/chat/clients', (req, res) => platformController.getClientsByAgent(req, res));
     
     // Agent Assignment Routes
     router.get('/clients/:clientId/agent', (req, res) => platformController.getClientAgent(req, res));
@@ -20,6 +24,10 @@ export function createPlatformRoutes(platformController: PlatformController): Ro
     // Need Attention Routes
     router.get('/clients/:clientId/needattention', (req, res) => platformController.getNeedAttention(req, res));
     router.post('/clients/:clientId/needattention/:userIdentifier', (req, res) => platformController.setNeedAttention(req, res));
+
+    // Broadcast Messages Route
+    // POST /api/v1/platform/wpp/chat/messages/broadcast
+    router.post('/wpp/chat/messages/broadcast', (req, res) => platformController.broadcastMessages(req, res));
 
     return router;
 }

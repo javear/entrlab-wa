@@ -48,6 +48,18 @@ function initializeStreamProducer() {
 }
 
 /**
+ * Normalize AI response to always return an array of message objects.
+ * Handles: array (process all), single object with type (wrap in array), or empty.
+ * Some AI APIs return content.object as a single object when there's one item.
+ */
+function ensureMessageArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item) => item && item.type);
+  if (typeof value === 'object' && value.type) return [value];
+  return [];
+}
+
+/**
  * WhatsApp Official Message Handler
  * Handles incoming messages with queueing, delay, and AI workflow processing
  * Similar to WPPConnect message handler but uses Meta's official REST API
@@ -70,28 +82,6 @@ class WhatsAppOfficialMessageHandler {
     
     // Start queue cleanup interval
     this.startQueueCleanup();
-  }
-
-  /**
-   * Ensure function_call items have unique IDs (dedup/rewrites duplicates)
-   * This prevents downstream "Duplicate item id" errors if the workflow returns
-   * multiple function_call entries with the same id.
-   */
-  ensureUniqueFunctionCallIds(items = []) {
-    const seen = new Set();
-    return items.map(item => {
-      if (item && item.type === 'function_call') {
-        let id = item.id || `fc_${crypto.randomUUID()}`;
-        if (seen.has(id)) {
-          const newId = `fc_${crypto.randomUUID()}`;
-          console.warn(`🔁 Duplicate function_call id detected (${id}), rewriting to ${newId}`);
-          id = newId;
-        }
-        seen.add(id);
-        return { ...item, id };
-      }
-      return item;
-    });
   }
 
   /**
@@ -883,16 +873,14 @@ class WhatsAppOfficialMessageHandler {
       }
 
       // Use formatted.whatsapp as primary source, fallback to content.object if not available (same as WPPConnect)
-      let messageObjects = [];
+      // ensureMessageArray handles both array and single-object formats (some APIs return object instead of [object])
+      const fromFormatted = ensureMessageArray(workflowResponse?.result?.formatted?.whatsapp);
+      const fromContent = ensureMessageArray(workflowResponse?.result?.content?.object);
+      const messageObjects = fromFormatted.length > 0 ? fromFormatted : fromContent;
       
-      if (workflowResponse?.result?.formatted?.whatsapp && Array.isArray(workflowResponse.result.formatted.whatsapp) && workflowResponse.result.formatted.whatsapp.length > 0) {
-        // Primary: Use formatted.whatsapp
-        messageObjects = this.ensureUniqueFunctionCallIds(workflowResponse.result.formatted.whatsapp);
-        console.log(`📥 [${clientId}] Using formatted.whatsapp: ${messageObjects.length} message(s)`);
-      } else if (workflowResponse?.result?.content?.object && Array.isArray(workflowResponse.result.content.object) && workflowResponse.result.content.object.length > 0) {
-        // Fallback: Use content.object if formatted.whatsapp is not available
-        messageObjects = this.ensureUniqueFunctionCallIds(workflowResponse.result.content.object);
-        console.log(`📥 [${clientId}] Using content.object: ${messageObjects.length} message(s)`);
+      if (messageObjects.length > 0) {
+        const source = fromFormatted.length > 0 ? 'formatted.whatsapp' : 'content.object';
+        console.log(`📥 [${clientId}] Using ${source}: ${messageObjects.length} message(s) - will send all`);
       }
 
       // Publish AI response to stream (if producer is available)
@@ -911,30 +899,38 @@ class WhatsAppOfficialMessageHandler {
       }
       
       console.log(`🔍 [WA Official Handler] Checking streamProducer for AI response from ${number}:`, streamProducer ? 'EXISTS' : 'NULL');
-      if (streamProducer) {
+      if (streamProducer && messageObjects.length > 0) {
         try {
-          console.log(`📤 [WA Official Handler] Publishing AI response to stream for ${number} (clientId: ${clientId}, agentCode: ${agentCode || 'none'})`);
-          await streamProducer.publishAIResponse({
-            clientId,
-            platform: 'wa-official',
-            userIdentifier: number, // userIdentifier is the sender's phone number (message.from)
-            agentCode: agentCode || null, // Use null instead of 'unknown' to match WPPConnect behavior
-            requestMessage: message,
-            response: {
-              messages: messageObjects.length > 0 ? messageObjects : null,
-              text: workflowResponse?.result?.content?.text || null,
-              raw: workflowResponse
-            },
-            metadata: {
-              processingTime: Date.now() - (workflowResponse?.metadata?.startTime || Date.now())
-            }
-          });
-          console.log(`✅ [WA Official Handler] Successfully published AI response to stream`);
+          const baseMetadata = {
+            processingTime: Date.now() - (workflowResponse?.metadata?.startTime || Date.now())
+          };
+          // Publish one stream event per message - consumers expect one event = one message
+          for (let i = 0; i < messageObjects.length; i++) {
+            const msg = messageObjects[i];
+            if (!msg || !msg.type) continue;
+            await streamProducer.publishAIResponse({
+              clientId,
+              platform: 'wa-official',
+              userIdentifier: number,
+              agentCode: agentCode || null,
+              requestMessage: message,
+              response: {
+                messages: [msg],
+                raw: i === 0 ? workflowResponse : undefined
+              },
+              metadata: {
+                ...baseMetadata,
+                batchIndex: i,
+                batchTotal: messageObjects.length
+              }
+            });
+          }
+          console.log(`✅ [WA Official Handler] Published ${messageObjects.length} AI response(s) to stream`);
         } catch (error) {
           console.error('❌ [WA Official Handler] Failed to publish AI response to stream:', error.message || error);
           console.error('❌ [WA Official Handler] Error stack:', error.stack);
         }
-      } else {
+      } else if (!streamProducer) {
         console.log('ℹ️  [WA Official Handler] Stream producer not available (null), skipping publish');
         console.log('ℹ️  [WA Official Handler] VALKEY_HOST check:', process.env.VALKEY_HOST ? 'SET' : 'NOT SET');
         console.log('ℹ️  [WA Official Handler] REDIS_HOST check:', process.env.REDIS_HOST ? 'SET' : 'NOT SET');
@@ -946,6 +942,28 @@ class WhatsAppOfficialMessageHandler {
       } else if (workflowResponse?.result?.content?.text) {
         const text = workflowResponse.result.content.text;
         console.log(`🤖 [${clientId}] Received workflow response with text only`);
+        
+        // Publish one event for text-only (one event = one message)
+        if (streamProducer) {
+          try {
+            await streamProducer.publishAIResponse({
+              clientId,
+              platform: 'wa-official',
+              userIdentifier: number,
+              agentCode: agentCode || null,
+              requestMessage: message,
+              response: {
+                messages: [{ type: 'text', text }],
+                raw: workflowResponse
+              },
+              metadata: {
+                processingTime: Date.now() - (workflowResponse?.metadata?.startTime || Date.now())
+              }
+            });
+          } catch (err) {
+            console.warn('⚠️ [WA Official Handler] Failed to publish text-only to stream:', err.message);
+          }
+        }
         
         await this.messageController.sendTextMessage(clientId, number, text);
       } else {

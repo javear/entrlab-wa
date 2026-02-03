@@ -281,16 +281,13 @@ defmodule SocketServer.Consumers.StreamConsumer do
             
             conversation_room_topic = "conversation:#{conversation_hashed_id}"
             
-            # Format event payload for conversation room (full payload)
+            # Format event payload (one stream event = one message, producer publishes per-message)
             conversation_payload = format_event_payload(entry_id, event_type, data)
             
-            # Extract clientMessageId for logging (check both :client_message_id and "clientMessageId" keys)
             client_message_id_log = Map.get(conversation_payload, :client_message_id) || Map.get(conversation_payload, "client_message_id")
             client_message_id_log_str = if client_message_id_log, do: ", clientMessageId: #{client_message_id_log}", else: ""
             
-            # Broadcast to conversation-specific room using pre-hashed ID
             Phoenix.PubSub.broadcast(SocketServer.PubSub, conversation_room_topic, {:new_message, conversation_payload})
-            
             Logger.info("📨 Broadcasted #{event_type} to conversation room #{conversation_room_topic} (agentCode: #{agent_code}, clientId: #{client_id}, userIdentifier: #{user_identifier}, hashedId: #{conversation_hashed_id}#{client_message_id_log_str})")
             
             # Also broadcast to agent-wide room for conversation list updates

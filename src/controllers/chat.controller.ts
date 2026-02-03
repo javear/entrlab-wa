@@ -489,6 +489,357 @@ export class ChatController {
   }
 
   /**
+   * Post one or multiple messages directly using clientId and userIdentifier
+   * POST /api/v1/platform/:platform/chat/messages
+   * Body: { 
+   *   userIdentifier: string, 
+   *   messages: [
+   *     {
+   *       messageType: string,
+   *       content?: string,
+   *       mediaUrl?: string,
+   *       caption?: string
+   *     }
+   *   ]
+   * }
+   * 
+   * Note: clientId is extracted from JWT token (clientId or client_metadata.client_id)
+   * 
+   * This endpoint skips Weaviate lookup and sends directly.
+   * Supports batch sending of multiple messages.
+   */
+  async postDirectBatchMessage(req: Request, res: Response): Promise<void> {
+    try {
+      const { platform } = req.params;
+      const { userIdentifier, messages } = req.body;
+
+      // Validate platform
+      if (!platform || !['wpp', 'wa-official'].includes(platform)) {
+        res.status(400).json({
+          success: false,
+          error: 'platform must be either "wpp" or "wa-official"'
+        });
+        return;
+      }
+
+      // Extract agentCode and clientId from JWT token
+      const jwtUser = (req as any).user || {};
+      const agentCode = jwtUser.agentCode;
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      // Extract clientId from JWT (try multiple possible locations)
+      const clientId = jwtUser.clientId || 
+                      jwtUser.client_metadata?.client_id || 
+                      jwtUser.client_metadata?.clientId;
+      
+      if (!clientId || typeof clientId !== 'string') {
+        res.status(400).json({
+          success: false,
+          error: 'clientId is required in JWT token (clientId or client_metadata.client_id)'
+        });
+        return;
+      }
+
+      if (!userIdentifier || typeof userIdentifier !== 'string') {
+        res.status(400).json({
+          success: false,
+          error: 'userIdentifier is required and must be a string'
+        });
+        return;
+      }
+
+      if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'messages is required and must be a non-empty array'
+        });
+        return;
+      }
+
+      // Validate each message in the array
+      const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        
+        if (!msg.messageType || typeof msg.messageType !== 'string') {
+          res.status(400).json({
+            success: false,
+            error: `messages[${i}].messageType is required and must be a string`
+          });
+          return;
+        }
+
+        const isMediaType = mediaTypes.includes(msg.messageType);
+        
+        if (!isMediaType && (!msg.content || typeof msg.content !== 'string')) {
+          res.status(400).json({
+            success: false,
+            error: `messages[${i}].content is required and must be a string for text messages`
+          });
+          return;
+        }
+        
+        if (isMediaType && (!msg.mediaUrl || typeof msg.mediaUrl !== 'string' || msg.mediaUrl.trim() === '')) {
+          res.status(400).json({
+            success: false,
+            error: `messages[${i}].mediaUrl is required for media message type '${msg.messageType}'`
+          });
+          return;
+        }
+      }
+
+      // Check if client exists (either WPP or WA-Official)
+      const clientInfo = this.whatsappService.getClient(clientId);
+      const platformClient = await PlatformClientAgent.findOne({
+        clientId,
+        isActive: true
+      });
+
+      // Validate client exists for the specified platform
+      if (platform === 'wpp' && !clientInfo) {
+        res.status(404).json({
+          success: false,
+          error: `WPP client ${clientId} not found`
+        });
+        return;
+      }
+
+      if (platform === 'wa-official' && !platformClient) {
+        res.status(404).json({
+          success: false,
+          error: `WA-Official client ${clientId} not found`
+        });
+        return;
+      }
+
+      // Get agent code (check for private assignment first)
+      let finalAgentCode = agentCode;
+      
+      if (platformClient) {
+        try {
+          if (platformClient.privateAgentAssignment) {
+            const privateAssignment = platformClient.privateAgentAssignment.find(
+              (a: any) => a.userIdentifier === userIdentifier
+            );
+            if (privateAssignment) {
+              finalAgentCode = privateAssignment.agentCode;
+            }
+          }
+        } catch (error) {
+          console.warn('⚠️ Could not check private agent assignment:', error);
+        }
+      }
+
+      if (!finalAgentCode) {
+        res.status(400).json({
+          success: false,
+          error: `No agent assigned to client ${clientId} for user ${userIdentifier}`
+        });
+        return;
+      }
+
+      // Extract sender information from JWT (already extracted above)
+      const senderInfo = jwtUser.sender ? {
+        senderId: jwtUser.sender.senderId || jwtUser.sender.id || jwtUser.agentCode || 'system',
+        senderDisplayName: jwtUser.sender.senderDisplayName || jwtUser.sender.displayName || jwtUser.sender.name || null,
+        senderRoleLabel: jwtUser.sender.senderRoleLabel || jwtUser.sender.roleLabel || 'agent',
+        senderAvatarUrl: jwtUser.sender.senderAvatarUrl || jwtUser.sender.avatarUrl || null
+      } : {
+        senderId: jwtUser.agentCode || 'system',
+        senderDisplayName: null,
+        senderRoleLabel: 'agent',
+        senderAvatarUrl: null
+      };
+
+      // Initialize producer and calculate hashedId for reference
+      const producer = new StreamProducer();
+      await producer.connect();
+      
+      let hashedId = null;
+      try {
+        hashedId = producer.hashRoomId(finalAgentCode, clientId, userIdentifier);
+      } catch (error) {
+        console.warn('⚠️ Could not calculate hashedId:', error);
+      }
+
+      const publishedMessages = [];
+      const errors = [];
+
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        
+        try {
+          // Generate unique message ID for each message
+          const messageId = `api-${Date.now()}-${Math.random().toString(36).substring(7)}-${i}`;
+
+          const messageData: any = {
+            clientId,
+            platform,
+            userIdentifier,
+            agentCode: finalAgentCode,
+            messageId,
+            messageType: msg.messageType || 'text',
+            content: msg.content || '',
+            metadata: {
+              source: 'api',
+              postedBy: jwtUser.agentCode || 'system',
+              sender: senderInfo,
+              conversationId: hashedId,
+              timestamp: new Date().toISOString(),
+              batchIndex: i, // Track position in batch
+              batchTotal: messages.length // Total messages in batch
+            }
+          };
+          
+          if (msg.mediaUrl) {
+            messageData.mediaUrl = msg.mediaUrl;
+          }
+          if (msg.caption) {
+            messageData.caption = msg.caption;
+          }
+          
+          const entryId = await producer.publishOutgoingMessage(messageData);
+
+          publishedMessages.push({
+            messageId,
+            messageType: msg.messageType,
+            content: msg.content || '',
+            mediaUrl: msg.mediaUrl || undefined,
+            caption: msg.caption || undefined,
+            entryId,
+            index: i
+          });
+
+          console.log(`✅ Published message ${i + 1}/${messages.length} to stream: ${entryId} (clientId: ${clientId}, userIdentifier: ${userIdentifier})`);
+        } catch (error: any) {
+          const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+          errors.push({
+            index: i,
+            messageType: msg.messageType,
+            error: errorMsg
+          });
+          console.error(`❌ Error publishing message ${i + 1}/${messages.length}:`, errorMsg);
+        }
+      }
+
+      // Return response with all published messages
+      if (publishedMessages.length === 0) {
+        res.status(500).json({
+          success: false,
+          error: 'Failed to publish all messages',
+          errors
+        });
+        return;
+      }
+
+      res.status(201).json({
+        success: true,
+        message: `Published ${publishedMessages.length} of ${messages.length} message(s) to stream`,
+        data: {
+          clientId,
+          userIdentifier,
+          platform,
+          conversationId: hashedId,
+          totalMessages: messages.length,
+          publishedMessages,
+          errors: errors.length > 0 ? errors : undefined,
+          publishedAt: new Date().toISOString()
+        }
+      });
+    } catch (error) {
+      console.error('❌ Error posting direct batch message:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to post messages',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Get contacts (UserIdentity) from Weaviate
+   * GET /api/v1/platform/chat/contacts?limit=20&offset=0&q=searchquery
+   * 
+   * Query params:
+   * - limit: Number of results (default: 20, max: 100)
+   * - offset: Pagination offset (default: 0)
+   * - q: Optional search query (searches in identifier and data fields)
+   * 
+   * If search query (q) is not provided or blank, returns all contacts.
+   * Tenant (agent_code) is REQUIRED and extracted from JWT token.
+   */
+  async getContacts(req: Request, res: Response): Promise<void> {
+    try {
+      const limit = parseInt(req.query.limit as string) || 20;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const searchQuery = (req.query.q as string) || null;
+
+      // Validate limit and offset
+      if (limit < 1 || limit > 100) {
+        res.status(400).json({
+          success: false,
+          error: 'limit must be between 1 and 100'
+        });
+        return;
+      }
+
+      if (offset < 0) {
+        res.status(400).json({
+          success: false,
+          error: 'offset must be >= 0'
+        });
+        return;
+      }
+
+      // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
+      const jwtUser = (req as any).user || {};
+      const agentCode = jwtUser.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      // Get contacts from Weaviate
+      const result = await this.weaviateService.getUserContacts(
+        limit,
+        offset,
+        searchQuery,
+        agentCode
+      );
+
+      res.json({
+        success: true,
+        data: {
+          contacts: result.contacts,
+          pagination: {
+            limit,
+            offset,
+            total: result.total,
+            hasMore: result.hasMore
+          }
+        }
+      });
+    } catch (error) {
+      console.error('❌ Error getting contacts:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to get contacts',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
    * Set need attention status for a conversation by hashedId
    * PUT /api/v1/platform/chat/conversations/:hashedId/:action
    * Actions: block, pause, release, taken
@@ -764,6 +1115,238 @@ export class ChatController {
         success: false,
         message: 'Failed to set need attention status',
         error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Create contacts (bulk insert)
+   * POST /api/v1/platform/chat/contacts
+   * Body: { contacts: [{ identifier, data?, source?, memoryFacts? }], upsert?: boolean }
+   * 
+   * - If upsert: false (default), skips contacts that already exist (by identifier)
+   * - If upsert: true, updates existing contacts instead of skipping
+   * - For MemoryFact records, if upsert: true and similar fact exists (distance < 0.15), replaces it
+   * - Returns success count, skipped count, failed count, updated count (if upsert), and memoryFacts stats
+   */
+  async createContacts(req: Request, res: Response): Promise<void> {
+    try {
+      const { contacts, upsert = false } = req.body;
+
+      if (!Array.isArray(contacts) || contacts.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'contacts array is required and must not be empty'
+        });
+        return;
+      }
+
+      // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
+      const agentCode = (req as any).user?.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      // Validate each contact
+      for (const contact of contacts) {
+        if (!contact.identifier || typeof contact.identifier !== 'string') {
+          res.status(400).json({
+            success: false,
+            error: 'Each contact must have a valid identifier (string)'
+          });
+          return;
+        }
+
+        // Validate memoryFacts if provided
+        if (contact.memoryFacts !== undefined) {
+          if (!Array.isArray(contact.memoryFacts)) {
+            res.status(400).json({
+              success: false,
+              error: 'memoryFacts must be an array'
+            });
+            return;
+          }
+
+          for (const fact of contact.memoryFacts) {
+            if (!fact.fact || typeof fact.fact !== 'string') {
+              res.status(400).json({
+                success: false,
+                error: 'Each memoryFact must have a valid fact (string)'
+              });
+              return;
+            }
+
+            if (fact.confidence !== undefined && (typeof fact.confidence !== 'number' || fact.confidence < 0 || fact.confidence > 1)) {
+              res.status(400).json({
+                success: false,
+                error: 'memoryFact confidence must be a number between 0 and 1'
+              });
+              return;
+            }
+          }
+        }
+      }
+
+      const result = await this.weaviateService.createUserContacts(contacts, agentCode, upsert);
+
+      res.json({
+        success: true,
+        data: {
+          inserted: result.success,
+          skipped: result.skipped,
+          failed: result.failed,
+          updated: result.updated,
+          memoryFactsCreated: result.memoryFactsCreated,
+          memoryFactsFailed: result.memoryFactsFailed,
+          memoryFactsReplaced: result.memoryFactsReplaced,
+          ...(result.errors && result.errors.length > 0 && { errors: result.errors }),
+          ...(result.memoryFactErrors && result.memoryFactErrors.length > 0 && { memoryFactErrors: result.memoryFactErrors })
+        }
+      });
+    } catch (error: any) {
+      console.error('❌ Error creating contacts:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to create contacts'
+      });
+    }
+  }
+
+  /**
+   * Update contact (single update by identifier)
+   * PUT /api/v1/platform/chat/contacts
+   * Body: { identifier, data?, source? }
+   * 
+   * - Updates only one contact per request
+   * - Returns updated contact or null if not found
+   */
+  async updateContact(req: Request, res: Response): Promise<void> {
+    try {
+      const { identifier, data, source } = req.body;
+
+      if (!identifier || typeof identifier !== 'string') {
+        res.status(400).json({
+          success: false,
+          error: 'identifier is required and must be a string'
+        });
+        return;
+      }
+
+      // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
+      const agentCode = (req as any).user?.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      const updates: any = {};
+      if (data !== undefined) {
+        updates.data = data;
+      }
+      if (source !== undefined) {
+        updates.source = source;
+      }
+
+      if (Object.keys(updates).length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'At least one field (data or source) must be provided for update'
+        });
+        return;
+      }
+
+      const updatedContact = await this.weaviateService.updateUserContact(identifier, updates, agentCode);
+
+      if (!updatedContact) {
+        res.status(404).json({
+          success: false,
+          error: 'Contact not found'
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: updatedContact
+      });
+    } catch (error: any) {
+      console.error('❌ Error updating contact:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to update contact'
+      });
+    }
+  }
+
+  /**
+   * Delete contacts (bulk delete by identifiers)
+   * DELETE /api/v1/platform/chat/contacts
+   * Body: { identifiers: string[] }
+   * 
+   * - Supports bulk deletion
+   * - Deletes UserIdentity records and associated MemoryFact records
+   * - Returns counts: deleted, failed, memoryFactsDeleted
+   * - Idempotent: deleting non-existent contacts is not counted as failed
+   */
+  async deleteContacts(req: Request, res: Response): Promise<void> {
+    try {
+      const { identifiers } = req.body;
+
+      if (!Array.isArray(identifiers) || identifiers.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'identifiers must be a non-empty array'
+        });
+        return;
+      }
+
+      // Validate each identifier
+      for (const identifier of identifiers) {
+        if (!identifier || typeof identifier !== 'string') {
+          res.status(400).json({
+            success: false,
+            error: 'Each identifier must be a valid string'
+          });
+          return;
+        }
+      }
+
+      // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
+      const agentCode = (req as any).user?.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      const result = await this.weaviateService.deleteUserContacts(identifiers, agentCode);
+
+      res.json({
+        success: true,
+        data: {
+          deleted: result.deleted,
+          failed: result.failed,
+          memoryFactsDeleted: result.memoryFactsDeleted,
+          ...(result.errors && result.errors.length > 0 && { errors: result.errors })
+        }
+      });
+    } catch (error: any) {
+      console.error('❌ Error deleting contacts:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to delete contacts'
       });
     }
   }

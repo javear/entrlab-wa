@@ -223,6 +223,10 @@ export class WPPConnectWhatsAppBotApp {
     // Chat routes (v1) with authentication
     this.app.use('/api/v1/platform/chat', authMiddleware.authenticate, createChatRoutes(this.chatController));
     
+    // Direct batch messaging route (separate registration for correct path structure)
+    // POST /api/v1/platform/:platform/chat/messages
+    this.app.post('/api/v1/platform/:platform/chat/messages', authMiddleware.authenticate, (req, res) => this.chatController.postDirectBatchMessage(req, res));
+    
     // Legacy routes for backward compatibility
     this.app.get('/health', (req, res) => this.apiController.healthCheck(req, res));
     this.app.get('/memory/stats', (req, res) => this.apiController.getMemoryStats(req, res));
@@ -373,7 +377,7 @@ export class WPPConnectWhatsAppBotApp {
         console.warn('⚠️  Failed to start outgoing message consumer (will retry):', error);
         // Don't fail initialization - consumer will retry
       }
-
+      
       // Restore existing sessions from MongoDB (NON-BLOCKING - runs in background)
       setImmediate(() => {
         this.whatsappService.restoreExistingSessions()

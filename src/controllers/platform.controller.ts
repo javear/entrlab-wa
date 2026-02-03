@@ -5,6 +5,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 import { encryptWithVault, decryptWithVault } from '../utils/vault';
 import crypto from 'crypto';
 import { WeaviateService } from '../services/weaviate.service';
+import jwt from 'jsonwebtoken';
+import axios from 'axios';
 
 // Stream Producer for publishing events
 const { StreamProducer } = require('../../services/pubsub/client/producer');
@@ -632,6 +634,71 @@ export class PlatformController {
    * Get all platform clients (includes both platform clients and legacy WPP clients)
    * GET /api/v1/platform/clients
    */
+  /**
+   * Get all clients for the authenticated agent
+   * GET /api/v1/platform/clients
+   * 
+   * - Extracts agentCode from JWT token
+   * - Returns all clients from PlatformClientAgent that have matching ai_agent_code
+   * - Only returns active clients
+   */
+  async getClientsByAgent(req: Request, res: Response): Promise<void> {
+    try {
+      // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
+      const agentCode = (req as any).user?.agentCode;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      // Query PlatformClientAgent for all clients with matching agent code
+      const clients = await PlatformClientAgent.find({
+        ai_agent_code: agentCode,
+        isActive: true
+      }).sort({ updatedAt: -1 }).lean();
+
+      // Filter and format response - only return active and ready clients
+      const formattedClients = clients
+        .map((client: any) => {
+          // For WPP clients, check if they are ready
+          if (client.platform === 'wpp') {
+            const wppClient = this.whatsappService.getClient(client.clientId);
+            // Filter out WPP clients that are not ready
+            if (!wppClient || !wppClient.isReady) {
+              return null;
+            }
+          }
+          // For WA-Official clients, isActive: true is sufficient (no isReady concept)
+
+          // Return only the requested fields
+          return {
+            clientId: client.clientId,
+            platform: client.platform,
+            phone_number_id: client.phone_number_id || null
+          };
+        })
+        .filter((client: any) => client !== null); // Remove null entries
+
+      res.json({
+        success: true,
+        data: {
+          clients: formattedClients,
+          total: formattedClients.length
+        }
+      });
+    } catch (error: any) {
+      console.error('❌ Error getting clients by agent:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to get clients'
+      });
+    }
+  }
+
   async getAllPlatformClients(req: Request, res: Response): Promise<void> {
     try {
       // Get all clients from PlatformClientAgent (only those with platform field)
@@ -1856,6 +1923,230 @@ export class PlatformController {
         message: 'Failed to set need attention status',
         error: error instanceof Error ? error.message : 'Unknown error'
       });
+    }
+  }
+
+  /**
+   * Broadcast messages to multiple users via Mastra workflow
+   * POST /api/v1/platform/wpp/chat/messages/broadcast
+   * 
+   * - Validates clientId belongs to agentCode from JWT
+   * - Creates signed JWT for Mastra workflow API
+   * - Calls Mastra workflow endpoint with broadcast data
+   */
+  async broadcastMessages(req: Request, res: Response): Promise<void> {
+    try {
+      const { batch, client, targets, startIn, startAt } = req.body;
+
+      // Validate request body
+      if (!batch || !client || !client.clientId || !targets || !Array.isArray(targets) || targets.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: 'Invalid request body. Required: batch, client.clientId, and targets array'
+        });
+        return;
+      }
+
+      // Validate scheduling parameters (startIn OR startAt, not both)
+      if (startIn && startAt) {
+        res.status(400).json({
+          success: false,
+          error: 'Cannot specify both startIn and startAt. Please use only one.'
+        });
+        return;
+      }
+
+      // Validate startIn format if provided
+      if (startIn) {
+        const startInRegex = /^(\d+)([smhd])$/i;
+        if (!startInRegex.test(startIn)) {
+          res.status(400).json({
+            success: false,
+            error: 'Invalid startIn format. Expected format: "1s", "5m", "2h", "3d" (seconds, minutes, hours, days)'
+          });
+          return;
+        }
+      }
+
+      // Validate startAt format and ensure it's in the future if provided
+      if (startAt) {
+        const startAtDate = new Date(startAt);
+        if (isNaN(startAtDate.getTime())) {
+          res.status(400).json({
+            success: false,
+            error: 'Invalid startAt format. Expected ISO 8601 format (e.g., "2026-01-28T20:00:00+07:00")'
+          });
+          return;
+        }
+
+        const now = new Date();
+        if (startAtDate <= now) {
+          res.status(400).json({
+            success: false,
+            error: 'startAt must be a future time'
+          });
+          return;
+        }
+      }
+
+      // Extract data from JWT token
+      const jwtUser = (req as any).user;
+      if (!jwtUser) {
+        res.status(401).json({
+          success: false,
+          error: 'JWT token is required'
+        });
+        return;
+      }
+
+      const agentCode = jwtUser.agentCode;
+      const sender = jwtUser.sender;
+      const jwtClientId = jwtUser.clientId;
+
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      if (!sender || !sender.senderId) {
+        res.status(400).json({
+          success: false,
+          error: 'sender.senderId is required in JWT token'
+        });
+        return;
+      }
+
+      // Validate that the clientId from request belongs to the agentCode from JWT
+      const platformClient = await PlatformClientAgent.findOne({
+        clientId: client.clientId,
+        ai_agent_code: agentCode,
+        isActive: true
+      }).lean();
+
+      if (!platformClient) {
+        res.status(403).json({
+          success: false,
+          error: `Client ${client.clientId} does not belong to agent ${agentCode} or is not active`
+        });
+        return;
+      }
+
+      // Get platform from PlatformClientAgent
+      const platform = platformClient.platform || 'wpp';
+
+      // Validate JWT_SECRET is available
+      const jwtSecret = this.env.JWT_SECRET;
+      if (!jwtSecret) {
+        res.status(500).json({
+          success: false,
+          error: 'JWT_SECRET environment variable is not set'
+        });
+        return;
+      }
+
+      // Validate MASTRA_ENDPOINT_WORKFLOW is available
+      const mastraEndpoint = this.env.MASTRA_ENDPOINT_WORKFLOW;
+      if (!mastraEndpoint) {
+        res.status(500).json({
+          success: false,
+          error: 'MASTRA_ENDPOINT_WORKFLOW environment variable is not set'
+        });
+        return;
+      }
+
+      // Create signed JWT token for Mastra workflow API
+      const now = Math.floor(Date.now() / 1000);
+      const jwtPayload = {
+        identifier: sender.senderId,
+        role: 'authenticated',
+        agent_metadata: {
+          agent_code: agentCode,
+          status: 'active'
+        },
+        client_metadata: {
+          client_id: jwtClientId,
+          client_name: 'WhatsApp Bot',
+          app_metadata: {
+            provider: 'wa'
+          }
+        },
+        user_metadata: sender,
+        iat: now,
+        exp: now + 3600 // 1 hour expiration
+      };
+
+      const authToken = jwt.sign(jwtPayload, jwtSecret, { algorithm: 'HS256' });
+
+      // Prepare request body for Mastra workflow
+      const requestBody: any = {
+        inputData: {
+          batch: batch,
+          client: {
+            platform: platform,
+            clientId: client.clientId,
+            agentCode: agentCode,
+            sender: sender
+          },
+          targets: targets
+        }
+      };
+
+      // Add scheduling parameters if provided
+      if (startIn) {
+        requestBody.inputData.startIn = startIn;
+      }
+      if (startAt) {
+        requestBody.inputData.startAt = startAt;
+      }
+
+      // Call Mastra workflow endpoint
+      const workflowUrl = `${mastraEndpoint}/api/workflows/batchedBroadcastWorkflow/start-async`;
+      
+      console.log(`📤 [Broadcast] Calling Mastra workflow: ${workflowUrl}`);
+      console.log(`📤 [Broadcast] Client: ${client.clientId}, Agent: ${agentCode}, Targets: ${targets.length}`);
+
+      const response = await axios.post(workflowUrl, requestBody, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        timeout: 30000 // 30 seconds timeout
+      });
+
+      console.log(`✅ [Broadcast] Mastra workflow responded: ${response.status}`);
+
+      // Extract result from workflow response
+      const workflowResult = response.data?.result || response.data;
+
+      res.json({
+        success: true,
+        data: {
+          ...workflowResult,
+          clientId: client.clientId,
+          agentCode: agentCode,
+          targetsCount: targets.length
+        }
+      });
+    } catch (error: any) {
+      console.error('❌ Error broadcasting messages:', error);
+      
+      if (error.response) {
+        // Axios error with response
+        res.status(error.response.status || 500).json({
+          success: false,
+          error: error.response.data?.error || error.response.data?.message || error.message || 'Failed to broadcast messages',
+          details: error.response.data
+        });
+      } else {
+        // Other errors
+        res.status(500).json({
+          success: false,
+          error: error.message || 'Failed to broadcast messages'
+        });
+      }
     }
   }
 }

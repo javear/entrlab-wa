@@ -54,6 +54,18 @@ function initializeStreamProducer() {
   return streamProducer;
 }
 
+/**
+ * Normalize AI response to always return an array of message objects.
+ * Handles: array (process all), single object with type (wrap in array), or empty.
+ * Some AI APIs return content.object as a single object when there's one item.
+ */
+function ensureMessageArray(value: any): WorkflowMessageObject[] {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item: any) => item && item.type);
+  if (typeof value === 'object' && value.type) return [value];
+  return [];
+}
+
 // ============================================
 // WPPConnect Message Handler
 // ============================================
@@ -1694,10 +1706,11 @@ export class WPPConnectMessageHandler {
         return;
       }
 
-      // Workflow format - use object array
-      if (aiagent && aiagent.result && aiagent.result.content && aiagent.result.content.object) {
-        const messageObjects = aiagent.result.content.object;
-        console.log(`🤖 [${clientId}] Received workflow response with ${messageObjects.length} message objects`);
+      // Workflow format - use object array (ensureMessageArray handles both array and single-object)
+      const rawObjects = aiagent?.result?.content?.object ?? aiagent?.result?.formatted?.whatsapp;
+      const messageObjects = ensureMessageArray(rawObjects);
+      if (messageObjects.length > 0) {
+        console.log(`🤖 [${clientId}] Received workflow response with ${messageObjects.length} message object(s) - will send all`);
         
         // Publish AI response event to stream (if producer is available)
         // Lazy initialize producer (ensures dotenv.config() has run)
@@ -1708,23 +1721,31 @@ export class WPPConnectMessageHandler {
         if (streamProducer) {
           try {
             const phoneNumber = number.replace(/@.*$/, '');
-            const userKey = this.getUserKey(clientId, phoneNumber);
             const agentCode = await this.whatsappService.getAgentForUser(clientId, phoneNumber, 'wpp');
-            
-            await streamProducer.publishAIResponse({
-              clientId,
-              platform: 'wpp',
-              userIdentifier: phoneNumber,
-              agentCode: agentCode || 'unknown',
-              requestMessage: message,
-              response: {
-                messages: messageObjects,
-                raw: aiagent
-              },
-              metadata: {
-                processingTime: Date.now() - (aiagent.metadata?.startTime || Date.now())
-              }
-            });
+            const baseMetadata = {
+              processingTime: Date.now() - (aiagent.metadata?.startTime || Date.now())
+            };
+            // Publish one stream event per message - consumers expect one event = one message
+            for (let i = 0; i < messageObjects.length; i++) {
+              const msg = messageObjects[i];
+              if (!msg || !msg.type) continue;
+              await streamProducer.publishAIResponse({
+                clientId,
+                platform: 'wpp',
+                userIdentifier: phoneNumber,
+                agentCode: agentCode || 'unknown',
+                requestMessage: message,
+                response: {
+                  messages: [msg],
+                  raw: i === 0 ? aiagent : undefined // Include raw only on first to reduce payload
+                },
+                metadata: {
+                  ...baseMetadata,
+                  batchIndex: i,
+                  batchTotal: messageObjects.length
+                }
+              });
+            }
           } catch (error: any) {
             console.warn('⚠️  Failed to publish AI response to stream:', error.message);
           }
@@ -1754,7 +1775,7 @@ export class WPPConnectMessageHandler {
           try {
             const phoneNumber = number.replace(/@.*$/, '');
             const agentCode = await this.whatsappService.getAgentForUser(clientId, phoneNumber, 'wpp');
-            
+            // Publish as single message for consistency (one event = one message)
             await streamProducer.publishAIResponse({
               clientId,
               platform: 'wpp',
@@ -1762,7 +1783,7 @@ export class WPPConnectMessageHandler {
               agentCode: agentCode || 'unknown',
               requestMessage: message,
               response: {
-                text,
+                messages: [{ type: 'text' as const, text }],
                 raw: aiagent
               },
               metadata: {
@@ -1983,15 +2004,16 @@ export class WPPConnectMessageHandler {
       }
       
       // Use formatted.whatsapp as primary source, fallback to content.object if not available
+      // ensureMessageArray handles both array and single-object formats (some APIs return object instead of [object])
       let messageObjects: WorkflowMessageObject[] = [];
+      const fromFormatted = ensureMessageArray(workflowResponse.result?.formatted?.whatsapp);
+      const fromContent = ensureMessageArray(workflowResponse.result?.content?.object);
       
-      if (workflowResponse.result?.formatted?.whatsapp && Array.isArray(workflowResponse.result.formatted.whatsapp) && workflowResponse.result.formatted.whatsapp.length > 0) {
-        // Primary: Use formatted.whatsapp
-        messageObjects = workflowResponse.result.formatted.whatsapp;
+      if (fromFormatted.length > 0) {
+        messageObjects = fromFormatted;
         console.log(`📥 [${clientId}] Using formatted.whatsapp: ${messageObjects.length} message(s)`);
-      } else if (workflowResponse.result?.content?.object && Array.isArray(workflowResponse.result.content.object) && workflowResponse.result.content.object.length > 0) {
-        // Fallback: Use content.object if formatted.whatsapp is not available
-        messageObjects = workflowResponse.result.content.object;
+      } else if (fromContent.length > 0) {
+        messageObjects = fromContent;
         console.log(`📥 [${clientId}] Using content.object: ${messageObjects.length} message(s)`);
       } else {
         // No message objects found

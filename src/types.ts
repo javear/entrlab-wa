@@ -10,6 +10,7 @@ export interface Environment {
   ALLOWED_NUMBERS?: string | undefined;
   FW_ENDPOINT?: string | undefined;
   FW_ENDPOINT_WORKFLOW?: string | undefined;
+  MASTRA_ENDPOINT_WORKFLOW?: string | undefined;
   FW_AUTH_TOKEN?: string | undefined;
   JWT_SECRET?: string | undefined;
   WA_JWT_SECRET?: string | undefined;

@@ -27,6 +27,17 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const path = require('path');
 
+/**
+ * Normalize AI response to always return an array of message objects.
+ * Handles: array (process all), single object with type (wrap in array), or empty.
+ */
+function ensureMessageArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item) => item && item.type);
+  if (typeof value === 'object' && value.type) return [value];
+  return [];
+}
+
 // Import client manager and message controller
 const clientManagerPath = path.join(__dirname, '../services/whatsapp-official/services/client-manager.js');
 const messageControllerPath = path.join(__dirname, '../services/whatsapp-official/controllers/message.controller.js');
@@ -402,14 +413,13 @@ async function main() {
     console.log('📤 Step 4: Sending formatted response bubbles...');
     
     // Use formatted.whatsapp as primary source, fallback to content.object
-    let messageObjects = [];
+    const fromFormatted = ensureMessageArray(workflowResponse?.result?.formatted?.whatsapp);
+    const fromContent = ensureMessageArray(workflowResponse?.result?.content?.object);
+    const messageObjects = fromFormatted.length > 0 ? fromFormatted : fromContent;
     
-    if (workflowResponse?.result?.formatted?.whatsapp && Array.isArray(workflowResponse.result.formatted.whatsapp) && workflowResponse.result.formatted.whatsapp.length > 0) {
-      messageObjects = workflowResponse.result.formatted.whatsapp;
-      console.log(`   Using formatted.whatsapp: ${messageObjects.length} message(s)`);
-    } else if (workflowResponse?.result?.content?.object && Array.isArray(workflowResponse.result.content.object) && workflowResponse.result.content.object.length > 0) {
-      messageObjects = workflowResponse.result.content.object;
-      console.log(`   Using content.object: ${messageObjects.length} message(s)`);
+    if (messageObjects.length > 0) {
+      const source = fromFormatted.length > 0 ? 'formatted.whatsapp' : 'content.object';
+      console.log(`   Using ${source}: ${messageObjects.length} message(s) - will send all`);
     } else if (workflowResponse?.result?.content?.text) {
       // Fallback to text only
       const WhatsAppMessageController = require(messageControllerPath);

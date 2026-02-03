@@ -510,7 +510,7 @@ class WeaviateConsumer {
       ? generateUuid5(`${tenant}:${conversationId}`, CONVERSATION_UUID_NAMESPACE)
       : undefined;
 
-    // Generate event_id from messageId or entryId
+    // Generate event_id from messageId or entryId (one event = one message, producer publishes per-message)
     const eventId = eventData.messageId || entryId;
     const eventUuid = generateUuid5
       ? generateUuid5(`${tenant}:${conversationId}:${eventId}`, EVENT_UUID_NAMESPACE)
@@ -518,14 +518,14 @@ class WeaviateConsumer {
 
     // Extract sender information from metadata
     const senderInfo = this.extractSenderInfo(eventData);
-    
+
     // Extract participant_ids
     const participantIds = this.extractParticipantIds(eventData, userIdentifier);
 
     // Parse created_at from timestamp
     const createdAt = eventData.timestamp || new Date().toISOString();
-    
-    // Use timestamp as sequence (milliseconds since epoch) - no query needed, reduces resource consumption
+
+    // Use timestamp as sequence (milliseconds since epoch)
     const sequence = new Date(createdAt).getTime();
 
     // Extract visibility (default to 'visible' if not provided)
@@ -537,7 +537,7 @@ class WeaviateConsumer {
     // Extract and format content based on event type
     const content = this.extractFormattedContent(eventData, eventType);
 
-    // Build ChatEvent object
+    // Build ChatEvent object (one stream event = one ChatEvent)
     const chatEvent = {
       conversation_id: conversationId,
       event_id: eventId,
@@ -548,14 +548,12 @@ class WeaviateConsumer {
       sender_role_label: senderInfo.roleLabel || null,
       sender_avatar_url: senderInfo.avatarUrl || null,
       participant_ids: participantIds,
-      content: content, // Formatted message content as JSON string
+      content: content,
       sequence: sequence,
       created_at: createdAt,
       visibility: visibility
     };
 
-    // Store last_event_content as JSON string (same format as ChatEvent.content)
-    // content is already a JSON string from extractFormattedContent
     const lastEventContentString = content || '[]';
 
     // Extract hashed_id from event data (pre-calculated by producer)
@@ -576,7 +574,7 @@ class WeaviateConsumer {
       created_at: createdAt,
       last_event_id: eventId,
       last_event_type: eventType,
-      last_event_content: lastEventContentString, // Store as JSON string (same as ChatEvent.content)
+      last_event_content: lastEventContentString,
       last_sender_type: senderInfo.type,
       last_sender_id: senderInfo.id,
       last_sender_display_name: senderInfo.displayName,
@@ -584,17 +582,11 @@ class WeaviateConsumer {
     }, conversationUuid);
 
     // Insert ChatEvent (idempotent by event_id)
-    // Returns true if inserted, false if already exists (skipped)
     const wasInserted = await this.insertChatEvent(tenant, chatEvent, embedding, eventUuid);
 
-    // Update Conversation state (also update client_id and platform if they're missing)
-    // Extract client_id and platform from event data (clientId is already declared above)
+    // Update Conversation state
     const clientIdValue = eventData.clientId || null;
     const platformValue = eventData.platform || null;
-    
-    // Reuse lastEventContentString from above for the update
-    // The content is already a JSON string
-    // Reuse hashedId from above (already extracted)
 
     await this.updateConversation(tenant, {
       conversation_id: conversationId,
@@ -604,15 +596,13 @@ class WeaviateConsumer {
       last_event_at: createdAt,
       last_event_id: eventId,
       last_event_type: eventType,
-      last_event_content: lastEventContentString, // Use JSON string
+      last_event_content: lastEventContentString,
       last_sender_type: senderInfo.type,
       last_sender_id: senderInfo.id,
       last_sender_display_name: senderInfo.displayName,
       participant_ids: participantIds
     });
 
-    // Return true if inserted, false if skipped (already exists)
-    // Both cases should be ACKed to prevent reprocessing
     return wasInserted !== false;
   }
 
@@ -711,7 +701,7 @@ class WeaviateConsumer {
 
   /**
    * Extract and format message content based on event type
-   * 
+   *
    * @param {Object} eventData - Event data
    * @param {string} eventType - Event type (message:incoming, ai:response, or agent:response)
    * @returns {string} JSON stringified array of formatted messages
