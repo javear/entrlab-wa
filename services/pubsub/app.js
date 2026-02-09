@@ -48,6 +48,18 @@ class PubSubApp {
     this.app.use(express.json());
     this.app.use(express.urlencoded({ extended: true }));
 
+    // Initialize MongoDB for broadcast stats (delivered/read/reply)
+    const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+    if (mongoUri) {
+      try {
+        const mongoose = require('mongoose');
+        await mongoose.connect(mongoUri);
+        console.log('✅ MongoDB connected (for broadcast stats)');
+      } catch (err) {
+        console.warn('⚠️ MongoDB connect failed (broadcast stats will be skipped):', err.message);
+      }
+    }
+
     // Initialize stream service
     this.streamService = new StreamService();
     await this.streamService.connect();

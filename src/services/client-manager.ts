@@ -35,6 +35,7 @@ export class WPPConnectClientManager {
   private clients: Map<string, WPPConnectClientInfo> = new Map();
   private config: WPPConnectClientManagerConfig;
   private messageHandlers: ((clientId: string, message: any) => Promise<void>)[] = [];
+  private readReceiptHandlers: ((clientId: string, userIdentifier: string, readAt: string) => Promise<void>)[] = [];
   private sessionBackup: WhatsAppSessionBackup | null = null;
   private isMongoConnected: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
@@ -206,7 +207,15 @@ export class WPPConnectClientManager {
         console.log(`🔕 [${clientId}] Ignoring non-message event type: ${msgType}`);
         return; // Exit early - these are status updates, not messages
       }
-      
+
+      // Filter out story/status replies - messages from status@broadcast (contact story updates)
+      // These should not trigger AI replies - only chat messages should
+      const from = String(message.from || '').toLowerCase();
+      if (from.includes('status') || from.includes('broadcast') || message.broadcast === true) {
+        console.log(`🔕 [${clientId}] Ignoring story/status message (from: ${message.from}, broadcast: ${message.broadcast})`);
+        return;
+      }
+
       try {
         const clientInfo = this.clients.get(clientId);
         
@@ -534,6 +543,34 @@ export class WPPConnectClientManager {
         console.log(`✅ onReactionMessage handler registered for ${clientId}`);
       } catch (error) {
         console.log(`⚠️  onReactionMessage not available:`, error);
+      }
+
+      // Set up onAck handler - fires when user reads our messages (ack >= 3 = read)
+      try {
+        if (typeof (client as any).onAck === 'function') {
+          (client as any).onAck(async (msg: any) => {
+            const ack = typeof msg?.ack === 'number' ? msg.ack : (msg?.ack?.id ?? 0);
+            if (ack >= 3) {
+              // ack 3=read, 4=played - user read our message
+              const to = msg?.to || msg?.id?.remote;
+              const rawTo = typeof to === 'object' ? (to?._serialized || to?.id || '') : String(to || '');
+              const userIdentifier = rawTo.replace(/@.*$/, '');
+              if (userIdentifier && this.readReceiptHandlers.length > 0) {
+                const readAt = new Date().toISOString();
+                for (const handler of this.readReceiptHandlers) {
+                  try {
+                    await handler(clientId, userIdentifier, readAt);
+                  } catch (err) {
+                    console.warn(`⚠️ [${clientId}] Read receipt handler error:`, err);
+                  }
+                }
+              }
+            }
+          });
+          console.log(`✅ onAck handler registered for ${clientId}`);
+        }
+      } catch (error) {
+        console.log(`⚠️  onAck not available:`, error);
       }
 
       // Set up ready handler
@@ -1454,6 +1491,11 @@ export class WPPConnectClientManager {
   public addMessageHandler(handler: (clientId: string, message: any) => Promise<void>): void {
     this.messageHandlers.push(handler);
     console.log(`✅ Message handler added to client manager (total: ${this.messageHandlers.length} handler(s))`);
+  }
+
+  public addReadReceiptHandler(handler: (clientId: string, userIdentifier: string, readAt: string) => Promise<void>): void {
+    this.readReceiptHandlers.push(handler);
+    console.log(`✅ Read receipt handler added to client manager (total: ${this.readReceiptHandlers.length} handler(s))`);
   }
 
   public async restoreExistingSessions(): Promise<void> {

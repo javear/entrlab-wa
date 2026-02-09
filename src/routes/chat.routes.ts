@@ -5,6 +5,9 @@ export function createChatRoutes(chatController: ChatController): Router {
     const router = Router();
 
     // Chat API Routes
+    // GET /api/v1/platform/chat/broadcasts?limit=20&offset=0
+    router.get('/broadcasts', (req, res) => chatController.getBroadcasts(req, res));
+
     // GET /api/v1/platform/chat/conversations?userIdentifier=xxx&limit=20&offset=0
     router.get('/conversations', (req, res) => chatController.getUserConversations(req, res));
     

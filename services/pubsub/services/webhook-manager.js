@@ -338,6 +338,11 @@ class WebhookManager {
       return []; // Return empty array - no webhooks to deliver, consider it success
     }
 
+    // Skip message:read - only consumed by Weaviate for lastReadAt update
+    if (eventType === 'message:read') {
+      return [];
+    }
+
     // Find all webhooks that match this event type and agentCode (if scoped)
     const eventAgentCode = eventData.agentCode || null; // Extract agentCode from event
     

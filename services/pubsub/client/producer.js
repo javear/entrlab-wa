@@ -288,6 +288,66 @@ class StreamProducer {
   }
 
   /**
+   * Publish message:read event (user read receipt - updates Weaviate lastReadAt only)
+   * Only consumed by Weaviate consumer - other consumers skip this event type
+   * @param {Object} readData - { clientId, platform, userIdentifier, agentCode, readAt }
+   * @returns {Promise<string>} - Stream entry ID
+   */
+  async publishMessageRead(readData) {
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const isReallyConnected = this.isConnected && this.client && this.client.isReady;
+        if (!isReallyConnected) {
+          await this.connect();
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        if (!this.client || !this.client.isReady) {
+          throw new Error('Stream producer client not ready');
+        }
+
+        let hashedId = null;
+        if (readData.agentCode && readData.clientId && readData.userIdentifier) {
+          try {
+            hashedId = this.hashRoomId(readData.agentCode, readData.clientId, readData.userIdentifier);
+          } catch (e) {
+            console.warn('⚠️ Failed to hash room ID for message:read:', e.message);
+          }
+        }
+
+        const entryData = {
+          eventType: 'message:read',
+          timestamp: readData.readAt || new Date().toISOString(),
+          ...readData,
+          ...(hashedId && { hashedId })
+        };
+
+        const streamEntry = this.prepareStreamEntry(entryData);
+        const entryId = await this.client.xAdd(this.config.streamName, '*', streamEntry);
+        console.log(`📤 [Producer] Published message:read to stream: ${entryId}`);
+        return entryId;
+      } catch (error) {
+        lastError = error;
+        const isConnError = error.code === 'ECONNRESET' || error.code === 'EPIPE' ||
+          error.message?.includes('Connection') || error.message?.includes('closed');
+        if (isConnError && attempt < maxRetries) {
+          this.isConnected = false;
+          await new Promise(resolve => setTimeout(resolve, attempt * 200));
+          continue;
+        }
+        if (!isConnError || attempt === maxRetries) {
+          console.error('❌ Error publishing message:read:', error.message || error);
+          throw error;
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  /**
    * Publish agent response event (for API-initiated messages)
    * @param {Object} responseData - Agent response data
    * @returns {Promise<string>} - Stream entry ID

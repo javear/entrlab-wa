@@ -189,6 +189,10 @@ export class WPPConnectWhatsAppService {
     this.clientManager.addMessageHandler(handler);
   }
 
+  public addReadReceiptHandler(handler: (clientId: string, userIdentifier: string, readAt: string) => Promise<void>): void {
+    this.clientManager.addReadReceiptHandler(handler);
+  }
+
   // Session Management
   async restoreExistingSessions(): Promise<void> {
     return await this.clientManager.restoreExistingSessions();

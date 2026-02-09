@@ -480,6 +480,46 @@ class WeaviateConsumer {
       }
     }
 
+    // Handle message:read events - update only Conversation.last_read_at
+    // If isBroadcasted, also update PlatformClientBroadcast counter.read and target_activities
+    if (eventData.eventType === 'message:read') {
+      if (!eventData.agentCode || !eventData.clientId || !eventData.userIdentifier) {
+        console.log(`⚠️  [Weaviate Consumer] message:read missing required fields, skipping (entryId: ${entryId})`);
+        return true; // ACK to prevent reprocessing
+      }
+
+      const tenant = eventData.agentCode;
+      const conversationId = `${eventData.clientId}:${eventData.userIdentifier}`;
+      const userIdentifier = eventData.userIdentifier;
+      const readAt = eventData.readAt || eventData.timestamp || new Date().toISOString();
+
+      try {
+        const convResult = await this.weaviateClient.graphql
+          .get()
+          .withClassName('Conversation')
+          .withTenant(tenant)
+          .withFields('last_broadcast_id is_broadcasted')
+          .withWhere({ path: ['conversation_id'], operator: 'Equal', valueString: conversationId })
+          .withLimit(1)
+          .do();
+        const conv = convResult?.data?.Get?.Conversation?.[0];
+        if (conv?.is_broadcasted === true && conv?.last_broadcast_id) {
+          const { updateBroadcastRead } = require('./broadcast-update');
+          await updateBroadcastRead(conv.last_broadcast_id, String(userIdentifier));
+        }
+
+        await this.updateConversation(tenant, {
+          conversation_id: conversationId,
+          last_read_at: readAt
+        });
+        console.log(`✅ [Weaviate Consumer] Updated last_read_at for conversation ${conversationId}`);
+        return true; // ACK the event
+      } catch (error) {
+        console.error(`❌ [Weaviate Consumer] Error updating last_read_at for ${conversationId}:`, error);
+        return true; // ACK anyway - conversation might not exist yet
+      }
+    }
+
     if (!eventData.agentCode) {
       console.log(`⚠️  [Weaviate Consumer] Event missing agentCode, skipping (entryId: ${entryId}, eventType: ${eventData.eventType})`);
       return true; // Return true to ACK - we intentionally skip events without agentCode
@@ -504,6 +544,35 @@ class WeaviateConsumer {
 
     // Generate conversation_id from clientId + userIdentifier
     const conversationId = `${clientId}:${userIdentifier}`;
+
+    // For message:incoming, if isBroadcasted, update PlatformClientBroadcast counter.reply and target_activities
+    if (eventType === 'message:incoming') {
+      try {
+        const convResult = await this.weaviateClient.graphql
+          .get()
+          .withClassName('Conversation')
+          .withTenant(tenant)
+          .withFields('last_broadcast_id is_broadcasted')
+          .withWhere({ path: ['conversation_id'], operator: 'Equal', valueString: conversationId })
+          .withLimit(1)
+          .do();
+        const conv = convResult?.data?.Get?.Conversation?.[0];
+        if (conv?.is_broadcasted === true && conv?.last_broadcast_id) {
+          const content = this.extractFormattedContent(eventData, eventType);
+          let contents = (typeof content === 'string' ? (() => { try { return JSON.parse(content); } catch { return []; } })() : content) || [];
+          contents = contents.map(m => ({
+            messageType: m.type || m.messageType || 'text',
+            content: m.text || m.content || '',
+            mediaUrl: m.url || m.mediaUrl,
+            caption: m.caption
+          }));
+          const { updateBroadcastReply } = require('./broadcast-update');
+          await updateBroadcastReply(conv.last_broadcast_id, String(userIdentifier), contents);
+        }
+      } catch (err) {
+        console.warn('⚠️ [Weaviate Consumer] Failed to update broadcast reply:', err.message);
+      }
+    }
 
     // Generate UUIDs for Weaviate object IDs (must be UUID)
     const conversationUuid = generateUuid5
@@ -588,6 +657,7 @@ class WeaviateConsumer {
     const clientIdValue = eventData.clientId || null;
     const platformValue = eventData.platform || null;
 
+    const broadcastId = eventData.broadcastId || eventData.metadata?.broadcastId;
     await this.updateConversation(tenant, {
       conversation_id: conversationId,
       hashed_id: hashedId,
@@ -600,8 +670,14 @@ class WeaviateConsumer {
       last_sender_type: senderInfo.type,
       last_sender_id: senderInfo.id,
       last_sender_display_name: senderInfo.displayName,
-      participant_ids: participantIds
+      participant_ids: participantIds,
+      is_broadcasted: !!broadcastId
     });
+
+    // For agent:response only - call memoryInsertWorkflow asynchronously (non-blocking)
+    if (eventType === 'agent:response') {
+      this.callMemoryInsertWorkflowAsync(tenant, userIdentifier, eventData.clientId, lastEventContentString, eventData);
+    }
 
     return wasInserted !== false;
   }
@@ -706,6 +782,90 @@ class WeaviateConsumer {
    * @param {string} eventType - Event type (message:incoming, ai:response, or agent:response)
    * @returns {string} JSON stringified array of formatted messages
    */
+  /**
+   * Call Mastra memoryInsertWorkflow asynchronously (non-blocking) for agent:response events
+   * Converts formatted content to messages array and POSTs to memoryInsertWorkflow/start-async
+   */
+  callMemoryInsertWorkflowAsync(agentCode, userIdentifier, clientId, contentJson, eventData) {
+    const mastraEndpoint = process.env.MASTRA_ENDPOINT_WORKFLOW;
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!mastraEndpoint || !jwtSecret) {
+      console.log('⚠️ [Memory Insert] Skipped: MASTRA_ENDPOINT_WORKFLOW or JWT_SECRET not set');
+      return;
+    }
+
+    let messages = [];
+    try {
+      const items = typeof contentJson === 'string' ? JSON.parse(contentJson) : contentJson;
+      if (!Array.isArray(items) || items.length === 0) {
+        console.log('⚠️ [Memory Insert] Skipped: no messages to insert');
+        return;
+      }
+      const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+      for (const m of items) {
+        const type = (m.type || m.messageType || 'text').toLowerCase();
+        const url = m.url || m.mediaUrl || '';
+        const text = m.text || m.content || '';
+        let content;
+        if (mediaTypes.includes(type) && url) {
+          content = `${type}: ${url}`;
+        } else {
+          content = text || (url ? `${type}: ${url}` : '');
+        }
+        if (content) {
+          messages.push({ role: 'assistant', content });
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ [Memory Insert] Failed to parse content:', err.message);
+      return;
+    }
+
+    if (messages.length === 0) {
+      console.log('⚠️ [Memory Insert] Skipped: no valid messages after parsing');
+      return;
+    }
+
+    const resourceId = `${agentCode}:${userIdentifier}`;
+    const threadId = `${agentCode}:${userIdentifier}:whatsapp`;
+    const sender = eventData?.metadata?.sender || {};
+    const now = Math.floor(Date.now() / 1000);
+    const jwtPayload = {
+      identifier: sender.senderId || sender.id || `agent:${agentCode}`,
+      role: 'authenticated',
+      agent_metadata: { agent_code: agentCode, status: 'active' },
+      client_metadata: {
+        client_id: clientId || 'unknown',
+        client_name: 'WhatsApp Bot',
+        app_metadata: { provider: 'wa' }
+      },
+      user_metadata: sender,
+      iat: now,
+      exp: now + 3600
+    };
+
+    const jwt = require('jsonwebtoken');
+    const authToken = jwt.sign(jwtPayload, jwtSecret, { algorithm: 'HS256' });
+    const url = `${mastraEndpoint}/api/workflows/memoryInsertWorkflow/start-async`;
+    const body = { inputData: { messages, memory: { resourceId, threadId } } };
+
+    setImmediate(() => {
+      const axios = require('axios');
+      axios.post(url, body, {
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        timeout: 30000
+      })
+        .then((res) => {
+          const result = res.data?.result || res.data;
+          console.log(`✅ [Memory Insert] Success: status=${res.status}, result=${JSON.stringify(result)}`);
+        })
+        .catch((err) => {
+          const msg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+          console.warn(`⚠️ [Memory Insert] Failed: ${msg}`);
+        });
+    });
+  }
+
   extractFormattedContent(eventData, eventType) {
     try {
       if (eventType === 'ai:response' || eventType === 'agent:response') {
@@ -1146,6 +1306,16 @@ class WeaviateConsumer {
             ? updateData.last_attention 
             : JSON.stringify(updateData.last_attention);
         }
+      }
+      // Update last_read_at (user read receipt timestamp)
+      if (updateData.last_read_at) {
+        updateProperties.last_read_at = typeof updateData.last_read_at === 'string' 
+          ? updateData.last_read_at 
+          : new Date(updateData.last_read_at).toISOString();
+      }
+      // Update is_broadcasted (true when broadcast sent, false when non-read message event)
+      if ('is_broadcasted' in updateData) {
+        updateProperties.is_broadcasted = updateData.is_broadcasted === true;
       }
 
       // Update client_id and platform if they're missing (null) in the existing conversation

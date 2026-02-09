@@ -411,12 +411,13 @@ class OutgoingMessageConsumer {
       const sentMessageId = response.data?.messages?.[0]?.id || eventData.messageId || `wa-official-${Date.now()}`;
       console.log(`✅ [WA-Official Outgoing Consumer] Sent message to ${userIdentifier} via WA-Official API (messageId: ${sentMessageId})`);
 
+      const broadcastId = eventData.broadcastId || eventData.metadata?.broadcastId;
+
       // After sending, publish as agent:response event for Weaviate storage
       try {
         const { StreamProducer } = require('../../pubsub/client/producer.js');
         const producer = new StreamProducer();
         await producer.connect();
-        
         await producer.publishAgentResponse({
           clientId,
           platform: 'wa-official',
@@ -437,6 +438,7 @@ class OutgoingMessageConsumer {
           messageType: messageType,
           mediaUrl: mediaUrl || undefined,
           caption: caption || undefined,
+          ...(broadcastId && { broadcastId }),
           metadata: {
             source: 'api',
             postedBy: eventData.metadata?.postedBy || 'system',
@@ -444,11 +446,21 @@ class OutgoingMessageConsumer {
             messageId: sentMessageId || eventData.messageId,
             timestamp: new Date().toISOString(),
             // Include clientMessageId from original message:outgoing event for idempotency matching
-            clientMessageId: eventData.metadata?.clientMessageId || null
+            clientMessageId: eventData.metadata?.clientMessageId || null,
+            ...(broadcastId && { broadcastId })
           }
         });
       } catch (streamError) {
         console.warn('⚠️ [WA-Official Outgoing Consumer] Failed to publish agent:response for Weaviate (message was still sent):', streamError);
+      }
+
+      if (broadcastId) {
+        try {
+          const { updateBroadcastDelivered } = require('../utils/broadcast-update');
+          await updateBroadcastDelivered(broadcastId, userIdentifier);
+        } catch (err) {
+          console.warn('⚠️ [WA-Official Outgoing Consumer] Failed to update broadcast delivered:', err.message);
+        }
       }
 
     } catch (error) {

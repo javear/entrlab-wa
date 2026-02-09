@@ -229,7 +229,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status last_attention _additional { id }')
+          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status last_attention last_read_at last_broadcast_id last_broadcast_at last_broadcast_content is_broadcasted _additional { id }')
           .withWhere({
             path: ['participant_ids'],
             operator: 'ContainsAny',
@@ -324,7 +324,7 @@ export class WeaviateService {
           .get()
           .withClassName('Conversation')
           .withTenant(agentCode)
-          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status last_attention _additional { id }')
+          .withFields('conversation_id hashed_id client_id platform participant_ids created_at last_event_at last_event_type last_event_content last_sender_type last_sender_id last_sender_display_name status last_attention last_read_at last_broadcast_id last_broadcast_at last_broadcast_content is_broadcasted _additional { id }')
           .withLimit(limit + offset) // Get more to handle offset
           .withSort([{
             path: ['last_event_at'],
@@ -504,6 +504,83 @@ export class WeaviateService {
     } catch (error) {
       console.error('❌ Error getting conversation by id:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Update last broadcast fields on a conversation (optional, when broadcastId present in send APIs)
+   * @param agentCode - Tenant (agent code)
+   * @param conversationId - conversation_id format (clientId:userIdentifier) or hashed_id
+   * @param broadcastId - UUID of the broadcast
+   * @param content - Message content as array of objects [{ type, text, ... }]
+   */
+  async updateConversationLastBroadcast(
+    agentCode: string,
+    conversationId: string,
+    broadcastId: string,
+    content: Array<{ type: string; text?: string; [key: string]: any }>
+  ): Promise<void> {
+    if (!this.isInitialized || !this.client) return;
+    if (!agentCode || !broadcastId || !content?.length) return;
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(broadcastId)) return;
+
+    try {
+      let convUuid: string | null = null;
+      const isUuid = uuidRegex.test(conversationId);
+
+      if (isUuid) {
+        convUuid = conversationId;
+      } else {
+        const result = await this.client.graphql
+          .get()
+          .withClassName('Conversation')
+          .withTenant(agentCode)
+          .withFields('_additional { id }')
+          .withWhere({
+            path: ['hashed_id'],
+            operator: 'Equal',
+            valueString: conversationId
+          })
+          .withLimit(1)
+          .do();
+        convUuid = result?.data?.Get?.Conversation?.[0]?._additional?.id ?? null;
+        if (!convUuid && conversationId.includes(':')) {
+          const convIdResult = await this.client.graphql
+            .get()
+            .withClassName('Conversation')
+            .withTenant(agentCode)
+            .withFields('_additional { id }')
+            .withWhere({
+              path: ['conversation_id'],
+              operator: 'Equal',
+              valueString: conversationId
+            })
+            .withLimit(1)
+            .do();
+          convUuid = convIdResult?.data?.Get?.Conversation?.[0]?._additional?.id ?? null;
+        }
+      }
+      if (!convUuid) return;
+
+      const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
+      const broadcastAt = new Date().toISOString();
+
+      await this.client.data
+        .merger()
+        .withId(convUuid)
+        .withClassName('Conversation')
+        .withTenant(agentCode)
+        .withProperties({
+          last_broadcast_id: broadcastId,
+          last_broadcast_at: broadcastAt,
+          last_broadcast_content: contentStr,
+          is_broadcasted: true
+        })
+        .do();
+    } catch (error) {
+      console.warn('⚠️ Failed to update conversation lastBroadcast:', error);
     }
   }
 

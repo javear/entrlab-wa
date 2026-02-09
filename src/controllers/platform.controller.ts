@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { WPPConnectWhatsAppService } from '../services/whatsapp.service';
 import { Environment } from '../types';
 import mongoose, { Document, Schema } from 'mongoose';
+import { randomUUID } from 'crypto';
 import { encryptWithVault, decryptWithVault } from '../utils/vault';
 import crypto from 'crypto';
 import { WeaviateService } from '../services/weaviate.service';
@@ -339,6 +340,73 @@ try {
   PlatformClientAgentSchema.index({ phone_number_id: 1, platform: 1, isActive: 1 }); // Index for querying by phone_number_id
 
   PlatformClientAgent = mongoose.model<IPlatformClientAgent>('PlatformClientAgent', PlatformClientAgentSchema);
+}
+
+// ============================================
+// Platform Client Broadcast Model
+// ============================================
+
+interface ITargetActivityEvent {
+  type: string;
+  createdAt: Date;
+  contents: Array<{ messageType: string; content?: string; mediaUrl?: string; caption?: string }>;
+}
+
+interface ITargetActivity {
+  userIdentifier: string;
+  events: ITargetActivityEvent[];
+}
+
+interface IPlatformClientBroadcast extends Document {
+  broadcast_uuid: string;
+  clientId: string;
+  agentCode: string;
+  counter: {
+    recipients_total: number;
+    delivered: number;
+    read: number;
+    reply: number;
+  };
+  target_activities: ITargetActivity[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+let PlatformClientBroadcast: mongoose.Model<IPlatformClientBroadcast>;
+try {
+  PlatformClientBroadcast = mongoose.model<IPlatformClientBroadcast>('PlatformClientBroadcast');
+} catch {
+  const PlatformClientBroadcastSchema = new Schema<IPlatformClientBroadcast>(
+    {
+      broadcast_uuid: { type: String, required: true, unique: true },
+      clientId: { type: String, required: true },
+      agentCode: { type: String, required: true },
+      counter: {
+        recipients_total: { type: Number, default: 0 },
+        delivered: { type: Number, default: 0 },
+        read: { type: Number, default: 0 },
+        reply: { type: Number, default: 0 }
+      },
+      target_activities: [{
+        userIdentifier: { type: String, required: true },
+        events: [{
+          type: { type: String, required: true },
+          createdAt: { type: Date, default: Date.now },
+          contents: [{
+            messageType: { type: String },
+            content: { type: String },
+            mediaUrl: { type: String },
+            caption: { type: String }
+          }]
+        }]
+      }]
+    },
+    { timestamps: true }
+  );
+  PlatformClientBroadcastSchema.index({ broadcast_uuid: 1 });
+  PlatformClientBroadcastSchema.index({ clientId: 1, createdAt: -1 });
+  PlatformClientBroadcastSchema.index({ agentCode: 1, createdAt: -1 });
+  PlatformClientBroadcast = mongoose.model<IPlatformClientBroadcast>('PlatformClientBroadcast', PlatformClientBroadcastSchema);
 }
 
 // Also extend the existing ClientAgent model
@@ -1936,7 +2004,7 @@ export class PlatformController {
    */
   async broadcastMessages(req: Request, res: Response): Promise<void> {
     try {
-      const { batch, client, targets, startIn, startAt } = req.body;
+      const { batch, client, targets, messages, startIn, startAt } = req.body;
 
       // Validate request body
       if (!batch || !client || !client.clientId || !targets || !Array.isArray(targets) || targets.length === 0) {
@@ -2080,6 +2148,41 @@ export class PlatformController {
 
       const authToken = jwt.sign(jwtPayload, jwtSecret, { algorithm: 'HS256' });
 
+      const broadcast_uuid = randomUUID();
+
+      const target_activities: ITargetActivity[] = (targets as any[]).map((t: any) => {
+        const targetMessages = t.messages || [];
+        const contents = Array.isArray(targetMessages)
+          ? targetMessages.map((m: any) => ({
+              messageType: m.messageType || 'text',
+              content: m.content,
+              mediaUrl: m.mediaUrl,
+              caption: m.caption
+            }))
+          : [];
+        return {
+          userIdentifier: t.userIdentifier || t.phoneNumber || t.phone || String(t),
+          events: [{
+            type: 'message',
+            createdAt: new Date(),
+            contents
+          }]
+        };
+      });
+
+      await PlatformClientBroadcast.create({
+        broadcast_uuid,
+        clientId: client.clientId,
+        agentCode,
+        counter: {
+          recipients_total: targets.length,
+          delivered: 0,
+          read: 0,
+          reply: 0
+        },
+        target_activities
+      });
+
       // Prepare request body for Mastra workflow
       const requestBody: any = {
         inputData: {
@@ -2090,7 +2193,8 @@ export class PlatformController {
             agentCode: agentCode,
             sender: sender
           },
-          targets: targets
+          targets: targets,
+          broadcastId: broadcast_uuid
         }
       };
 

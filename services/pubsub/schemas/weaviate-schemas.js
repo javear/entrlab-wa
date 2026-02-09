@@ -118,6 +118,36 @@ const CONVERSATION_SCHEMA = {
       indexFilterable: false
     },
     {
+      name: 'last_read_at',
+      dataType: ['date'],
+      description: 'Timestamp when the user last read messages in this conversation',
+      indexFilterable: false
+    },
+    {
+      name: 'last_broadcast_id',
+      dataType: ['string'],
+      description: 'UUID of the last broadcast sent to this conversation',
+      indexFilterable: false
+    },
+    {
+      name: 'last_broadcast_at',
+      dataType: ['date'],
+      description: 'Timestamp when the last broadcast was sent to this conversation',
+      indexFilterable: false
+    },
+    {
+      name: 'last_broadcast_content',
+      dataType: ['text'],
+      description: 'Content of the last broadcast as JSON array (e.g., [{"type":"text","text":"Hello"}])',
+      indexFilterable: false
+    },
+    {
+      name: 'is_broadcasted',
+      dataType: ['boolean'],
+      description: 'True when last message was a broadcast; false when any non-read message event (incoming, ai, agent) is sent',
+      indexFilterable: false
+    },
+    {
       name: 'metadata',
       dataType: ['text'],
       description: 'Additional metadata about the conversation (stored as JSON string for flexibility)'
@@ -298,8 +328,80 @@ async function initializeSchemas(client) {
             .do();
           console.log('✅ Successfully added last_attention field to Conversation schema');
         }
+
+        if (!conversationProperties.includes('last_read_at')) {
+          console.log('➕ Adding last_read_at field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'last_read_at',
+              dataType: ['date'],
+              description: 'Timestamp when the user last read messages in this conversation',
+              indexFilterable: false
+            })
+            .do();
+          console.log('✅ Successfully added last_read_at field to Conversation schema');
+        }
+
+        if (!conversationProperties.includes('last_broadcast_id')) {
+          console.log('➕ Adding last_broadcast_id field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'last_broadcast_id',
+              dataType: ['string'],
+              description: 'UUID of the last broadcast sent to this conversation',
+              indexFilterable: false
+            })
+            .do();
+          console.log('✅ Successfully added last_broadcast_id field to Conversation schema');
+        }
+        if (!conversationProperties.includes('last_broadcast_at')) {
+          console.log('➕ Adding last_broadcast_at field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'last_broadcast_at',
+              dataType: ['date'],
+              description: 'Timestamp when the last broadcast was sent to this conversation',
+              indexFilterable: false
+            })
+            .do();
+          console.log('✅ Successfully added last_broadcast_at field to Conversation schema');
+        }
+        if (!conversationProperties.includes('last_broadcast_content')) {
+          console.log('➕ Adding last_broadcast_content field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'last_broadcast_content',
+              dataType: ['text'],
+              description: 'Content of the last broadcast as JSON array (e.g., [{"type":"text","text":"Hello"}])',
+              indexFilterable: false
+            })
+            .do();
+          console.log('✅ Successfully added last_broadcast_content field to Conversation schema');
+        }
+        if (!conversationProperties.includes('is_broadcasted')) {
+          console.log('➕ Adding is_broadcasted field to existing Conversation schema...');
+          await client.schema
+            .propertyCreator()
+            .withClassName('Conversation')
+            .withProperty({
+              name: 'is_broadcasted',
+              dataType: ['boolean'],
+              description: 'True when last message was a broadcast; false when any non-read message event is sent',
+              indexFilterable: false
+            })
+            .do();
+          console.log('✅ Successfully added is_broadcasted field to Conversation schema');
+        }
       } catch (error) {
-        console.warn('⚠️  Could not check/add hashed_id or last_attention property:', error.message);
+        console.warn('⚠️  Could not check/add schema properties:', error.message);
       }
     }
 

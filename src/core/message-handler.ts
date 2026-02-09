@@ -89,6 +89,33 @@ export class WPPConnectMessageHandler {
   }
 
   /**
+   * Handle user read receipt - publishes message:read to stream for Weaviate lastReadAt update
+   * Called when user reads our messages (WPPConnect onAck, WA-Official status webhook)
+   */
+  public async handleUserReadReceipt(clientId: string, userIdentifier: string, readAt?: string): Promise<void> {
+    const phoneNumber = userIdentifier.replace(/@.*$/, '');
+    if (!phoneNumber) return;
+
+    try {
+      const agentCode = await this.whatsappService.getAgentForUser(clientId, phoneNumber, 'wpp');
+      if (!agentCode) return;
+
+      if (!producerInitialized) initializeStreamProducer();
+      if (!streamProducer) return;
+
+      await streamProducer.publishMessageRead({
+        clientId,
+        platform: 'wpp',
+        userIdentifier: phoneNumber,
+        agentCode,
+        readAt: readAt || new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.warn(`⚠️ [${clientId}] Failed to publish message:read:`, err.message);
+    }
+  }
+
+  /**
    * Get stored full sender ID (with correct suffix like @lid, @c.us, etc.)
    * Used by outgoing message consumer to send messages with correct format
    */

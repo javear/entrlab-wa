@@ -197,15 +197,15 @@ class WhatsAppWebhookController {
 
       // Process webhook events
       if (body.object === 'whatsapp_business_account') {
-        body.entry?.forEach((entry) => {
-          entry.changes?.forEach((change) => {
+        for (const entry of (body.entry || [])) {
+          for (const change of (entry.changes || [])) {
             // Meta can send status updates in 'messages' field with 'statuses' array
             // or in 'message_status' field. Check for statuses first.
             if (change.field === 'messages') {
               // Check if this is actually a status update (has statuses array) or incoming message (has messages array)
               if (change.value?.statuses && Array.isArray(change.value.statuses)) {
                 // Status update sent via messages field
-                this.handleStatusChange(clientId, change.value);
+                await this.handleStatusChange(clientId, change.value);
               } else if (change.value?.messages && Array.isArray(change.value.messages)) {
                 // Actual incoming message
                 this.handleMessageChange(clientId, change.value);
@@ -214,10 +214,10 @@ class WhatsAppWebhookController {
               }
             } else if (change.field === 'message_status') {
               // Status update in dedicated message_status field
-              this.handleStatusChange(clientId, change.value);
+              await this.handleStatusChange(clientId, change.value);
             }
-          });
-        });
+          }
+        }
       }
     } catch (error) {
       console.error('❌ Webhook handling error:', error);
@@ -261,29 +261,42 @@ class WhatsAppWebhookController {
 
   /**
    * Handle delivery/read status updates
+   * When status is 'read', produces message:read event to stream for Weaviate lastReadAt update
    */
-  handleStatusChange(clientId, value) {
-    // Meta sends statuses as an array in value.statuses
+  async handleStatusChange(clientId, value) {
     const statuses = value.statuses || [];
-    
+
     if (statuses.length > 0) {
-      statuses.forEach((status) => {
-        // Only log failed statuses, other statuses are too verbose
+      for (const status of statuses) {
         if (status.status === 'failed') {
-          console.log(`❌ [${clientId}] Message failed: ${status.id.substring(0, 20)}... (recipient: ${status.recipient_id})`);
-          if (status.errors && status.errors.length > 0) {
-            status.errors.forEach((error) => {
-              console.error(`   Error: ${error.code} - ${error.title || error.message}`);
-            });
+          console.log(`❌ [${clientId}] Message failed: ${status.id?.substring(0, 20) || 'unknown'}... (recipient: ${status.recipient_id})`);
+          if (status.errors?.length > 0) {
+            status.errors.forEach((err) => console.error(`   Error: ${err.code} - ${err.title || err.message}`));
           }
         }
-        // Only log status summary for non-failed statuses (read, delivered, sent)
-        // Uncomment if you need to see all status updates:
-        // console.log(`📊 [${clientId}] ${status.status}: ${status.id.substring(0, 20)}...`);
-      });
+        // When user reads our message, produce message:read for Weaviate lastReadAt update
+        if (status.status === 'read' && status.recipient_id) {
+          try {
+            const agentCode = await this.messageHandler.getAgentForUser(clientId, status.recipient_id);
+            if (agentCode && (process.env.VALKEY_HOST || process.env.REDIS_HOST)) {
+              const { StreamProducer } = require('../../pubsub/client/producer');
+              const producer = new StreamProducer();
+              await producer.connect();
+              const readAt = status.timestamp ? new Date(parseInt(status.timestamp) * 1000).toISOString() : new Date().toISOString();
+              await producer.publishMessageRead({
+                clientId,
+                platform: 'wa-official',
+                userIdentifier: status.recipient_id,
+                agentCode,
+                readAt
+              });
+            }
+          } catch (err) {
+            console.warn(`⚠️ [${clientId}] Failed to publish message:read:`, err.message);
+          }
+        }
+      }
     }
-    // Handle status updates (sent, delivered, read, failed)
-    // Note: Status updates are informational only - no reply needed
   }
 
 

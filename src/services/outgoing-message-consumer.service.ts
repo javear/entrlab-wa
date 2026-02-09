@@ -472,13 +472,14 @@ export class OutgoingMessageConsumerService {
 
         console.log(`✅ [Outgoing Message Consumer] Sent message to ${userIdentifier} via WPP client ${clientId} (messageId: ${messageId})`);
 
+        const broadcastId = eventData.broadcastId || eventData.metadata?.broadcastId;
+
         // After sending, publish as ai:response event for Weaviate storage
         // This ensures the message appears in chat history
         try {
           const { StreamProducer } = require('../../services/pubsub/client/producer');
           const producer = new StreamProducer();
           await producer.connect();
-          
           await producer.publishAgentResponse({
             clientId,
             platform: 'wpp',
@@ -499,6 +500,7 @@ export class OutgoingMessageConsumerService {
             messageType: messageType,
             mediaUrl: mediaUrl || undefined,
             caption: caption || undefined,
+            ...(broadcastId && { broadcastId }),
             metadata: {
               source: 'api',
               postedBy: eventData.metadata?.postedBy || 'system',
@@ -506,11 +508,21 @@ export class OutgoingMessageConsumerService {
               messageId: messageId || eventData.messageId,
               timestamp: new Date().toISOString(),
               // Include clientMessageId from original message:outgoing event for idempotency matching
-              clientMessageId: eventData.metadata?.clientMessageId || null
+              clientMessageId: eventData.metadata?.clientMessageId || null,
+              ...(broadcastId && { broadcastId })
             }
           });
         } catch (streamError: any) {
           console.warn('⚠️ [Outgoing Message Consumer] Failed to publish agent:response for Weaviate (message was still sent):', streamError);
+        }
+
+        if (broadcastId) {
+          try {
+            const { updateBroadcastDelivered } = await import('../utils/broadcast-update');
+            await updateBroadcastDelivered(broadcastId, userIdentifier);
+          } catch (err: any) {
+            console.warn('⚠️ [Outgoing Message Consumer] Failed to update broadcast delivered:', err.message);
+          }
         }
 
       } else if (platform === 'wa-official') {

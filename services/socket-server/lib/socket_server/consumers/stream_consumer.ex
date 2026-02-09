@@ -258,7 +258,8 @@ defmodule SocketServer.Consumers.StreamConsumer do
       event_type = safe_get(data, "eventType") || safe_get(data, "event_type")
       
       # Skip message:outgoing events (internal routing events)
-      if event_type == "message:outgoing" do
+      # Skip message:read - only consumed by Weaviate for lastReadAt update
+      if event_type == "message:outgoing" or event_type == "message:read" do
         # ACK and skip
         acknowledge_message(state, entry_id)
       else

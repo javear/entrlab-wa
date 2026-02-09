@@ -270,6 +270,9 @@ export class WPPConnectWhatsAppBotApp {
     this.whatsappService.addMessageHandler(async (clientId: string, message: any) => {
       await this.messageHandler.handleIncomingMessage(clientId, message);
     });
+    this.whatsappService.addReadReceiptHandler(async (clientId: string, userIdentifier: string, readAt: string) => {
+      await this.messageHandler.handleUserReadReceipt(clientId, userIdentifier, readAt);
+    });
   }
 
   private setupMemoryOptimization(): void {

@@ -151,6 +151,17 @@ export class ChatController {
           participantIds: conv.participant_ids || [],
           createdAt: conv.created_at,
           lastEventAt: conv.last_event_at,
+          lastReadAt: conv.last_read_at || null,
+          lastBroadcastId: conv.last_broadcast_id || null,
+          lastBroadcastAt: conv.last_broadcast_at || null,
+          isBroadcasted: conv.is_broadcasted === true,
+          lastBroadcastContent: (() => {
+            try {
+              return conv.last_broadcast_content ? JSON.parse(conv.last_broadcast_content) : null;
+            } catch {
+              return null;
+            }
+          })(),
           lastEventType: conv.last_event_type,
           lastEventContent: conv.last_event_content ? JSON.parse(conv.last_event_content) : null,
           lastSenderType: conv.last_sender_type,
@@ -283,7 +294,7 @@ export class ChatController {
   async postChatMessage(req: Request, res: Response): Promise<void> {
     try {
       const { conversationId } = req.params;
-      const { content, messageType = 'text', mediaUrl, caption } = req.body;
+      const { content, messageType = 'text', mediaUrl, caption, broadcastId } = req.body;
 
       if (!conversationId) {
         res.status(400).json({
@@ -312,6 +323,17 @@ export class ChatController {
           error: `mediaUrl is required for media message type '${messageType}'`
         });
         return;
+      }
+
+      if (broadcastId !== undefined && broadcastId !== null && broadcastId !== '') {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (typeof broadcastId !== 'string' || !uuidRegex.test(broadcastId)) {
+          res.status(400).json({
+            success: false,
+            error: 'broadcastId must be a valid UUID when provided'
+          });
+          return;
+        }
       }
 
       // Extract agentCode from JWT token (tenant for Weaviate) - REQUIRED
@@ -438,7 +460,8 @@ export class ChatController {
             postedBy: jwtUser.agentCode || 'system',
             sender: senderInfo, // Include sender information from JWT
             conversationId: conversationId, // hashed_id (universal ID) for reference/tracking
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            ...(broadcastId && { broadcastId })
           }
         };
         
@@ -453,6 +476,18 @@ export class ChatController {
         const entryId = await producer.publishOutgoingMessage(messageData);
 
         console.log(`✅ Published outgoing message to stream: ${entryId} (conversationId: ${conversationId})`);
+
+        if (broadcastId && conversation?.conversation_id) {
+          const broadcastContent = isMediaType
+            ? [{ type: messageType, url: mediaUrl, text: caption || content || '' }]
+            : [{ type: 'text', text: content || '' }];
+          await this.weaviateService.updateConversationLastBroadcast(
+            finalAgentCode,
+            conversationId,
+            broadcastId,
+            broadcastContent
+          );
+        }
 
         // Return success response immediately
         // The message will be sent by the consumer (WPP/WA-Official)
@@ -511,7 +546,7 @@ export class ChatController {
   async postDirectBatchMessage(req: Request, res: Response): Promise<void> {
     try {
       const { platform } = req.params;
-      const { userIdentifier, messages } = req.body;
+      const { userIdentifier, messages, broadcastId } = req.body;
 
       // Validate platform
       if (!platform || !['wpp', 'wa-official'].includes(platform)) {
@@ -589,6 +624,17 @@ export class ChatController {
           res.status(400).json({
             success: false,
             error: `messages[${i}].mediaUrl is required for media message type '${msg.messageType}'`
+          });
+          return;
+        }
+      }
+
+      if (broadcastId !== undefined && broadcastId !== null && broadcastId !== '') {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (typeof broadcastId !== 'string' || !uuidRegex.test(broadcastId)) {
+          res.status(400).json({
+            success: false,
+            error: 'broadcastId must be a valid UUID when provided'
           });
           return;
         }
@@ -693,7 +739,8 @@ export class ChatController {
               conversationId: hashedId,
               timestamp: new Date().toISOString(),
               batchIndex: i, // Track position in batch
-              batchTotal: messages.length // Total messages in batch
+              batchTotal: messages.length, // Total messages in batch
+              ...(broadcastId && { broadcastId })
             }
           };
           
@@ -736,6 +783,22 @@ export class ChatController {
           errors
         });
         return;
+      }
+
+      if (broadcastId && hashedId) {
+        const broadcastContent = messages.map((msg: any) => {
+          const mediaTypes = ['image', 'video', 'audio', 'file', 'document', 'sticker'];
+          const isMedia = mediaTypes.includes(msg.messageType);
+          return isMedia
+            ? { type: msg.messageType, url: msg.mediaUrl, text: msg.caption || msg.content || '' }
+            : { type: 'text', text: msg.content || '' };
+        });
+        await this.weaviateService.updateConversationLastBroadcast(
+          finalAgentCode,
+          hashedId,
+          broadcastId,
+          broadcastContent
+        );
       }
 
       res.status(201).json({
@@ -834,6 +897,82 @@ export class ChatController {
       res.status(500).json({
         success: false,
         error: 'Failed to get contacts',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Get broadcast data from MongoDB
+   * GET /api/v1/platform/chat/broadcasts?limit=20&offset=0
+   *
+   * Filtered by agentCode from JWT.
+   * Returns: id, counter, target_activities
+   */
+  async getBroadcasts(req: Request, res: Response): Promise<void> {
+    try {
+      const limit = parseInt(req.query.limit as string) || 20;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      if (limit < 1 || limit > 100) {
+        res.status(400).json({
+          success: false,
+          error: 'limit must be between 1 and 100'
+        });
+        return;
+      }
+
+      if (offset < 0) {
+        res.status(400).json({
+          success: false,
+          error: 'offset must be >= 0'
+        });
+        return;
+      }
+
+      const agentCode = (req as any).user?.agentCode;
+      if (!agentCode) {
+        res.status(400).json({
+          success: false,
+          error: 'agentCode is required in JWT token'
+        });
+        return;
+      }
+
+      const PlatformClientBroadcast = mongoose.model('PlatformClientBroadcast');
+      const [broadcasts, total] = await Promise.all([
+        PlatformClientBroadcast.find({ agentCode })
+          .sort({ createdAt: -1 })
+          .skip(offset)
+          .limit(limit)
+          .lean(),
+        PlatformClientBroadcast.countDocuments({ agentCode })
+      ]);
+
+      res.json({
+        success: true,
+        broadcasts: broadcasts.map((b: any) => ({
+          id: b.broadcast_uuid,
+          counter: b.counter || {
+            recipients_total: 0,
+            delivered: 0,
+            read: 0,
+            reply: 0
+          },
+          target_activities: b.target_activities || []
+        })),
+        pagination: {
+          total,
+          limit,
+          offset,
+          hasMore: offset + broadcasts.length < total
+        }
+      });
+    } catch (error) {
+      console.error('❌ Error getting broadcasts:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to get broadcasts',
         details: error instanceof Error ? error.message : 'Unknown error'
       });
     }
